@@ -1,0 +1,676 @@
+---
+title: "Dashboard Wallet"
+---
+
+```{r, echo = FALSE}
+title     <- '[Wallet]: Dashboard Wallet'
+
+keywords  <- 'wallet, downloads, descargas, users, usuarios, active, activos, cards, tarjetas, HCE, virtual, sticker, compras, installments, financiacion, transacciones'  
+```
+
+```{r, echo=FALSE}
+suppressMessages(library(DBI))
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(lattice))
+suppressMessages(library(reshape))
+suppressMessages(library(plyr))
+
+options(warn=-1, scipen=3, width=150)
+source('~/bda_clarity/tools/warehouse_basics.R') ;
+source('~/bda_clarity/tools/write.hive.R') ;
+```
+
+
+NEW USERS TXC
+```{r eval=FALSE, echo=TRUE, cache=TRUE}
+
+#todos
+select
+concat(year(first_fec_soli_trn),
+case when month(first_fec_soli_trn)>=10 then month(first_fec_soli_trn)
+else concat(0,month(first_fec_soli_trn))
+end) as yyyymm,
+count(distinct cod_pers_trs) as count_distinct_cod_pers_trs,
+count(*) as count_distinct_cod_pers_trs
+from
+(
+ select
+ cod_pers_trs,
+ min(fec_soli_trn) as first_fec_soli_trn
+ from da_martalamela.wallet_cod_serv_dv
+ where cod_pers_trs not like '%@%'
+ group by cod_pers_trs
+) pp
+group by concat(year(first_fec_soli_trn),
+case when month(first_fec_soli_trn)>=10 then month(first_fec_soli_trn)
+else concat(0,month(first_fec_soli_trn))
+end)
+order by yyyymm;
+
+#empleados
+select
+concat(year(first_fec_soli_trn),
+case when month(first_fec_soli_trn)>=10 then month(first_fec_soli_trn)
+else concat(0,month(first_fec_soli_trn))
+end) as yyyymm,
+count(distinct cod_pers_trs) as count_distinct_cod_pers_trs,
+count(*) as count_all,
+count(case when clientes_empleados_empleado_bbva=1 then cod_pers_trs else null end) as count_empleados
+from
+(
+ 
+  select cod_pers_trs, first_fec_soli_trn, clientes_empleados_empleado_bbva
+  from
+  (
+   select
+  cod_pers_trs,
+  min(fec_soli_trn) as first_fec_soli_trn
+  from da_martalamela.wallet_cod_serv_dv
+  where cod_pers_trs not like '%@%'
+  group by cod_pers_trs
+   ) a
+  left join
+  (select distinct cod_persona, clientes_empleados_empleado_bbva
+   from clarity_attributes.big_big_table) b
+  on cast(a.cod_pers_trs as int) = cast(b.cod_persona as int)
+) pp
+group by concat(year(first_fec_soli_trn),
+case when month(first_fec_soli_trn)>=10 then month(first_fec_soli_trn)
+else concat(0,month(first_fec_soli_trn))
+end)
+order by yyyymm;
+
+
+#edad 
+select
+concat(year(first_fec_soli_trn),
+case when month(first_fec_soli_trn)>=10 then month(first_fec_soli_trn)
+else concat(0,month(first_fec_soli_trn))
+end) as yyyymm,
+count(distinct cod_pers_trs) as count_distinct_cod_pers_trs,
+count(*) as count_all,
+count(case when edad_edad>=18 then cod_pers_trs else null end) as count_mayores_18,
+count(case when edad_edad>=18 and edad_edad<=64 then cod_pers_trs else null end) as count_mayores_18_menores_64
+from
+(
+ 
+  select cod_pers_trs, first_fec_soli_trn, edad_edad
+  from
+  (
+   select
+  cod_pers_trs,
+  min(fec_soli_trn) as first_fec_soli_trn
+  from da_martalamela.wallet_cod_serv_dv
+  where cod_pers_trs not like '%@%'
+  group by cod_pers_trs
+   ) a
+  left join
+  (select distinct cod_persona, edad_edad
+   from clarity_attributes.big_big_table) b
+  on cast(a.cod_pers_trs as int) = cast(b.cod_persona as int)
+) pp
+group by concat(year(first_fec_soli_trn),
+case when month(first_fec_soli_trn)>=10 then month(first_fec_soli_trn)
+else concat(0,month(first_fec_soli_trn))
+end)
+order by yyyymm;
+
+
+# filtros sobre txc 101, 102
+# cod_deve_trn like '%0312%'
+# cod_eve_trn like '%0127%'
+# cod_eve_trn like '%0125%'
+# cod_trnfims like '%00000001%'
+# cod_trnfims like '%1427%'
+# cod_trnfims like '%1490%'
+# cod_trnfims like '%KYGGT016%'
+# cod_trnfims like '%KGPETN44%'
+select
+concat(year(first_fec_soli_trn),
+case when month(first_fec_soli_trn)>=10 then month(first_fec_soli_trn)
+else concat(0,month(first_fec_soli_trn))
+end) as yyyymm,
+count(distinct cod_pers_trs) as count_distinct_cod_pers_trs,
+count(*) as count_all
+from
+( 
+  select
+  cod_pers_trs,
+  min(fec_soli_trn) as first_fec_soli_trn
+  from da_martalamela.wallet_cod_serv_dv
+  where cod_pers_trs not like '%@%'
+  and cod_eve_trn like '%0125%'
+  group by cod_pers_trs
+) pp
+group by concat(year(first_fec_soli_trn),
+case when month(first_fec_soli_trn)>=10 then month(first_fec_soli_trn)
+else concat(0,month(first_fec_soli_trn))
+end)
+order by yyyymm;
+
+
+# new users + acumulado para cod_trnfims like '%00000001%'
+# case when substr(yyyymm,1,4)='2013' then null else (rank() over (ORDER BY yyyymm ASC) - 2) end as num_partition,
+create table da_martalamela.wallet_new_users_month as
+SELECT yyyymm,
+rank() over (ORDER BY yyyymm ASC) as num_partition,
+SUM(count_distinct_cod_pers_trs) OVER (PARTITION BY yyyymm ORDER BY yyyymm) as new_users,
+SUM(count_distinct_cod_pers_trs) OVER (PARTITION BY over_partition ORDER BY yyyymm) as new_users_acum
+FROM
+(
+  select
+  1 as over_partition,
+concat(year(first_fec_soli_trn),
+case when month(first_fec_soli_trn)>=10 then month(first_fec_soli_trn)
+else concat(0,month(first_fec_soli_trn))
+end) as yyyymm,
+count(distinct cod_pers_trs) as count_distinct_cod_pers_trs,
+count(*) as count_all
+from
+( 
+  select
+  cod_pers_trs,
+  min(fec_soli_trn) as first_fec_soli_trn
+  from da_martalamela.wallet_cod_serv_dv
+  where cod_pers_trs not like '%@%'
+  and cod_trnfims like '%00000001%'
+  group by cod_pers_trs
+) pp
+group by concat(year(first_fec_soli_trn),
+case when month(first_fec_soli_trn)>=10 then month(first_fec_soli_trn)
+else concat(0,month(first_fec_soli_trn))
+end)
+order by yyyymm
+) pp
+;
+
+
+# formato yyyymmdd como partition_id
+create table da_martalamela.wallet_new_users_month as
+SELECT yyyymmdd,
+rank() over (ORDER BY yyyymmdd ASC) as num_partition,
+SUM(count_distinct_cod_pers_trs) OVER (PARTITION BY yyyymmdd ORDER BY yyyymmdd) as new_users,
+SUM(count_distinct_cod_pers_trs) OVER (PARTITION BY over_partition ORDER BY yyyymmdd) as new_users_acum
+FROM
+(
+  select
+  1 as over_partition,
+  concat(year(first_fec_soli_trn),
+  case when month(first_fec_soli_trn)>=10 then month(first_fec_soli_trn)
+  else concat(0,month(first_fec_soli_trn)) end,
+  case when month(first_fec_soli_trn)=2 then 28
+  when month(first_fec_soli_trn) in (1,3,5,7,8,10,12) then 31
+  else 30 end) as yyyymmdd,
+  count(distinct cod_pers_trs) as count_distinct_cod_pers_trs,
+  count(*) as count_all
+  from
+  ( 
+    select
+    cod_pers_trs,
+    min(fec_soli_trn) as first_fec_soli_trn
+    from da_martalamela.wallet_cod_serv_dv
+    where cod_pers_trs not like '%@%'
+    and cod_trnfims like '%00000001%'
+    group by cod_pers_trs
+  ) conexion
+  group by concat(year(first_fec_soli_trn),
+  case when month(first_fec_soli_trn)>=10 then month(first_fec_soli_trn)
+  else concat(0,month(first_fec_soli_trn)) end,
+  case when month(first_fec_soli_trn)=2 then 28
+  when month(first_fec_soli_trn) in (1,3,5,7,8,10,12) then 31
+  else 30 end)
+  order by yyyymmdd
+) auxiliar;
+
+```
+
+
+% ACTIVE USERS TXC
+```{r eval=FALSE, echo=TRUE, cache=TRUE}
+
+# tablón de clientes x mes
+select b.cod_pers_trs, a.partition_id
+from
+ (select distinct partition_id from da_martalamela.wallet_cod_serv_dv) a
+  join
+ (select distinct cod_pers_trs from da_martalamela.wallet_cod_serv_dv where cod_pers_trs not like '%@%' and cod_trnfims like '%00000001%') b
+;
+
+# tabla de conexiones de cliente y mes
+select
+cod_pers_trs,
+concat(year(fec_soli_trn),
+case when month(fec_soli_trn)>=10 then month(fec_soli_trn)
+else concat(0,month(fec_soli_trn))
+end) as yyyymm,
+1 as ind_conexion_wallet
+from da_martalamela.wallet_cod_serv_dv
+where cod_pers_trs not like '%@%'
+and cod_trnfims like '%00000001%'
+group by cod_pers_trs, concat(year(fec_soli_trn),
+                              case when month(fec_soli_trn)>=10 then month(fec_soli_trn) else concat(0,month(fec_soli_trn)) end)
+order by cod_pers_trs, yyyymm;
+
+select
+cod_pers_trs,
+concat(year(fec_soli_trn),
+case when month(fec_soli_trn)>=10 then month(fec_soli_trn)
+else concat(0,month(fec_soli_trn)) end,
+case when month(fec_soli_trn)=2 then 28
+when month(fec_soli_trn) in (1,3,5,7,8,10,12) then 31
+else 30 end) as yyyymmdd,
+1 as ind_conexion_wallet
+from da_martalamela.wallet_cod_serv_dv
+where cod_pers_trs not like '%@%'
+and cod_trnfims like '%00000001%'
+group by cod_pers_trs, concat(year(fec_soli_trn), case when month(fec_soli_trn)>=10 then month(fec_soli_trn) else concat(0,month(fec_soli_trn)) end, 
+                                                  case when month(fec_soli_trn)=2 then 28 when month(fec_soli_trn) in (1,3,5,7,8,10,12) then 31 else 30 end)
+order by cod_pers_trs, yyyymmdd;
+
+# combinación de ambas (1 si conexión en ese mes, 0 otro caso)
+create table da_martalamela.wallet_active_users_month as
+select tablon.cod_pers_trs,
+tablon.partition_id,
+tablon.num_partition,
+case when ind_conexion_wallet=1 then 1 else 0 end as ind_conexion_wallet
+from
+(
+  select b.cod_pers_trs, a.partition_id, a.num_partition
+  from
+  (select distinct partition_id, rank() over (ORDER BY partition_id ASC) as num_partition from da_martalamela.wallet_cod_serv_dv) a
+  join
+  (select distinct cod_pers_trs from da_martalamela.wallet_cod_serv_dv where cod_pers_trs not like '%@%' and cod_trnfims like '%00000001%') b
+) tablon
+left join
+(
+  select
+  cod_pers_trs,
+  concat(year(fec_soli_trn),
+  case when month(fec_soli_trn)>=10 then month(fec_soli_trn)
+  else concat(0,month(fec_soli_trn))
+  end) as yyyymm,
+  1 as ind_conexion_wallet
+  from da_martalamela.wallet_cod_serv_dv
+  where cod_pers_trs not like '%@%'
+  and cod_trnfims like '%00000001%'
+  group by cod_pers_trs, concat(year(fec_soli_trn),
+                                case when month(fec_soli_trn)>=10 then month(fec_soli_trn) else concat(0,month(fec_soli_trn)) end)
+ 
+) conexiones
+on (cast(tablon.cod_pers_trs as int)=cast(conexiones.cod_pers_trs as int) and cast(substr(tablon.partition_id,1,6) as int)=cast(conexiones.yyyymm as int))
+order by tablon.cod_pers_trs, tablon.partition_id;
+
+# con yyyymmdd
+create table IF NOT EXISTS da_martalamela.wallet_active_users_month as
+select tablon.cod_pers_trs,
+tablon.partition_id,
+tablon.num_partition,
+case when ind_conexion_wallet=1 then 1 else 0 end as ind_conexion_wallet
+from
+(
+  select b.cod_pers_trs, a.partition_id, a.num_partition
+  from
+  (select distinct partition_id, rank() over (ORDER BY partition_id ASC) as num_partition from da_martalamela.wallet_cod_serv_dv) a
+  join
+  (select distinct cod_pers_trs from da_martalamela.wallet_cod_serv_dv where cod_pers_trs not like '%@%' and cod_trnfims like '%00000001%') b
+) tablon
+left join
+(
+  select
+  cod_pers_trs,
+  concat(year(first_fec_soli_trn),
+  case when month(first_fec_soli_trn)>=10 then month(first_fec_soli_trn)
+  else concat(0,month(first_fec_soli_trn)) end,
+  case when month(first_fec_soli_trn)=2 then 28
+  when month(first_fec_soli_trn) in (1,3,5,7,8,10,12) then 31
+  else 30 end) as yyyymmdd,
+  1 as ind_conexion_wallet
+  from da_martalamela.wallet_cod_serv_dv
+  where cod_pers_trs not like '%@%'
+  and cod_trnfims like '%00000001%'
+  group by cod_pers_trs, concat(year(first_fec_soli_trn),
+  case when month(first_fec_soli_trn)>=10 then month(first_fec_soli_trn)
+  else concat(0,month(first_fec_soli_trn)) end,
+  case when month(first_fec_soli_trn)=2 then 28
+  when month(first_fec_soli_trn) in (1,3,5,7,8,10,12) then 31
+  else 30 end)
+) conexiones
+on (cast(tablon.cod_pers_trs as int)=cast(conexiones.cod_pers_trs as int) and cast(tablon.partition_id as int)=cast(conexiones.yyyymmdd as int))
+order by tablon.cod_pers_trs, tablon.partition_id;
+
+# comprobaciones
+select partition_id,num_partition, sum(ind_conexion_wallet) as num_conexiones
+from da_martalamela.wallet_active_users_month
+group by partition_id,num_partition
+order by partition_id,num_partition;
+
+# acumulamos por 3 meses
+create table da_martalamela.wallet_active_users_three_months as
+select mm.cod_pers_trs,
+mm.partition_id,
+mm.num_partition,
+mm.ind_conexion_wallet,
+case when (mm.ind_conexion_wallet + mm1.ind_conexion_wallet + mm2.ind_conexion_wallet)>0 then 1 else 0 end as ind_conexion_wallet_ult_3m
+from da_martalamela.wallet_active_users_month mm
+left join da_martalamela.wallet_active_users_month mm1
+on cast(mm.cod_pers_trs as int)=cast(mm1.cod_pers_trs as int) and mm.num_partition=(mm1.num_partition+1)
+left join da_martalamela.wallet_active_users_month mm2
+on cast(mm.cod_pers_trs as int)=cast(mm2.cod_pers_trs as int) and mm.num_partition=(mm2.num_partition+2);
+
+# suma del total de usuarios wallet mensual
+da_martalamela.wallet_new_users_month
+
+# cálculo del % de usuarios activos
+create table da_martalamela.wallet_new_users_active_month as
+select partition_id,
+sum_conexion_wallet,
+sum_conexion_wallet_ult_3m,
+new_users_acum,
+round(sum_conexion_wallet/new_users_acum*100,1) as pct_active_users_acum,
+round(sum_conexion_wallet_ult_3m/new_users_acum*100,1) as pct_active_users_acum_ult_3m,
+total_new_users,
+round(sum_conexion_wallet_ult_3m/total_new_users*100,1) as pct_active_users_total
+from
+(
+  select partition_id,
+  sum(ind_conexion_wallet) as sum_conexion_wallet,
+  sum(ind_conexion_wallet_ult_3m) as sum_conexion_wallet_ult_3m
+  from da_martalamela.wallet_active_users_three_months
+  group by partition_id
+) conexiones
+left join da_martalamela.wallet_new_users_month acum
+on cast(substr(conexiones.partition_id,1,6) as int)=cast(acum.yyyymm as int)
+join
+(
+  select sum(new_users) as total_new_users from da_martalamela.wallet_new_users_month
+) total
+order by partition_id;
+
+# con yyyymmdd
+create table IF NOT EXISTS da_martalamela.wallet_new_users_active_month as
+select partition_id,
+new_users_acum,
+sum_conexion_wallet,
+round(sum_conexion_wallet/new_users_acum*100,1) as pct_active_users_acum,
+sum_conexion_wallet_ult_3m,
+round(sum_conexion_wallet_ult_3m/new_users_acum*100,1) as pct_active_users_acum_ult_3m,
+total_new_users,
+round(sum_conexion_wallet_ult_3m/total_new_users*100,1) as pct_active_users_total
+from
+(
+  select partition_id,
+  sum(ind_conexion_wallet) as sum_conexion_wallet,
+  sum(ind_conexion_wallet_ult_3m) as sum_conexion_wallet_ult_3m
+  from da_martalamela.wallet_active_users_three_months
+  group by partition_id
+) conexiones
+left join da_martalamela.wallet_new_users_month acum
+on cast(conexiones.partition_id as int)=cast(acum.yyyymmdd as int)
+join
+(
+  select sum(new_users) as total_new_users from da_martalamela.wallet_new_users_month
+) total
+order by partition_id;
+
+# bolsa de usuarios activos wallet
+select cod_pers_trs
+from da_martalamela.wallet_active_users_three_months
+where cast(partition_id as int) = 20150331
+and ind_conexion_wallet_ult_3m = 1;
+
+```
+
+INSTALLMENTS
+```{r eval=FALSE, echo=TRUE, cache=TRUE}
+
+      select cod_trnfims,partition_id,  count(distinct cod_idcontra), count(distinct cod_pers_trs)
+      from da_martalamela.wallet_cod_serv_dv
+       where cod_trnfims like '%00001581%'
+      group by cod_trnfims,partition_id
+      order by partition_id
+   
+   
+      select cod_trnfims, partition_id,  count(distinct cod_idcontra), count(distinct cod_pers_trs), count(*), round(sum(imp_trans)/1000)
+      from da_martalamela.wallet_cod_serv_dv
+       where cod_trnfims like '%TCTFTL66%'
+       and cast(partition_id as int) >= 20140731
+      group by cod_trnfims,partition_id
+      order by partition_id;
+   
+   
+       select cod_trnfims,partition_id,  count(distinct cod_idcontra), count(distinct cod_pers_trs)
+      from da_martalamela.wallet_cod_serv_dv
+       where cod_trnfims like '%00001620%'
+      group by cod_trnfims,partition_id
+      order by partition_id;
+
+```
+
+
+MOVIMIENTOS CON TARJETA (AL REVÉS)
+```{r eval=FALSE, echo=TRUE, cache=TRUE}
+
+select yyyymm,
+count(distinct cod_idcontra) as distinct_idcontra
+from
+(
+select cod_idcontra,
+fec_altacto,
+fec_altatar,
+concat(year(fec_altacto),
+case
+when month(fec_altacto)>=10 then month(fec_altacto)
+else concat(0,month(fec_altacto))
+end) as yyyymm,
+cod_comprod
+from da_pro.datos_tarjetas_detalle_corp
+where (cod_comprod like '%3199%'
+or cod_comprod like '%8425%')
+and cast(partition_id as int) = 20150228
+and fec_altacto >= '2014-01-01'
+) a
+group by yyyymm
+order by yyyymm;
+
+select yyyymm,
+count(distinct cod_idcontra) as distinct_idcontra
+from
+(
+select cod_idcontra,
+fec_altacto,
+fec_altatar,
+concat(year(fec_altatar),
+case
+when month(fec_altatar)>=10 then month(fec_altatar)
+else concat(0,month(fec_altatar))
+end) as yyyymm,
+cod_comprod
+from da_pro.datos_tarjetas_detalle_corp
+where (cod_comprod like '%3199%'
+or cod_comprod like '%8425%')
+and cast(partition_id as int) = 20150228
+and fec_altatar >= '2014-01-01'
+) a
+group by yyyymm
+order by yyyymm;
+
+create table da_martalamela.wallet_movimientos_tarjetas_detalle_corp as
+select movim.*,tarjetas.*
+from da_pro.movimientos_tarjetas_detalle_corp movim
+left join
+(
+select cod_idcontra,
+fec_altacto,
+fec_altatar,
+concat(year(fec_altacto),
+case
+when month(fec_altacto)>=10 then month(fec_altacto)
+else concat(0,month(fec_altacto))
+end) as yyyymm,
+cod_comprod
+from da_pro.datos_tarjetas_detalle_corp
+where (cod_comprod like '%3199%'
+or cod_comprod like '%8425%')
+and cast(partition_id as int) = 20150228
+and fec_altacto >= '2014-01-01'
+) tarjetas
+on trim(movim.cod_idcontra) = trim(tarjetas.cod_idcontra);
+
+create table da_martalamela.wallet_movimientos_tarjetas_detalle_corp as
+select tarjetas.cod_comprod,movim.*
+from 
+(
+select trim(cod_idcontra) as cod_idcontra,
+cod_comprod
+from da_pro.datos_tarjetas_detalle_corp
+where (cod_comprod like '%3199%'
+or cod_comprod like '%8425%')
+and cast(partition_id as int) = 20150228
+and fec_altacto >= '2014-01-01'
+) tarjetas
+right join da_pro.movimientos_tarjetas_detalle_corp movim
+on trim(movim.cod_idcontra) = tarjetas.cod_idcontra
+where cod_comprod is not null;
+
+
+create table da_martalamela.wallet_movimientos_tarjetas_detalle_corp as
+select tarjetas.cod_comprod,movim.*
+from 
+(
+select trim(cod_idcontra) as cod_idcontra,
+cod_comprod
+from da_pro.datos_tarjetas_detalle_corp
+where (cod_comprod like '%3199%'
+or cod_comprod like '%8425%')
+and cast(partition_id as int) = 20150228
+) tarjetas
+join
+(select *
+ from da_pro.movimientos_tarjetas_detalle_corp
+where cast(partition_id as int) >= 20140731) movim
+on trim(movim.cod_idcontra) = tarjetas.cod_idcontra
+where cod_comprod is not null;
+
+#and fec_altacto >= '2014-01-01'
+
+select
+concat(year(fec_movimien),
+case
+when month(fec_movimien)>=10 then month(fec_movimien)
+else concat(0,month(fec_movimien))
+end) as yyyymm,
+count(distinct cod_idcontra) as count_distinct_cod_idcontra,
+sum(imp_mvimient) as sum_imp_mvimient,
+round(sum(imp_mvimient)/1000) as sum_imp_mvimient_k,
+sum(imp_mvimient)/count(distinct cod_idcontra) as avg_imp_mvimient,
+round(sum(imp_mvimient)/count(case when imp_mvimient>0 then cod_idcontra end),1) as avg_sum_imp_mvimient_positive
+from da_martalamela.wallet_movimientos_tarjetas_detalle_corp
+group by (concat(year(fec_movimien),
+case
+when month(fec_movimien)>=10 then month(fec_movimien)
+else concat(0,month(fec_movimien))
+end))
+order by yyyymm;
+
+
+select
+cod_comprod,
+concat(year(fec_movimien),
+case
+when month(fec_movimien)>=10 then month(fec_movimien)
+else concat(0,month(fec_movimien))
+end) as yyyymm,
+count(distinct cod_idcontra) as count_distinct_cod_idcontra,
+sum(imp_mvimient) as sum_imp_mvimient,
+round(sum(imp_mvimient)/1000) as sum_imp_mvimient_k,
+round(sum(imp_mvimient)/2/1000) as sum_imp_mvimient_k2,
+sum(imp_mvimient)/count(distinct cod_idcontra) as avg_imp_mvimient,
+round(sum(imp_mvimient)/count(case when imp_mvimient>0 then cod_idcontra end),1) as avg_sum_imp_mvimient_positive
+from da_martalamela.wallet_movimientos_tarjetas_detalle_corp
+group by cod_comprod,(concat(year(fec_movimien),
+case
+when month(fec_movimien)>=10 then month(fec_movimien)
+else concat(0,month(fec_movimien))
+end))
+order by cod_comprod,yyyymm;
+
+
+# ¿comercio físico o electrónico?
+select cod_comprod,
+substr(des_puntserv,5,1) as digito_presencia_cliente,
+count(distinct des_puntserv) as distinct_des_puntserv,
+count(distinct cod_idcontra) as distinct_cod_idcontra
+from da_martalamela.wallet_movimientos_tarjetas_detalle_corp
+where cast(substr(des_puntserv,5,1) as int) between 0 and 9
+group by cod_comprod, substr(des_puntserv,5,1)
+order by cod_comprod, digito_presencia_cliente;
+
+select cod_comprod,
+substr(des_puntserv,6,1) as digito_presencia_tarjeta,
+count(distinct des_puntserv) as distinct_des_puntserv,
+count(distinct cod_idcontra) as distinct_cod_idcontra
+from da_martalamela.wallet_movimientos_tarjetas_detalle_corp
+where cast(substr(des_puntserv,6,1) as int) between 0 and 9
+group by cod_comprod, substr(des_puntserv,6,1)
+order by cod_comprod, digito_presencia_tarjeta;
+
+```
+
+
+BIN TARJETAS
+```{r eval=FALSE, echo=TRUE, cache=TRUE}
+
+select distinct cod_idcontra,
+cod_comprod,
+cod_pan
+from da_pro.datos_tarjetas_detalle_corp
+where (cod_comprod like '%3199%'
+or cod_comprod like '%8425%')
+and cast(partition_id as int) = 20150228
+and fec_altacto >= '2014-07-01';
+
+
+select distinct cod_comprod,
+substr(cod_pan,1,6) as bin_tarjeta
+from da_pro.datos_tarjetas_detalle_corp
+where (cod_comprod like '%3199%'
+or cod_comprod like '%8425%')
+and cast(partition_id as int) = 20150228
+and fec_altacto >= '2014-07-01';
+
+select
+yyyymm,
+count(distinct cod_idcontra)
+from
+(
+  select a.*,
+  concat(year(fec_altacto), case when month(fec_altacto)>=10 then month(fec_altacto) else concat(0,month(fec_altacto)) end) as yyyymm
+  from da_pro.datos_tarjetas_detalle_corp a
+) dtjd
+where (cod_comprod like '%3199%'
+or cod_comprod like '%8425%')
+and cast(partition_id as int) = 20150228
+and fec_altacto >= '2014-07-01'
+group by yyyymm
+order by yyyymm;
+
+select
+yyyymm,
+count(distinct cod_idcontra),
+count(distinct cod_pan)
+from
+(
+  select a.*,
+  concat(year(fec_altacto), case when month(fec_altacto)>=10 then month(fec_altacto) else concat(0,month(fec_altacto)) end) as yyyymm,
+  substr(cod_pan,1,6) as bin_tarjeta
+  from da_pro.datos_tarjetas_detalle_corp a
+) dtjd
+where (bin_tarjeta like '%403569%'
+or bin_tarjeta like '%427338%')
+and cast(partition_id as int) = 20150228
+and fec_altacto >= '2014-07-01'
+group by yyyymm
+order by yyyymm;
+```
+

@@ -1,0 +1,837 @@
+---
+output:
+  html_document:
+    self_contained: no
+    theme: cerulean
+---
+---
+title: "Pymes Analytics - Modelo de cartera Clientes"
+author: "BBVA D&A - Pymes Analytics "
+date: "5/10/2015"
+output: html_document
+---
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- '[Pymes]: Modelo de cartera Clientes'
+keywords  <- 'customer,cartera,pymes'  
+```
+
+```{r librerias_y_funciones, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(grid))
+suppressMessages(library(hexbin))
+suppressMessages(library(lattice))
+suppressMessages(library(reshape))
+suppressMessages(library(data.table))
+suppressMessages(library(plyr))
+suppressMessages(library(caret))
+suppressMessages(library(ROCR))
+suppressMessages(library(randomForest))
+suppressPackageStartupMessages(library('googleVis'))
+suppressPackageStartupMessages(library('ggplot2'))
+op <- options(gvis.plot.tag="chart")
+
+#options(warn=-1, scipen=3, width=120)
+source('../tools/write.hive.R') ;
+source('../tools/multiplot.R') ;
+source('../tools/methods_connect.R') ;
+source('../tools/warehouse_basics.R') ;
+source('../applications/pymes_analytics/preprocess_functions.R') ;
+source('../applications/pymes_analytics/helper_functions.R');
+```
+
+```{r dependencies, echo = FALSE}
+
+# cli <- clarity.use_table(DEPENDENCY_OTHER_TABLES,    
+#                                           'da_pymes.tablon_clientes_sinfo ',    
+#                                            '*', sqname = 'cli')
+
+```
+
+
+```{r functions, echo=FALSE}
+plotMultiRoc <- function (data, class, subset, name) {
+  
+  par(mfrow=c(1,1))
+  colors <- rainbow(ncol(data))
+  legend.name <- vector()
+  
+  for (i in 1:ncol(data)){
+    pred <- prediction (data[,i], labels=class)
+    perf <- performance(pred, measure="tpr", x.measure = "fpr")
+    auc <- round(performance(pred, "auc")@y.values[[1]], 2)
+    
+    legend.name <- c(legend.name, paste(names(data)[i], "- AUC =", auc))
+    if (i==1){
+      plot(perf, col=colors[i])
+    }else
+      plot(perf, col=colors[i], add=TRUE)
+  }
+  
+  legend(0.6, 0.4, legend.name, lty=c(1,1), col=colors)
+}
+
+
+# plotRoc: plot a ROC curve for a train and test model
+#
+# train : training dataset 
+# subset: index for using just part of the dataset 
+# test: test dataset 
+# model: model for predictions 
+# name: Title of the graph
+plotRoc <- function (train, subset, test, model, name) {
+  
+  train.predictions <- predict(model, newdata = train[subset,], type = "prob")  
+  test.predictions   <- predict(model, newdata = test, type = "prob")
+  
+  rocobj <- plot.roc(test$Class, test.predictions[,1],
+                     main = name ,
+                     legacy.axis = TRUE,
+#                      percent=TRUE, ci = TRUE, print.auc = TRUE,
+#                      of = "thresholds", thresholds "best", print.thres = "best", 
+                     col="blue") 
+  
+  rocobj1 <- lines.roc(train$Class[subset], train.predictions[,1],
+                       percent=TRUE, 
+                       col="red")   
+}
+
+# plotMultRoc: plot multiple ROC curves for a dataset
+#
+# data : dataset containing predictions as columns
+# class: true class
+# subset: index for using just part of the dataset 
+# name: Title of the graph
+plotMultiRoc <- function (data, class, subset, name) {
+  
+  par(mfrow=c(1,1))
+  colors <- rainbow(ncol(data))
+  legend.name <- vector()
+  
+  for (i in 1:ncol(data)){
+    pred <- prediction (data[,i], labels=class)
+    perf <- performance(pred, measure="tpr", x.measure = "fpr")
+    auc <- round(performance(pred, "auc")@y.values[[1]], 2)
+    
+    legend.name <- c(legend.name, paste(names(data)[i], "- AUC =", auc))
+    if (i==1){
+      plot(perf, col=colors[i])
+    }else
+      plot(perf, col=colors[i], add=TRUE)
+  }
+  
+  legend(0.6, 0.4, legend.name, lty=c(1,1), col=colors)
+}
+
+# plotProbHistogram: plot an histogram of the probability distribution of 
+#                    of the predictions of a dataset
+#
+# data : dataset to evaluate 
+# model: model to apply for predictions
+plotProbHistogram <- function(data, model, type = "" ) {
+  predictions   <- predict(model, newdata = data, type = "prob")
+  hist(predictions$Yes, breaks = 31, main = paste("Distribution for ",type), xlab = "Predicted probability") 
+} 
+
+
+# plotTrainTestRoc: plot a ROC curve for a train and test model
+#
+# train : training dataset 
+# subset: index for using just part of the dataset 
+# test: test dataset 
+# model: model for predictions 
+# name: Title of the graph
+plotTrainTestRoc <- function(train, subset, test, model, name ) {
+
+  test.predictions   <- predict(model, newdata = test, type = "prob")
+
+  plot.roc(test$Class, test.predictions[,1],
+                     main = name ,
+                     legacy.axes = TRUE,
+                     percent=TRUE, 
+                     print.auc = TRUE, 
+                     partial.auc = c(100,80), 
+                     partial.auc.correct = TRUE,
+                     print.auc.pattern="Corrected pAUC (100-90%% SP):\n%.1f%%", print.auc.col="#1c61b6", 
+                     auc.polygon=TRUE, auc.polygon.col="#1c61b6",
+                     thresholds = "best", 
+                     print.thres = "best", 
+                     print.auc.x=20 ,
+                     print.auc.y=40,       
+                     col="blue") 
+
+  plot.roc(test$Class, test.predictions[,1],
+                     legacy.axes = TRUE,
+                     add = TRUE,
+                     percent=TRUE,
+                     thresholds = c(.5), 
+                     print.thres = c(.5),            
+                     print.auc = TRUE, 
+                     print.auc.x=20 ,
+                     print.auc.y=20,       
+                     col="blue") 
+
+
+  train.predictions  <- predict(model, newdata = train[subset,], type = "prob")  
+  plot.roc(train$Class[subset], train.predictions[,1],
+                   legacy.axes = TRUE,
+                   percent=TRUE, 
+                   add = TRUE,  
+                   print.auc = TRUE, 
+                   print.auc.x=20 ,
+                   print.auc.y=30,
+                   col="red") 
+
+
+  legend("bottomright", legend=c("Test", "Train"),
+       col=c("blue","red"), lwd=2)
+
+}
+
+ 
+# summarizeModelResults : plot several graphics and traces to summarize a model 
+#                           - summary for the learning and parameter selection process 
+#                           - ROC (AUC) performance curve for train and test
+#                           - Partial AUC for the interesting segment - low false negatives 
+#                           - Important variables (when available)
+#                           - Predicted Probability histograms for train and test data
+summarizeModelResults <- function (name, model, train, sample, test) {  
+  par(mfrow=c(2,2))
+
+  # model performance
+  print(model) 
+  print(getTrainPerf(model))
+  plot(model, main = "Model performance")
+  
+  # variable importance and performance
+  print(summary(model))
+  var.importance <- varImp(model, scale = FALSE)
+  plot(var.importance, main = "Variable importance")
+
+  plotTrainTestRoc(train, sample, test, model, name)
+
+  plotProbHistogram(train, model, "train")
+  plotProbHistogram(test, model,  "test")
+  
+} 
+
+```
+
+### 1. Motivación de negocio
+
+Modelos analíticos de propensión a tenencia de Cartera.
+
+### 2. Objetivo
+
+Detección de Pymes propensas a tenencia en BBVA o en otras entidades bancarias de Cartera.
+
+### 3. Fuentes de datos
+
+* **da_pymes.tablon_clientes_sinfo:** Tabla con más de 200 variables de cliente (tenencia, saldos...), provenientes de SINFO.
+* **da_pymes.tablon_clientes:** Incluye , entre otros datos, el CNAE más actualizado de los balances.
+* **clarity_elements.cartera:** Indicador de si el cliente tiene cartera o lo ha tenido recientemente.
+
+
+### 4. Análisis
+
+
+
+```{r general params}
+
+## [PARAM] Number of samples to use during training 
+n.sample.train = 10000    # use 10000 for developing
+# n.sample.train = -1      # use -1 to use the  full size of the train for analysis
+
+## [PARAM] Number of folds 
+n.folds = 10 
+
+## [PARAM] Number of experiments 
+n.experiments = 1
+#n.experiments = 10 
+
+# [PARAM] Path to the directory to save models
+model_dirpath = "/DYA/Models/Pymes/deploy/" 
+
+```
+
+Obtenemos para cada cliente sus datos (del tablón) y las variables de si tiene o no cartera y el importe, tanto en el último mes como en los dos últimos años.
+
+```{r getData, cache=TRUE, echo=FALSE, eval = TRUE}
+
+# todo: revisar porque al hacer join con tablon_clientes se pasa de 727k a 232k
+q.dataset_cartera <- "
+SELECT cli.*, l.*,  cli2.cod_cnae_1
+FROM da_pymes.tablon_clientes_sinfo cli
+join da_pymes.tablon_clientes cli2 on cli.cod_persctpn = cast(trim(cli2.cod_persctpn) as int)
+LEFT JOIN clarity_elements.cartera l
+
+ON cli.cod_persctpn = l.cod_persona
+"
+
+df.all <- qimpala(q.dataset_cartera)
+df.all <- df.all[,-4]
+
+```
+
+
+**Preprocess CNAE** 
+
+```{r Generate CNAE factor with all levels}
+
+q.cnae_factor = "
+SELECT DISTINCT(cod_cnae_1) 
+FROM da_pymes.tablon_clientes
+"
+
+tmp.factor.cnae <- qimpala(q.cnae_factor)
+tmp.factor.cnae$cod_cnae_1 <- recodeCNAE(tmp.factor.cnae$cod_cnae_1)
+
+factor.cnae_1 <- factor(sort(unique(tmp.factor.cnae$cod_cnae_1)))
+
+# Prepare cnae variable
+df.all$cod_cnae_1 <- recodeCNAE(df.all$cod_cnae_1)
+df.all$cod_cnae_1 <- factor(df.all$cod_cnae_1, levels = levels(factor.cnae_1)) 
+
+
+
+df.all[is.na(df.all)]<-0
+
+```
+
+
+**Build Target** 
+
+Los clientes que observamos que tienen o han tenido cartera en los 2 últimos años los marcamos como certeza:
+
+* 100 para actualmente
+* 95 para en el pasado reciente
+* para el resto, modelo de propensión
+
+```{r}
+
+dd.output <- data.frame(cod_persona = df.all$cod_persctpn)
+
+#colnames(df)
+
+dd.output$prob_cartera <- 0
+dd.output[df.all$imp_cartera != 0 | df.all$imp_car_ban > 0 | df.all$imp_car_sba > 0 |
+            df.all$cartera_cirbe_current_imp> 0 | 
+            df.all$total_cartera_contrato_current_n > 0 ,]$prob_cartera=100
+
+dd.output[ df.all$contrato_descuento_comercial_current_imp> 0 | 
+             df.all$contrato_descuento_comercial_current_n> 0 ,]$prob_cartera=100
+
+
+# total_cartera_two_years_imp
+dd.output[df.all$total_cartera_contrato_two_years_n > 0 | df.all$total_cartera_contrato_two_years_imp> 0
+          | df.all$contrato_descuento_comercial_two_years_n > 0 |
+            df.all$contrato_descuento_comercial_two_years_imp> 0, ]$prob_cartera = 95
+
+```
+
+Así queda la distribución de la varibles tras esa asignación:
+```{r, echo=FALSE}
+table(dd.output$prob_cartera)
+```
+
+```{r preprocess Data}
+
+df.all <- convert_type_tablon_sinfo(df.all)
+
+# nuevas variables
+df.all$imp_activo_new <- df.all$imp_activo - df.all$imp_cartera
+df.all$imp_rid_sba_new <- df.all$imp_rid_sba - df.all$imp_car_sba
+df.all$imp_rid_ban_new <- df.all$imp_rid_ban - df.all$imp_car_ban
+
+```
+
+
+```{r correlations, eval=FALSE}
+
+corr <- data.frame(var1=character(), var2=character(), correl = numeric())
+for (i in 1:(ncol(df.all)-1)){
+  for (j in (i+1):ncol(df.all)){
+    if (grepl('^imp', names(df.all)[i]) & grepl('^imp', names(df.all)[j]) & sd(df.all[,i]) > 0 & sd(df.all[,j]) > 0){
+      #print(paste0("Var 1: ", names(df.all)[i], ", var 2: " , names(df.all)[j]))
+      print(paste(i, j))
+      corr <- rbind.data.frame(corr, data.frame(var1=names(df.all)[i], var2=names(df.all)[j], correl=cor(df.all[,i], df.all[,j], use="complete")))
+    }
+  }
+}
+#ggplot(corr, aes(x=var1, y=var2, size=correl, label=correl)) + geom_point() + geom_text(check_overlap = TRUE, hjust=0)
+ggplot(corr, aes(x=var1, y=correl)) + geom_bar(stat="identity") + facet_wrap(~var2)
+
+```
+
+**Asignar la clase**
+
+Ahora asignamos la clase para entrenar. Consideramos TRUE si tiene o ha tenido cartera en los dos últimos años, FALSE en otro caso. 
+
+```{r chunk2, cache=FALSE, echo=FALSE, eval = TRUE}
+df.all$Class <- (dd.output$prob_cartera> 0)
+
+df.all$Class <- factor(df.all$Class , levels = c("TRUE", "FALSE"))
+df.all$Class <- revalue(df.all$Class, c("TRUE"="Yes", "FALSE"="No"))
+
+#table(df$Class)
+df2 <- data.table(df.all)[,list(n=.N), by=c("Class")][,p:=n/sum(n),]
+df2
+```
+
+**Modelos para el resto**
+
+Como el ratio de positivos es bajo, hacemos subsampling sobre los negativos para dejar un ratio  de 1:1.3. Luego repartimos en train (80%) y test (20%). Ajustamos cada modelo y al final se comparar la especificity, sensitivity y AUC.
+
+
+## Test and training data generation
+
+```{r generate dummy vars, eval=TRUE}
+
+# Cnae (y otras vars relevantes) añadido como dummy para que entren todas sus clases en el modelo
+dummy <- dummyVars(Class ~ cod_cnae_1 + seg_planuno + seg_corporativo + cod_segmento_global, data = df.all)
+
+df.dummy <- data.frame(predict(dummy, newdata = df.all))
+df.all <- cbind(df.all, df.dummy)
+```
+
+```{r generate dataset split}
+
+# Preparación de training y test
+ratioTrain <- 0.8
+ratioTest <- 1-ratioTrain
+
+# subsampling positive
+df <- subset(df.all, Class == "Yes")
+df <- rbind(df, 
+            subset(df.all, Class == "No")[sample(1:nrow(subset(df.all, Class == "No")), 
+                                                 1.3*nrow(subset(df.all, Class == "Yes")), replace=FALSE),])
+
+# table(df$Class)
+
+#set.seed(42)
+index <- createDataPartition(df$Class, p=ratioTrain, list=FALSE)
+train.cartera <- df[index,]         
+test.cartera  <- df[-index,]         
+table(train.cartera$Class)
+table(test.cartera$Class)
+
+## if negative, use all instances for training 
+if (n.sample.train < 0) { n.sample.train = nrow(train.cartera) }
+if (n.sample.train > nrow(train.cartera) ) {n.sample.train = nrow(train.cartera)}
+
+sample.train <- sample(seq(1,nrow(train.cartera)), n.sample.train )
+
+```
+
+Quitamos variables que:
+
+* Se utilizan para asignar la clase
+* Tienen poca o ninguna variabilidad
+* Identificadores únicos de persona: cclien, cif...
+* Tienen una correlación altísima con la clase (falsos predictores)
+
+
+```{r Model Formula}
+
+exclude <- c(# identificadores
+            "cod_paisoalf", "cod_entalfa", "cod_persctpn", "cod_persona", "cod_idefisca", 
+            
+            # demasiados valores, se agrupan
+            "seccion_censal", "cod_cno",
+            
+            # dummys
+            "cod_cnae_1", "seg_planuno", "seg_corporativo", "cod_segmento_global",
+            
+            # variables sin variacion
+             "seg_ciclo_vida", "seg_corporativo", "estado_cli", "seg_sexo", 
+            "imp_pp_ben", "imp_pp_par", "imp_seg_ahorro", "imp_cesion_segsociales", "imp_unit_link", 
+            "ind_bbvanet", 
+            "imp_pp_ben_evol", "imp_pp_par_evol", "imp_seg_ahorro_evol", "imp_cesion_segsociales_evol", "imp_unit_link_evol",
+            "imp_pp_ben_mean", "imp_pp_par_mean", "imp_seg_ahorro_mean", "imp_cesion_segsociales_mean", "imp_unit_link_mean",
+            "imp_nomina", "ind_nomina", "imp_pension", "ind_pension", "imp_inem", "ind_inem", "ind_pp_ben", "ind_pp_par", 
+            "ind_seg_ahorro", "ind_cesion_segsociales", "ind_unit_link", 
+            "n_meses_antig_nompen", "n_meses_ult_nompen", "n_meses_ult_seg_ahorro", "n_meses_ult_pp_ben", "n_meses_ult_pp_part", 
+            "n_meses_ult_seg_vinculado","n_meses_ult_unit_link", 
+            "imp_prima_seg_hogar", "imp_prima_seg_vida", "ind_seg_hogar", "ind_seg_vida", "imp_prima_seg_vinculado", "ind_seg_vinculado",
+            
+            # pocos valores
+            "ind_val_rentafija", "imp_val_rentafija_evol",  "per_amortizado_csm", "n_meses_vto_csm",
+             
+            # variables de clase
+            "Class", 
+            "imp_cartera", "imp_cartera_evol", "imp_cartera_mean", "imp_car_sba", "imp_car_ban", "per_cir_car", 
+            "ind_cartera",  "n_meses_ult_cartera", 
+            "total_cartera_contrato_current_n", "total_cartera_contrato_current_imp", "total_cartera_contrato_two_years_n", "total_cartera_contrato_two_years_imp",
+            "total_descuento_comercial_current_n", "total_descuento_comercial_current_imp", "total_descuento_comercial_two_years_n", "total_descuento_comercial_two_years_imp", 
+            "contrato_descuento_comercial_current_n", "contrato_descuento_comercial_current_imp", "contrato_descuento_comercial_two_years_n", "contrato_descuento_comercial_two_years_imp", 
+            "contrato_gestion_de_cobro_current_n", "contrato_gestion_de_cobro_current_imp","contrato_gestion_de_cobro_two_years_n", "contrato_gestion_de_cobro_two_years_imp",
+            "cartera_cirbe_current_imp", "cartera_menor90_cirbe_current_imp", "cartera_mayor90_cirbe_current_imp",
+             
+            # correlan mucho o las queremos quitar
+            "ind_cir",
+            "imp_activo", "imp_rid_sba", "imp_rid_ban", "imp_rin_sba", "imp_rin_ban", "imp_rgar_sba", "imp_rgar_ban", "per_cir_rgar"
+    )
+
+
+# check si queda alguna excluir variables con un único valor
+for (i in 1:ncol(df)){
+  # factores
+  if (is.factor(df[,i]) & length(levels(df[,i])) == 1 ){
+    if (!(names(df)[i] %in% exclude)) cat(names(df[i]), "\n")
+    exclude <- c(exclude, names(df)[i])
+  }
+  # numericos
+  if (is.numeric(df[,i])){
+    if (min(df[,i]) == max(df[,i]) & !(names(df)[i] %in% exclude)){
+      if (!(names(df)[i] %in% exclude) ) cat(names(df[i]), "\n")
+      exclude <- c(exclude, names(df)[i])
+      
+    }
+  }
+}
+
+# excluir variables que son media o de dun
+for (i in 1:ncol(df)){
+  if (grepl('mean', names(df)[i])){
+    exclude <- c(exclude, names(df)[i])
+  }
+  if (grepl('^dun', names(df)[i])){
+    exclude <- c(exclude, names(df)[i])
+  }  
+}
+
+exclude <- unique(exclude)
+
+#Las variables que finalmente se usan
+names(df)[!(names(df) %in% exclude) ]
+
+
+model.formula <- formula(paste0("Class ~ ", paste(names(df)[!(names(df) %in% exclude)], collapse=" + ")))
+
+```
+
+
+# Train models
+
+We aimed at extract Partial Area under the curve figures for comparison across different algorithms. Parameter model selection still uses traditional Auc as implemented in caret. 
+
+```{r train models parameters}
+
+ctrl <- trainControl(method = "repeatedCV",
+                     number = n.folds, 
+                     repeats = n.experiments,
+                     #returnResamp = "all",
+                     classProbs = TRUE,
+                     summaryFunction = twoClassSummary,
+                     allowParallel = TRUE)
+
+```
+
+
+## Train a Gradient Boosting Machine model (GBM)
+
+```{r train GBM, message=FALSE, fig.width=16, fig.height=16}
+
+# set.seed(42)
+# system.time(
+#   model.gbm <- train(model.formula, data = train.cartera,
+#                     method = "gbm",
+#                     subset = sample.train,
+#                     trControl = ctrl,
+#                     verbose = FALSE,
+#                     metric = "ROC") 
+# )
+
+model.gbm <- readRDS(paste(model_dirpath, 
+                    "customers.cartera.gbm.Rda",
+                    sep = ""))
+
+varImp(model.gbm)
+summarizeModelResults("Propensity Cartera - GBM", model.gbm,  train.cartera, sample.train, test.cartera)
+```
+
+
+## Train a Random Forest
+```{r train random forests, message=FALSE, fig.width=16, fig.height=16}
+
+#set.seed(42)
+# system.time(
+#   model.rf <- train(model.formula, data = train.cartera, 
+#                   method = "rf",
+#                   subset = sample.train,
+#                   trControl = ctrl,
+#                   verbose = FALSE,
+#                   metric = "ROC") 
+# )
+
+model.rf <- readRDS(paste(model_dirpath, 
+                    "customers.cartera.rf.Rda",
+                    sep = ""))
+
+
+varImp(model.rf)
+summarizeModelResults("Propension Cartera - Random Forest", model.rf,  train.cartera, sample.train, test.cartera)
+```
+
+
+## Train a Logistic Regression
+```{r train glm, message=FALSE, fig.width=16, fig.height=16, cache=TRUE}
+
+set.seed(42)
+# system.time(
+#   model.glm <- train(model.formula, data = train.cartera, preProcess = c("center", "scale"),
+#                   method = "glm", family="binomial",
+#                   subset = sample.train,
+#                   trControl = ctrl,
+#                   metric = "ROC") 
+# )
+
+model.glm <- readRDS(paste(model_dirpath, 
+                    "customers.cartera.glm.Rda",
+                    sep = ""))
+
+varImp(model.glm)
+summarizeModelResults("Propension Cartera - GLM", model.glm,  train.cartera, sample.train, test.cartera)
+```
+
+
+```{r save Models, eval=FALSE}
+
+saveModel(model.gbm, "customers.cartera.gbm") # model_dirpath = model_dirpath si queremos cambiar el directorio de guardado del modelo
+
+saveModel(model.rf, "customers.cartera.rf")
+
+saveModel(model.glm, "customers.cartera.glm")
+
+```
+
+
+## Compare Importance
+Vemos qué variables son las importantes con cada uno de los modelos entrenados. Obtenemos las 20 más importantes con cada modelo.
+
+```{r compareImportance}
+
+top = 20
+
+imp.gbm <- varImp(model.gbm)$importance
+names(imp.gbm) <- "imp"
+imp.gbm$var <- rownames(imp.gbm)
+imp.gbm <- head(imp.gbm[order(imp.gbm$imp, decreasing = TRUE),], top)
+
+imp.rf <- varImp(model.rf)$importance
+names(imp.rf) <- "imp"
+imp.rf$var <- rownames(imp.rf)
+imp.rf <- head(imp.rf[order(imp.rf$imp, decreasing = TRUE),], top)
+
+
+imp.glm <- varImp(model.glm)$importance
+names(imp.glm) <- "imp"
+imp.glm$var <- rownames(imp.glm)
+imp.glm <- head(imp.glm[order(imp.glm$imp, decreasing = TRUE),], top)
+
+importance <- rbind(data.frame(modelo="gbm", imp.gbm),
+                    data.frame(modelo="glm", imp.glm),
+                    data.frame(modelo="rf", imp.rf)
+                    )
+
+ggplot(importance, aes(x=reorder(var, imp, max), y=imp, fill=modelo)) + geom_bar(stat="identity", position="dodge") +
+  xlab("Variable") + ylab("Relative Importance") + coord_flip() + theme(axis.text.y = element_text(size=14))
+
+
+varImp(model.glm)$importance
+
+par(mfrow=c(1,1))
+plot(coefficients(model.glm$finalModel))
+
+coef <- coefficients(model.glm$finalModel)
+plot(coef[abs(coef) < 10])
+coef[abs(coef) > 2]
+
+```
+
+Estimamos la probabildiad para los datos de test. 
+```{r}
+results <- data.frame(cod_documps1=test.cartera$cod_idefisca,Class = test.cartera$Class)
+results$GBM <- predict(model.gbm, 
+                       newdata = test.cartera, 
+                       type = "prob")[, 'Yes']
+
+results$RF <- predict(model.rf, 
+                       newdata = test.cartera, 
+                       type = "prob")[, 'Yes']
+
+results$GLM <- predict(model.glm, 
+                       newdata = test.cartera, 
+                       type = "prob")[, 'Yes']
+```
+
+
+Plot ROC curves.
+```{r}
+plotMultiRoc(data.frame(results[,c("GBM", "GLM", "RF")]), results$Class, 0, "ROC curves for Several Models")
+```
+
+# Distribution of estimated probability wrt class
+```{r, fig.width=10, fig.height=4}
+ggplot(results, aes(x=GBM, color=Class)) + geom_density() + xlab("Estimated Probability") + ggtitle("Grandient Boosting Machine")
+ggplot(results, aes(x=RF, color=Class)) + geom_density() + xlab("Estimated Probability") + ggtitle("Random Forest")
+ggplot(results, aes(x=GLM, color=Class)) + geom_density() + xlab("Estimated Probability") + ggtitle("Generalized Linear Model")
+```
+
+# Some statistics 
+Depending on at which point we consider as positive, we find some customers who doesn't have cartera currently but with high probability. We compute the estimated probability for every customer and precision and recall for some posible cuts.
+
+```{r, fig.width=10, fig.height=4}
+
+results.all <- data.frame(cod_documps1=df.all$cod_idefisca, Class = df.all$Class)
+results.all$GBM <- predict(model.gbm, newdata = df.all, type = "prob")[, 'Yes']
+results.all$RF <- predict(model.rf, newdata = df.all, type = "prob")[, 'Yes']
+results.all$GLM <- predict(model.glm, newdata = df.all, type = "prob")[, 'Yes']
+
+ggplot(results.all, aes(x=GBM, color=Class)) + geom_density() + xlab("Estimated Probability") + ggtitle("Grandient Boosting Machine")
+ggplot(results.all, aes(x=RF, color=Class)) + geom_density() + xlab("Estimated Probability") + ggtitle("Random Forest")
+ggplot(results.all, aes(x=GLM, color=Class)) + geom_density() + xlab("Estimated Probability") + ggtitle("Generalized Linear Model")
+
+
+
+cut <- seq(0, 1, by=0.05)
+
+res <- data.frame()
+for (c in cut){
+  res <- rbind(res, 
+               data.frame(prob = c,
+                          n = nrow(subset(results.all, GBM > c)),
+                          n_nueva = nrow(subset(results.all, GBM > c & Class == 'No')),
+                          precision = nrow(subset(results.all, GBM > c & Class == 'Yes'))/nrow(subset(results.all, GBM > c)),
+                          recall = nrow(subset(results.all, GBM > c & Class == 'Yes'))/nrow(subset(results.all, Class == 'Yes'))                          
+                          ))
+}
+
+# Precision y Recall en el mismo gráfico
+ggplot(res, aes(x=prob, y=precision, colour="precision")) + geom_point() +
+  geom_point(aes(x=prob, y=recall, colour="recall")) + 
+  scale_colour_manual(name="Metric", values = c(recall = "black", precision = "blue")) + ylab("Metric") + ggtitle("GBM")
+
+ggplot(res, aes(x=prob, y=n_nueva, label=n_nueva)) + geom_point() + geom_text(angle=45, hjust=0, vjust=0) + ggtitle("GBM")
+
+
+cut <- seq(0, 1, by=0.05)
+
+res <- data.frame()
+for (c in cut){
+  res <- rbind(res, 
+               data.frame(prob = c,
+                          n = nrow(subset(results.all, RF > c)),
+                          n_nueva = nrow(subset(results.all, RF > c & Class == 'No')),
+                          precision = nrow(subset(results.all, RF > c & Class == 'Yes'))/nrow(subset(results.all, RF > c)),
+                          recall = nrow(subset(results.all, RF > c & Class == 'Yes'))/nrow(subset(results.all, Class == 'Yes'))                          
+                          ))
+}
+
+# Precision y Recall en el mismo gráfico
+ggplot(res, aes(x=prob, y=precision, colour="precision")) + geom_point() +
+  geom_point(aes(x=prob, y=recall, colour="recall")) + 
+  scale_colour_manual(name="Metric", values = c(recall = "black", precision = "blue")) + ylab("Metric") + ggtitle("RF")
+
+ggplot(res, aes(x=prob, y=n_nueva, label=n_nueva)) + geom_point() + geom_text(angle=45, hjust=0, vjust=0) + ggtitle("RF")
+
+
+cut <- seq(0, 1, by=0.05)
+
+res <- data.frame()
+for (c in cut){
+  res <- rbind(res, 
+               data.frame(prob = c,
+                          n = nrow(subset(results.all, GLM > c)),
+                          n_nueva = nrow(subset(results.all, GLM > c & Class == 'No')),
+                          precision = nrow(subset(results.all, GLM > c & Class == 'Yes'))/nrow(subset(results.all, GLM > c)),
+                          recall = nrow(subset(results.all, GLM > c & Class == 'Yes'))/nrow(subset(results.all, Class == 'Yes'))                          
+                          ))
+}
+
+# Precision y Recall en el mismo gráfico
+ggplot(res, aes(x=prob, y=precision, colour="precision")) + geom_point() +
+  geom_point(aes(x=prob, y=recall, colour="recall")) + 
+  scale_colour_manual(name="Metric", values = c(recall = "black", precision = "blue")) + ylab("Metric") + ggtitle("GLM")
+
+ggplot(res, aes(x=prob, y=n_nueva, label=n_nueva)) + geom_point() + geom_text(angle=45, hjust=0, vjust=0) + ggtitle("GLM")
+
+```
+
+
+# Cómo es la probabilidad según el CNAE
+```{r probByCnae}
+# por cnae
+df.cnae <- results.all
+df.cnae$cnae <- as.factor(as.character(df.all$cod_cno))
+
+df.cnae <- subset(df.cnae, cnae %in% head(data.table(df.cnae)[,list(n=.N), by=c("cnae")][order(-n)], 100)$cnae)
+
+# por grupo de cnae
+df.cnae.g <- results.all
+df.cnae.g$cod_cnae_1 <- df.all$cod_cnae_1
+
+# GBM
+median <- data.table(df.cnae)[,list(median = median(GBM)), by=c("cnae")][order(-median)]
+
+df.cnae$cnae <- factor(df.cnae$cnae, levels=median$cnae)
+
+ggplot(df.cnae, aes(x=cnae, y=GBM)) + geom_boxplot() + theme(axis.text.x  = element_text(angle=90)) + ggtitle("GBM")
+ggplot(df.cnae, aes(x=cnae, fill=Class)) + geom_bar(position="fill") + coord_flip() + ggtitle("GBM")
+ggplot(df.cnae, aes(x=cnae, y=GBM)) + geom_boxplot() + facet_wrap(~Class, nrow=2) + theme(axis.text.x  = element_text(angle=90)) + ggtitle("GBM")
+
+ggplot(df.cnae.g, aes(x=reorder(cod_cnae_1, -GBM, FUN=mean), y=GBM)) + geom_boxplot() + ggtitle("GBM")
+ggplot(df.cnae.g, aes(x=reorder(cod_cnae_1, -GBM, FUN=mean), y=GBM)) + geom_boxplot() + facet_wrap(~Class, nrow=2) + ggtitle("GBM")
+ggplot(df.cnae.g, aes(x=cod_cnae_1, fill=Class)) + geom_bar(position="fill") + coord_flip() + ggtitle("GBM")
+
+# data.table(df.cnae.g)[,list(n=.N, p_mean=mean(GBM), p_median=median(GBM)), by=c("cod_cnae_1")]
+# dd2 <- data.table(df.cnae.g)[,list(n=.N), by=c("cod_cnae_1", "Class")][,p:=n/sum(n), by=c("cod_cnae_1")]
+# subset(dd2, Class == "Yes")[order(cod_cnae_1)]
+# 
+# data.table(df.cnae)[,list(n=.N, p_mean=mean(GBM), p_median=median(GBM)), by=c("cnae")][order(-p_mean)]
+# dd2 <- data.table(df.cnae.g)[,list(n=.N), by=c("cod_cnae_1", "Class")][,p:=n/sum(n), by=c("cod_cnae_1")]
+# subset(dd2, Class == "Yes")[order(cod_cnae_1)]
+
+
+# RF
+median <- data.table(df.cnae)[,list(median = median(RF)), by=c("cnae")][order(-median)]
+
+df.cnae$cnae <- factor(df.cnae$cnae, levels=median$cnae)
+
+ggplot(df.cnae, aes(x=cnae, y=RF)) + geom_boxplot() + theme(axis.text.x  = element_text(angle=90)) + ggtitle("RF")
+ggplot(df.cnae, aes(x=cnae, fill=Class)) + geom_bar(position="fill") + coord_flip() + ggtitle("RF")
+ggplot(df.cnae, aes(x=cnae, y=RF)) + geom_boxplot() + facet_wrap(~Class, nrow=2) + theme(axis.text.x  = element_text(angle=90)) + ggtitle("RF")
+
+ggplot(df.cnae.g, aes(x=reorder(cod_cnae_1, -RF, FUN=mean), y=RF)) + geom_boxplot() + ggtitle("RF")
+ggplot(df.cnae.g, aes(x=reorder(cod_cnae_1, -RF, FUN=mean), y=RF)) + geom_boxplot() + facet_wrap(~Class, nrow=2) + ggtitle("RF")
+ggplot(df.cnae.g, aes(x=cod_cnae_1, fill=Class)) + geom_bar(position="fill") + coord_flip() + ggtitle("RF")
+
+
+# GLM
+median <- data.table(df.cnae)[,list(median = median(GLM)), by=c("cnae")][order(-median)]
+
+df.cnae$cnae <- factor(df.cnae$cnae, levels=median$cnae)
+
+ggplot(df.cnae, aes(x=cnae, y=GLM)) + geom_boxplot() + theme(axis.text.x  = element_text(angle=90)) + ggtitle("GLM")
+ggplot(df.cnae, aes(x=cnae, fill=Class)) + geom_bar(position="fill") + coord_flip() + ggtitle("GLM")
+ggplot(df.cnae, aes(x=cnae, y=GLM)) + geom_boxplot() + facet_wrap(~Class, nrow=2) + theme(axis.text.x  = element_text(angle=90)) + ggtitle("GLM")
+
+ggplot(df.cnae.g, aes(x=reorder(cod_cnae_1, -GLM, FUN=mean), y=GLM)) + geom_boxplot() + ggtitle("GLM")
+ggplot(df.cnae.g, aes(x=reorder(cod_cnae_1, -GLM, FUN=mean), y=GLM)) + geom_boxplot() + facet_wrap(~Class, nrow=2) + ggtitle("GLM")
+ggplot(df.cnae.g, aes(x=cod_cnae_1, fill=Class)) + geom_bar(position="fill") + coord_flip() + ggtitle("GLM")
+
+```
+
+
+### 5. Conclusiones
+
+Con la estimación de este modelo, se tienen valores de Precisión y Recall bastante altos, así como un AUC (ROC) de más de 0,9.
+Se elige GBM como modelo definitivo para estimar la tenencia de Cartera para clientes BBVA.
+
+

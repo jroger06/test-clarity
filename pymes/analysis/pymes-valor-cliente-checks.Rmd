@@ -1,0 +1,182 @@
+---
+title: '[Pymes] Value Estimator for Customers - Check Asumptions'
+author: "Maria Hernandez"
+date: "21/01/2016"
+output: html_document
+---
+========================================================
+
+```{r, echo=FALSE}
+# This is the first mandatory section.
+
+title     <- '[Pymes] Leasing propensity - model selection and training'
+keywords  <- 'sme, pymes, propensity, propension, leasing'
+```
+
+```{r, echo=FALSE, message=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))  	# This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1, width=200)
+source('~/bda_clarity/tools/warehouse_basics.R')
+source('~/bda_clarity/tools/methods_connect.R')
+```
+
+
+```{r load libraries, echo=FALSE, message=FALSE}
+
+# library(knitr)
+# # opts_chunk$set(cache = TRUE, autodep = TRUE)
+# 
+# library(plyr)
+# library(caret)
+# library(grDevices)
+# library(pROC)
+# library(dplyr)
+# 
+# library(ROCR)
+
+library(ggplot2)
+
+```
+
+En este analysis vamos a comprobar dos asunciones que se tendrán en cuenta en el modelo de valor para Pymes clientes.
+
+1. ¿Se parecen la cirbe actual con el último dato de los estados financieros?
+2. ¿Se parecen los ingresos de explotación con los ingresos y transacciones de Plan UNO?
+3. ¿Es estable el dato de cirbe?
+
+## 1. Cirbe actual y estados financieros
+
+Vamos a comparar la cirbe que tenemos actualmente (`r qimpala("select max(fec_cierre) from da_pymes.cirbe")`) con el último dato de los estados financieros que tenemos, 2014. En concreto vamos a comparar los valores de:
+
+* **LARGO PLAZO** Importe Dispuesto Financiaciones Largo Plazo IMP_DFINASBA  con:
+    - Activo largo plazo cuenta_11000
+    - Inversiones financieras a largo plazo cuenta_11500
+    - Deudas con Entidades de Crédito a largo plazo cuenta_31220
+
+* **CORTO PLAZO** Importe Dispuesto Financiaciones Corto Plazo IMP_DFINSBA con:
+    - Activo corto plazo cuenta_12000
+    - Inversiones financieras a corto plazo cuenta_12500
+    - Deudas con Entidades de Crédito a corto plazo cuenta_32320
+
+```{r datos}
+q <- "select c.*, cod_documps1 
+      from da_pymes.cirbe c join da_pro.clientes_corp cc on cast(trim(cc.cod_persctpn) as int) = c.cod_persona
+      and cc.cod_entalfa = '0182' and cc.partition_id = '20151130'"
+d.cir <- qimpala(q)
+
+q <- "select nif, 
+  cuenta_11000, cuenta_11500, cuenta_31220, 
+  cuenta_12000, cuenta_12500, cuenta_32320
+  from da_pymes.tablon_balances_cabeceras"
+d.eeff <- qimpala(q)
+
+dd <- merge(d.cir, d.eeff, by.x="cod_documps1", by.y="nif")
+```
+
+Vemos cómo se relacionan algunas variables:
+```{r, fig.width=12, fig.height=5}
+# Inversiones financieras largo y corto
+ggplot(dd, aes(x=cuenta_11500, y=cuenta_12500)) + geom_point() + xlab("Largo Plazo") + ylab("Corto Plazo") + 
+  geom_abline() +
+  scale_x_log10() + scale_y_log10() +
+  ggtitle(paste0("Correlacion: ", round(cor(dd$cuenta_11500, dd$cuenta_12500, use="complete.obs"), 2)))
+
+# Activo vs Inversiones financieras largo
+ggplot(dd, aes(x=cuenta_11000, y=cuenta_11500)) + geom_point() + xlab("Activo Largo") + ylab("Inversiones Financieras largo")+ 
+  geom_abline() +
+  scale_x_log10() + scale_y_log10() +
+  ggtitle(paste0("Correlacion: ", round(cor(dd$cuenta_11000, dd$cuenta_11500, use="complete.obs"), 2)))
+
+# Activo vs Inversiones financieras corto
+ggplot(dd, aes(x=cuenta_12000, y=cuenta_12500)) + geom_point() + xlab("Activo Corto") + ylab("Inversiones Financieras corto")+ 
+  geom_abline() +
+  scale_x_log10() + scale_y_log10() +
+  ggtitle(paste0("Correlacion: ", round(cor(dd$cuenta_12000, dd$cuenta_12500, use="complete.obs"), 2)))
+
+# Deudas con entidades de crédito largo y corto
+ggplot(dd, aes(x=cuenta_31220, y=cuenta_32320)) + geom_point() + xlab("Deuda entidades largo") + ylab("Deuda entidades corto")+ 
+  geom_abline() +
+  scale_x_log10() + scale_y_log10() +
+  ggtitle(paste0("Correlacion: ", round(cor(dd$cuenta_31220, dd$cuenta_32320, use="complete.obs"), 2)))
+
+# Deuda con entidades vs inversiones financieras largo (0.6)
+ggplot(dd, aes(x=cuenta_31220, y=cuenta_11000)) + geom_point() + xlab("Deudas entidades largo") + ylab("Activo largo")+ 
+  geom_abline() +
+  scale_x_log10() + scale_y_log10() +
+  ggtitle(paste0("Correlacion: ", round(cor(dd$cuenta_31220, dd$cuenta_11000, use="complete.obs"), 2)))
+
+# 0.16
+ggplot(dd, aes(x=cuenta_31220, y=cuenta_11500)) + geom_point() + xlab("Deudas entidades largo") + ylab("Inversiones financieras largo")+ 
+  geom_abline() +
+  scale_x_log10() + scale_y_log10() +
+  ggtitle(paste0("Correlacion: ", round(cor(dd$cuenta_31220, dd$cuenta_11500, use="complete.obs"), 2)))
+
+# Deuda con entidades vs inversiones financieras corto (0.37)
+ggplot(dd, aes(x=cuenta_32320, y=cuenta_12000)) + geom_point() + xlab("Deudas entidades corto") + ylab("Activo corto")+ 
+  geom_abline() +
+  scale_x_log10() + scale_y_log10() +
+  ggtitle(paste0("Correlacion: ", round(cor(dd$cuenta_32320, dd$cuenta_12000, use="complete.obs"), 2)))
+
+#0.2
+ggplot(dd, aes(x=cuenta_32320, y=cuenta_12500)) + geom_point() + xlab("Deudas entidades corto") + ylab("Inversiones financieras corto")+ 
+  geom_abline() +
+  scale_x_log10() + scale_y_log10() +
+  ggtitle(paste0("Correlacion: ", round(cor(dd$cuenta_32320, dd$cuenta_12500, use="complete.obs"), 2)))
+
+```
+
+Relación con cirbe LARGO
+
+```{r, fig.width=12, fig.height=5}
+# Activo largo (11000)
+ggplot(dd, aes(x=imp_dfinasba, y=cuenta_11000)) + geom_point() + xlab("Cirbe dispueso largo") + ylab("Activo Largo") + 
+  geom_abline() +
+  scale_x_log10() + scale_y_log10() +
+  ggtitle(paste0("Correlacion: ", round(cor(dd$imp_dfinasba, dd$cuenta_11000, use="complete.obs"), 2)))
+
+# Inversiones financieras largo (11500)
+ggplot(dd, aes(x=imp_dfinasba, y=cuenta_11500)) + geom_point() + xlab("Cirbe dispueso largo") + ylab("Inversiones financieras largo") + 
+  geom_abline() +
+  scale_x_log10() + scale_y_log10() +
+  ggtitle(paste0("Correlacion: ", round(cor(dd$imp_dfinasba, dd$cuenta_11500, use="complete.obs"), 2)))
+
+# Deudas entidades de crédito largo (31220) 0.82!
+ggplot(dd, aes(x=imp_dfinasba, y=cuenta_31220)) + geom_point() + xlab("Cirbe dispueso largo") + ylab("Deudas Entidades de crédito Largo") + 
+  geom_abline() +
+  scale_x_log10() + scale_y_log10() +
+  ggtitle(paste0("Correlacion: ", round(cor(dd$imp_dfinasba, dd$cuenta_31220, use="complete.obs"), 2)))
+
+```
+
+Relación con cirbe CORTO
+
+```{r, fig.width=12, fig.height=5}
+# Activo corto (12000) 0.2
+ggplot(dd, aes(x=imp_dfinsba, y=cuenta_12000)) + geom_point() + xlab("Cirbe dispueso corto") + ylab("Activo corto") + 
+  geom_abline() +
+  scale_x_log10() + scale_y_log10() +
+  ggtitle(paste0("Correlacion: ", round(cor(dd$imp_dfinsba, dd$cuenta_11000, use="complete.obs"), 2)))
+
+# Inversiones financieras corto (12500) 0.02
+ggplot(dd, aes(x=imp_dfinsba, y=cuenta_12500)) + geom_point() + xlab("Cirbe dispueso corto") + ylab("Inversiones financieras corto") + 
+  geom_abline() +
+  scale_x_log10() + scale_y_log10() +
+  ggtitle(paste0("Correlacion: ", round(cor(dd$imp_dfinsba, dd$cuenta_12500, use="complete.obs"), 2)))
+
+# Deudas entidades de crédito corto (32320) 0.31
+ggplot(dd, aes(x=imp_dfinsba, y=cuenta_32320)) + geom_point() + xlab("Cirbe dispueso corto") + ylab("Deudas Entidades de crédito corto") + 
+  geom_abline() +
+  scale_x_log10() + scale_y_log10() +
+  ggtitle(paste0("Correlacion: ", round(cor(dd$imp_dfinsba, dd$cuenta_32320, use="complete.obs"), 2)))
+
+```
+
+**Conclusión** 
+Parece que las cuentas equivalentes serían Deudas con entidades de crédito (31220 y 32320 para largo y corto, respectivamente). Para largo plazo se observa una correlación alta (`r round(cor(dd$imp_dfinasba, dd$cuenta_31220, use="complete.obs"), 2)`), pero para corto plazo bastante menor (`r round(cor(dd$imp_dfinsba, dd$cuenta_32320, use="complete.obs"), 2)`), aunque mucho mayor que con otras cuentas.
+
+## 2. Ingresos de explotación vs Ingresos Plan UNO
+
+## 3. Cirbe estable

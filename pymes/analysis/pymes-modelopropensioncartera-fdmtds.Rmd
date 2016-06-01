@@ -1,0 +1,245 @@
+---
+title: "Modelo de tenencia de producto para Cartera"
+author: "Agudo González, Pedro José - Martín Álvarez, Begoña - Medina Gallego, Carlos"
+maintainer: "César de Pablo Sánchez"
+date: "16/4/2015"
+output: html_document
+---
+========================================================
+_Migrado desde el Rmd del curso_
+
+
+```{r, echo=FALSE}
+# This is the first mandatory section.
+
+title     <- '[Pymes] Modelo de propensión para Cartera'
+keywords  <- 'pymes, sme, cartera'
+```
+
+
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))		# This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+source('~/bda_clarity/tools/warehouse_basics.R')
+```
+
+
+```{r Import libraries, echo = FALSE}
+
+library(caret)
+library(ROCR)
+
+```
+
+
+## Carga del tablon de clientes
+```{r}
+input.data.filepath = '/DYA/xe48636/pymes/df.inv.eeff.Rds'
+
+df <- readRDS(input.data.filepath)
+df[is.na(df)]<-0
+
+nrow(df)
+nrow(df[!df$bP002,])
+
+df[is.na(df$sistema_dispuesto_cartera),c("sistema_dispuesto_cartera")] <- 0
+df$cart_new <- df$bP002 | df$sistema_dispuesto_cartera>0
+
+nrow(df[df$cart_new>0,])
+nrow(df[df$cart_new==0,])
+
+df$cod_cnae   <- as.factor(df$cod_cnae)
+df$calihat  	<- as.factor(df$calihat)
+df$orden_rating <- as.factor(df$orden_rating)
+df$cr       	<- as.factor(df$cr)
+df$hats     	<- as.factor(df$hats)
+
+```
+
+```{r}
+
+ratioTrain <- 0.8
+ratioTest <- 1-ratioTrain
+index <- createDataPartition(df$cart_new, p=ratioTrain, list=FALSE)
+carteraTrainCompleto <- df[index,]                  
+carteraTest  <- df[-index,]               	 
+
+nrow(carteraTrainCompleto[carteraTrainCompleto$cart_new>0,])
+nrow(carteraTrainCompleto[carteraTrainCompleto$cart_new==0,])
+
+nrow(carteraTest[carteraTest$cart_new>0,])
+nrow(carteraTest[carteraTest$cart_new==0,])
+
+carteraTrain <- carteraTrainCompleto[carteraTrainCompleto$cart_new,]
+nrow(carteraTrain)
+carteraTrainNoProds <- carteraTrainCompleto[!carteraTrainCompleto$cart_new,]
+nrow(carteraTrainNoProds)
+indexF <- sample(1:nrow(carteraTrainNoProds), nrow(carteraTrain))
+carteraTrain <- rbind(carteraTrain, carteraTrainNoProds[indexF,])
+
+nrow(carteraTrain[carteraTrain$cart_new>0,])
+nrow(carteraTrain[carteraTrain$cart_new==0,])
+
+```
+
+
+```{r}
+
+colincluidas_p <- c("cart_new",
+                  "prioridad_cliente",
+                	"hats",
+                	"tipo_calihat",
+                	"opinion",
+                	"tarta_calidad",
+                	"des_cnae_1",
+                	"empleados",
+                	"balance",
+                	"var_balance",
+                	"cuenta_31230",
+                	"pct_cuenta_31230",
+                	"var_cuenta_31230",
+                	"cuenta_32330",
+                	"pct_cuenta_32330",
+                	"var_cuenta_32330",
+                	"cuenta_20000",
+                	"pct_cuenta_20000",
+                	"var_cuenta_20000",
+                	"cuenta_21000",
+                	"pct_cuenta_21000",
+                	"var_cuenta_21000",
+                	"cuenta_31000",
+                	"pct_cuenta_31000",
+                	"var_cuenta_31000",
+                	"pct_cuenta_32000",
+                	"var_cuenta_32000",
+                	"cuenta_32500",
+                	"pct_cuenta_32500",
+                	"var_cuenta_32500",
+                	"cuenta_32580",
+                	"pct_cuenta_32580",
+                	"var_cuenta_32580",
+                	"cuenta_11100",
+                	"pct_cuenta_11100",
+                	"var_cuenta_11100",
+                	"cuenta_11200",
+                	"pct_cuenta_11200",
+                	"pct_cuenta_12000",
+                	"pct_cuenta_12380",
+                	"pct_cuenta_12700",
+                	"var_cuenta_40100",
+                	"cuenta_41400",
+                	"pct_cuenta_41400",
+                	"var_cuenta_41400",
+                	"cuenta_41500",
+                	"cuenta_49100"  ,
+                	"cuenta_31220",
+                	"pct_cuenta_31220",
+                	"var_cuenta_31220",
+                	"cuenta_32320",
+                	"pct_cuenta_32320",
+                	"var_cuenta_32320"
+)
+
+timeInicio <- Sys.time()
+carteraLogit <- glm(factor(cart_new) ~ .,family = "binomial",data=carteraTrain[,colincluidas_p])
+Sys.time()-timeInicio
+summary(carteraLogit)
+
+#SELECCIONAMOS LAS VARIABLES MAS IMPORTANTES
+timeInicio <- Sys.time()
+carteraLogit.step<-step(carteraLogit)
+Sys.time()-timeInicio
+summary(carteraLogit.step)
+
+
+```
+
+
+```{r}
+
+fitpreds = predict(carteraLogit.step,newdata=carteraTrain,type="response")
+
+# confusion matrix con la muestra balanceada
+cutoff <- 0.5
+preds <- fitpreds>cutoff
+cm <- confusionMatrix(preds, carteraTrain$cart_new)
+cm
+
+# curva ROC con la muestra balanceada
+fitpred = prediction(fitpreds,carteraTrain$cart_new)
+fitperf = performance(fitpred,"tpr","fpr")
+plot(fitperf,col="green",lwd=2,main="ROC Curve for Logistic")
+abline(a=0,b=1,lwd=2,lty=2,col="gray")
+
+#calculamos predichos, ajustando las prob a posteriori
+#View(fitpreds)
+tasasi <- nrow(subset(carteraTrainCompleto,cart_new))/nrow(carteraTrainCompleto)
+carteraTrain$predSSA<-fitpreds
+carteraTrain$predNSA<-1-carteraTrain$predSSA
+carteraTrain$predSA<-carteraTrain$predSSA*tasasi/0.50
+carteraTrain$predNA<-carteraTrain$predNSA*(1-tasasi)/0.50
+carteraTrain$pred<-carteraTrain$predSA/(carteraTrain$predSA+carteraTrain$predNA)
+
+```
+
+
+```{r}
+
+## Intercetp adjustment: calculamos predichos, ajustando la intercep (es lo mismo pero se ajusta en
+#el modelo y así es mas facil de aplicar a tablas posteriores)
+model.new.cart <- carteraLogit.step
+model.new.cart$coefficients[1] <- carteraLogit.step$coefficients[1] - log((1-tasasi)/tasasi)
+carteraTrain$pred2<-predict(model.new.cart,newdata=carteraTrain,type="response")
+carteraTrainCompleto$pred2<-predict(model.new.cart,newdata=carteraTrainCompleto,type="response")
+head(carteraTrain[,c("cart_new","predSSA", "pred","pred2")])
+head(carteraTrainCompleto[,c("cart_new","pred2")])
+
+
+```
+
+```{r}
+
+#CURVA ROC con las probabilidades ajustadas
+fitpred.aj = prediction(carteraTrainCompleto$pred2,carteraTrainCompleto$cart_new)
+fitperf.aj = performance(fitpred.aj,"tpr","fpr")
+plot(fitperf.aj,col="red",lwd=2,main="ROC Curve for Logistic")
+abline(a=0,b=1,lwd=2,lty=2,col="gray")
+
+#pasamos el modelo a la muestra de test
+carteraTest$pred2<-predict(model.new.cart,newdata=carteraTest,type="response")
+fitpred.test = prediction(carteraTest$pred2,carteraTest$cart_new)
+fitperf.test = performance(fitpred.test,"tpr","fpr")
+
+#ponemos la curva de train y test juntas
+plot(fitperf.test,col="red",lwd=2,main="ROC Curve for Cartera: train & test")
+plot(fitperf.aj, col="blue", add=TRUE)
+abline(a=0,b=1,lwd=2,lty=2,col="gray")
+
+auc1 <- performance(fitpred.test,"auc")@y.values[[1]]
+legend("bottomright",legend=c(paste("(AUC=",formatC(auc1,digits=4,format="f"),")",sep="")),
+     col=c("red"), lty=1)
+auc2 <- performance(fitpred.aj,"auc")@y.values[[1]]
+legend("bottomright",legend=c(paste("(AUC=",formatC(auc2,digits=4,format="f"),")",sep="")),
+   	col=c("blue"), lty=1)
+
+
+cutoff <- 0.17
+preds.post <- carteraTrainCompleto$pred2>cutoff
+cm.post <- confusionMatrix(preds.post, carteraTrainCompleto$cart_new)
+summary(cm.post)
+cm.post
+
+#matriz de confusion con las prob a posteriori en test
+cutoff <- 0.17
+preds.post.test <- carteraTest$pred2>cutoff
+cm.post.test <- confusionMatrix(preds.post.test, carteraTest$cart_new)
+summary(cm.post.test)
+cm.post.test
+
+
+```
+

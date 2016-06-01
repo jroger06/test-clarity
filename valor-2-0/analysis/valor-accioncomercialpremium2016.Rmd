@@ -1,0 +1,886 @@
+---
+output:
+  html_document:
+    theme: cerulean
+    toc: yes 
+---
+
+---
+title: "[Valor 2.0] Seleccion de clientes de valor para campaña Premium Ene 2016"
+author: "BBVA D&A - Customer Analytics - César de Pablo, María Hernández"
+date: "21/12/2015"
+output: html_document
+---
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- '[Valor 2.0]: Seleccion de clientes de valor para campaña Premium Ene 2016'
+keywords  <- 'madiva, premium, valor, campaign. campaña, housing price, precio casa'  
+```
+
+
+```{r librerias_y_funciones, echo=FALSE, message=FALSE}
+# This is the second mandatory section.
+
+library(DBI)
+library(rJava)
+library(ggplot2)
+
+library(dplyr)
+library(knitr)
+# knitr::opts_chunk$set(cache=TRUE, tidy=TRUE, eval=TRUE, echo=TRUE,  fig.width=20 )
+
+options(warn=-1, scipen=3, width=120)
+source('~/bda_clarity/tools/warehouse_basics.R') ;
+source('~/bda_clarity/tools/write.hive.R') ;
+source('~/bda_clarity/tools/multiplot.R') ;
+
+```
+
+
+```{r Funciones auxiliares, echo=FALSE}
+
+# Helper: a partir de una query en Hive saca una muestra aleatoria - a usar con %>%
+sqlrand <- function(query, n) {paste(query, "DISTRIBUTE BY rand() SORT BY rand() LIMIT", n)} 
+
+# Calcula la edad en años desde una fecha dada
+toYears <- function(date) {floor(as.numeric(Sys.Date() - as.Date(date, "%Y"))/365) } 
+
+```
+
+
+# 1. Motivación de negocio
+
+Se va a llevar a cabo una campaña de cara a captar **clientes Premium**, principalmente aquellos poco vinculados o básicos. La oferta se centrará en la oferta de Recursos y Valores. 
+
+Como parte de la campaña se desea utilizar el dato de Madiva para descubrir clientes que no hayan sido identificados como Premium aún. Se desea obtener números orientativos que permitan dimensionar la campaña. 
+
+La campaña puede que se extienda a la captacion de no clientes potencialmente Premium, particularmende buscando la domiciliación de nóminas. 
+
+
+# 2. Objetivo
+
+El objetivo de este análisis es **determinar el número de clientes y el corte en el score de Madiva** (precio de la vivienda) necesario para diseñar la campaña de captación de valor.
+
+Para determinar clientes de valor se va a usar el precio de la vivienda y la hipótesis es que nos puede ayudar a identificar clientes básicos o poco vinculados que son de valor pero no se etiquetan como tal mediante otras segmentaciones debido a que no vemos su transaccionalidad o recursos.
+
+  - En primer lugar se trata de caracterizar la tasa de clientes premium entre los clientes vinculados: $$ P(premium) $$
+  - En segundo lugar se espera seleccionar un valor de corte para el precio de la casa donde $$ P(premium | precio > x ) >> P(premium) $$
+
+La campaña se va a realizar en primer lugar entre los clientes de la Terrirorial Este (1964). Realizamos en primer lugar un análisis general, que luego se particulariza a la territorial. 
+
+
+# 3. Fuentes de datos
+
+ - Clientes corp
+ - Madiva - Precio estimado de la vivienda 
+ - Segmento global Unico
+ - Segmentación plan Uno
+ - Unidad principal
+
+
+# 4. Análisis global 
+
+## Carga y preprocesado de los datos 
+
+Obtenemos los datos para los clientes donde los filtros de partida son: 
+  - Pertenecen a la entidad BBVA (*p.cod_paisoalf = 'ES' AND p.cod_entalfa = '0182'*)
+  - clientes etiquetados con el Plan Uno, es decir activos
+
+
+```{r Carga de los datos de los clientes}
+
+# q.premium = "
+# SELECT * 
+# FROM (
+# SELECT * FROM clarity_elements.segmento_global_unico 
+# -- DISTRIBUTE BY rand() SORT BY rand() LIMIT 100000
+# ) c 
+# JOIN clarity_elements.segmento_plan_uno u
+# ON (c.cod_persona = u.cod_persona)
+# JOIN da_madiva.address_price p
+# ON (c.cod_persona = CAST(p.cod_persctpn as INT) AND p.cod_paisoalf = 'ES' AND p.cod_entalfa = '0182' AND p.cod_domicper = 1)
+# "
+
+q.premium = "
+SELECT c.cod_persctpn cod_persona, c.fec_nacimi fec_nacimi, 
+       g.cod_segmsubo cod_segmsubo, g.segmento5c segmento5c,
+       uno.cod_segmento_plan_uno cod_segmento_plan_uno,
+       p.precision precision, p.price price, p.num_candidates num_candidates 
+FROM da_pro.clientes_corp c 
+JOIN clarity_elements.segmento_global_unico g
+ON (CAST(c.cod_persctpn AS INT) = g.cod_persona     
+    AND c.partition_id = '20151031'
+    AND c.cod_paisoalf = 'ES' AND c.cod_entalfa = '0182'
+)
+JOIN clarity_elements.segmento_plan_uno uno
+ON (CAST(c.cod_persctpn AS int) = uno.cod_persona)
+JOIN da_madiva.address_price p
+ON (c.cod_paisoalf = p.cod_paisoalf AND c.cod_entalfa = p.cod_entalfa AND c.cod_persctpn = p.cod_persctpn 
+    AND p.cod_domicper = 1
+   )
+"
+
+#df.premium <- qhive(q.premium %>% sqlrand(100000))
+df.premium <- qhive(q.premium)
+
+```
+
+```{r Test numero de clientes, eval=FALSE, echo=FALSE}
+nrow(df.premium)
+```
+
+Comprobamos el número de clientes sobre los que trabajamos. Aunque de partida se tienen unos 8M de clientes, el número es menor (`r nrow(df.premium)`) debido a que no a todos se les puede calcular el precio de la casa segun Madiva. 
+
+
+Acondicionamos los campos que se van a utilizar en el análisis posterior. 
+
+Filtramos adicionalmente los clientes con Segmento Global que son clientes particulares (*segmento5c > 0* ) y tambien calculamos su edad. 
+
+```{r Preparacion de los datos, echo=FALSE}
+
+#df.premium$u.cod_persona <- NULL
+
+#names(df.premium) <- sub("^c\\.", "", names(df.premium))
+#names(df.premium) <- sub("^p\\.", "", names(df.premium))
+#names(df.premium) <- sub("^u\\.", "", names(df.premium))
+
+
+df.premium$segmento5c <- factor(df.premium$segmento5c)
+df.premium$cod_segmsubo <- factor(df.premium$cod_segmsubo)
+df.premium$cod_segmento_plan_uno <- factor(df.premium$cod_segmento_plan_uno)
+
+df <- df.premium %>%
+#  sample_n(size = 1000) %>%
+  select(cod_persona,fec_nacimi,cod_segmsubo,segmento5c,precision,price,num_candidates, cod_segmento_plan_uno) %>%
+  filter(segmento5c != 0 ) 
+
+# Calculamos la edad
+# [TODO] Mejorar el calculo de la edad y el tratamiento de datos fuera de rango (years < 0, years > 120) 
+
+df$years <- floor(as.numeric(Sys.Date() - as.Date(df$fec_nacimi, "%Y"))/365)
+  
+```
+
+## Distribución de los clientes segun segmentaciones
+
+```{r Estadísticas de la segmentacion, echo = FALSE, message=FALSE, fig.width=10, fig.height=10}
+
+plot.segmento5c <- df %>%
+  ggplot() + 
+  geom_bar(aes(x=segmento5c)) +
+  xlab("Segmentacion de valor") +
+  ylab("Numero de clientes")
+
+plot.segmsubo <- df %>%
+  ggplot() + geom_bar(aes(x=cod_segmsubo)) +
+  xlab("Segmento Global") +
+  ylab("Numero de clientes")
+
+plot.segmento_uno <- df %>%
+  ggplot() + geom_bar(aes(x=cod_segmento_plan_uno)) +
+  xlab("Segmento Plan Uno") +
+  ylab("Numero de clientes")
+
+
+plot_edad<- df %>%
+  filter(years < 110 & years > 0 ) %>%
+  ggplot() + 
+  geom_bar(aes(x=years), binwidth = 1) +
+  geom_vline(x = 18, color = "red") +
+  geom_vline(x = 65, color = "red") +
+  xlab("Edad") +
+  ylab("Numero de clientes")
+
+multiplot(plot.segmento5c, plot.segmento_uno,plot.segmsubo, plot_edad, cols = 2)
+
+```
+
+
+## Analisis exploratorio de los precios de la vivienda 
+
+```{r Summary del precio}
+
+summary(df$price)
+
+```
+
+```{r Distribucion de los precios de la vivienda, message=FALSE, echo=FALSE, fig.width=7}
+
+
+df %>%
+  filter(price > 1e4 & price < 1e7) %>%  
+  ggplot() +
+  geom_bar(aes(x = price)) + 
+  scale_x_log10() +
+  ggtitle("Distribucion de precios de vivienda") +
+  xlab("Precio estimado Madiva") +
+  ylab("Número de viviendas")
+
+# Mismo gráfico pero con la densidad
+# df %>%
+#   ggplot() + 
+#   geom_density(aes(x = price)) +
+#   scale_x_log10()
+
+```
+
+- Los valores que obtenemos son en general como se esperan, con una mediana en torno a los 150.000 euros y una media superior. El valor máximo se va a las decenas de millones de euros. 
+
+  - [TODO] Precio tiene algunos NAs, ¿que hacemos con ellos? ¿origen?
+  - [TODO] El precio mínimo es de cero, ¿es necesario filtrar datos? ¿Quitamos la cola larga?
+
+En el gráfico se han filtrado los *outliers*. 
+
+
+## ¿Cuál es la distribución de los clientes premium en función de los segmentos?
+
+Exploramos la distribución de los precios en función de los diferentes segmentos de valor (Segmento Global, 1 a 5 donde 3,4,5 son valor). 
+
+Pintamos la estimacion previa que teníamos para el corte de valor, en torno a 450.000 euros
+
+```{r Distribución por segmento global, echo=FALSE, message=FALSE, fig.width=7}
+
+precio.corte <- 450000
+
+df %>%
+  filter(price > 1e4 & price < 1e7) %>%  
+  ggplot(aes(x = price, fill = segmento5c )) + 
+  geom_bar() + 
+  facet_grid(segmento5c ~ . , scales = "free_y") +
+  scale_x_log10() +
+  geom_vline( x = precio.corte, color = "lightblue") +
+  ggtitle("Distribucion de precios de vivienda por segmentos de valor") +
+  xlab("Precio estimado Madiva") +
+  ylab("Número de viviendas")
+
+```
+
+Tambien como esperamos, la distribución de los precios siguen algo parecido a una distribucion log-normal. Las medianas y medias de los precios para los diferentes segmentos aumentan segun el valor. Por otro lado. los valores estan más dispersos a medida que aumenta el valor. 
+
+Visualizamos esos mismos datos mediante un gráfico de Boxplots: 
+
+```{r Boxplots de las distribuciones de precio, echo=FALSE, message=FALSE, fig.width=7}
+
+df %>%
+  ggplot() + 
+  geom_boxplot(aes(x=segmento5c, y = price, fill = segmento5c )) +
+  scale_fill_brewer()+  
+  scale_y_log10() + 
+  geom_hline( y = precio.corte, color = "lightblue") +
+  ggtitle("Distribucion de precios de vivienda por segmentos de valor") +
+  xlab("Segmento global unificado") +
+  ylab("Precio estimado Madiva")
+
+```
+
+
+Exploramos los deciles en función de la vivienda
+
+```{r Deciles de precio, echo=FALSE, fig.width=7}
+# Number of quantiles to analyze the distribution
+num_tiles = 20
+
+df <- df %>% 
+  mutate( price_q = as.factor(ntile(price, num_tiles)))
+          
+
+df.cortes <- df %>% 
+  group_by(price_q) %>% 
+  summarise(min = min(price), max = max(price), avg=mean(price), median = median(price))
+
+kable(df.cortes)
+
+```
+
+```{r Boxplot con los deciles, eval=FALSE, echo=FALSE}
+
+df %>%
+  ggplot() + 
+  geom_boxplot(aes(x=price_q, y = price, fill = price_q )) +
+  scale_y_log10() + 
+  geom_hline( y = 450000, color = "lightblue")
+
+```
+
+## ¿Cuál es la proporción de clientes premium?
+
+Exploramos la distribucion de clientes premium segun el precio de la casa. Primero por segmentos
+
+```{r Probabilidades de los clientes por segmentos, echo=FALSE, fig.width=7}
+
+table.segmento <-   
+  df %>%
+  filter(cod_segmento_plan_uno == "P") %>%
+  select(segmento5c,price_q) %>%
+  ftable()
+
+#kable(table.segmento)
+
+#prop.table(table.segmento, 1)
+#prop.table(table.segmento, 2)
+#prop.table(table.segmento)
+
+table.segmento %>%
+  prop.table(2) %>%
+  as.data.frame %>%
+  ggplot(aes(x=price_q, y=Freq, fill=segmento5c, order=desc(segmento5c)))+
+  geom_bar(stat="identity")+
+  scale_fill_brewer()+
+  ggtitle("Distribución de clientes por segmento y precio de la casa") +
+  ylab("P(Segmento|Precio casa)") +
+  xlab("Quantil (20) de precio")
+
+```
+
+A continuacion lo hacemos agrupando los segmentos que consideramos Premium (3-Valor, 4- Alto Valor, 5 - Patrimonio) vs el resto. 
+
+Filtramos los clientes por la segmentacion de vinculacion, para obtener una probabilidad de premium. Nos quedamos solo con aquellos cuya estimacion creemos que es más cercana a la realidad (P = vinculados, V = previnculados, T = transaccionales)
+
+```{r Probabilidad de Premium, echo=FALSE}
+
+table.premium <-   
+  df %>%
+  filter(cod_segmento_plan_uno == "P" | cod_segmento_plan_uno == "V" | cod_segmento_plan_uno == "T" ) %>%
+#  filter(cod_segmento_plan_uno != "R"  ) %>%    
+  mutate(premium = ifelse(segmento5c == 5 |  segmento5c == 4 | segmento5c == 3, 'Yes', 'No')) %>%
+  select(premium,price_q) %>%
+  table()
+
+
+# P(premium) - probabilidad a priori de ser premium
+p.premium <- prop.table(margin.table(table.premium,1))
+  
+p.premium 
+  
+```
+
+
+## Probabilidad Premium condicionada al precio (quantil)
+
+```{r Probabilidad de Premium, condicionada al quantil, echo=FALSE, fig.width=7}
+
+# P(premium|price_q) - probabilidad de ser premium dado el precio (cuartil) de la casa
+kable(prop.table(table.premium, 2))
+
+table.premium %>%
+  prop.table(2) %>%
+  as.data.frame %>%
+  ggplot(aes(x=price_q, y=Freq, fill=premium, order=desc(premium)))+
+  geom_bar(stat="identity")+
+#  scale_fill_brewer()+ 
+  geom_hline( y = p.premium['Yes'], color = "blue") +
+  ggtitle("Distribucion de Premiums en funcion de precio (V,P,T)") +
+  ylab("P(Premium|Precio casa)") +
+  xlab("Quantil (20) de precio")
+
+```
+
+
+## ¿Cual es el punto de corte adecuado?
+
+Usando la división en cuantiles anterior, buscamos cual es el punto de corte adecuado para obtener un ratio efectivo y un número de clientes objetivo adecuado. 
+
+Para el número de clientes objetivo (n_target) nos quedamos con clientes cuyo: 
+  - Precio de vivienda estimado > corte 
+  - Segmento Plan Uno es V (Previnculado) o R (Básico)
+  - Mayor de 18 años y menor de 60 años
+
+
+
+```{r Helper functions to accumulate, echo=FALSE}
+
+## Calcula la  segmentation de los clientes 
+## 
+## Asigna las categorias de 
+##   - Segmentacion Global unicficada de 0 a 5 : 5,4,3 son de valor 
+##   - Segmento Plan Uno : Vinculados, Previnculados, Transaccionales y residuales. 
+##   - edad: < 18, 18 < x < 60 , 65 
+##   - target: definido como previnculados y residuales entre 18 y 60 
+calc_segmentation <- function(df) {
+  
+  df %>% 
+  mutate( price_q = as.numeric(price_q)) %>%
+  #  filter( price_q == i  ) %>%
+  mutate(
+    premium = ifelse(segmento5c == 5 |  segmento5c == 4 | segmento5c == 3, 1, 0),
+    nonpremium = ifelse(segmento5c == 2 |  segmento5c == 1 , 1, 0),
+    P =  ifelse(cod_segmento_plan_uno == "P" , 1, 0),
+    R =  ifelse(cod_segmento_plan_uno == "R" , 1, 0),
+    Tr = ifelse(cod_segmento_plan_uno == "T" , 1, 0),
+    V =  ifelse(cod_segmento_plan_uno == "V" , 1, 0),
+    Na = ifelse(is.na(years),1,0),
+    joven = ifelse(years < 18,1,0),
+    mayor = ifelse(years > 59,1,0),
+    target = ifelse((cod_segmento_plan_uno == "V" | cod_segmento_plan_uno == "R") & (years >= 18 & years <= 59),1,0),
+    target_premium = ifelse((target == 1 & premium == 1),1,0),
+    vinculados = ifelse((cod_segmento_plan_uno == "P") & (years >= 18 & years <= 59),1,0),
+    vinculados_premium = ifelse((vinculados == 1 & premium == 1),1,0)
+    ) %>%
+  group_by(price_q) %>%
+  summarise(
+    min_price = min(price),
+    avg_price = mean(price),
+    median_price = median(price),
+    n_premium = sum(premium), 
+    n_nonpremium  = sum(nonpremium),
+    n_P = sum(P, na.rm = TRUE),
+    n_R = sum(R, na.rm = TRUE),
+    n_T = sum(Tr, na.rm = TRUE),
+    n_V = sum(V, na.rm = TRUE),
+#    n_NA = sum(Na),
+    n_joven = sum(joven, na.rm = TRUE),
+    n_mayor = sum(mayor, na.rm = TRUE),
+    n_target = sum(target, na.rm = TRUE),
+    n_target_premium = sum(target_premium, na.rm = TRUE),
+    n_vinculados = sum(vinculados, na.rm = TRUE),   
+    n_vinculados_premium = sum(vinculados_premium, na.rm = TRUE)
+    ) %>% 
+  arrange(desc(price_q)) 
+  
+}
+
+## Calcula las probabilidades asociadas al quantil
+## Calcula el ratio respecto a una prob. a priori proporcionada
+premium_probabilities <- function(df, apriori_premium) {
+  
+  df %>%
+    mutate(
+      prob_premium = n_premium/(n_nonpremium + n_premium),
+      ratio_premium = n_premium/(n_nonpremium + n_premium) * 1/apriori_premium,
+      prob_premium_target = n_target_premium/n_target,
+      ratio_premium_target = n_target_premium/n_target * 1/apriori_premium,
+      prob_premium_vinculados = n_vinculados_premium/n_vinculados,
+      ratio_premium_vinculados = n_vinculados_premium/n_vinculados * 1/apriori_premium      
+      ) 
+  }
+
+## Calcula las probablidades asociadas al acumulado del quantil
+## Calcula el ratio respecto a una prob. a priori proporcionada 
+premium_accum_probabilities <- function(df, apriori_premium) {
+  
+  df %>%
+    mutate(
+      c_premium = cumsum(n_premium),
+      c_nonpremium = cumsum(n_nonpremium),
+      c_target = cumsum(n_target),
+      c_target_premium = cumsum(n_target_premium),
+      c_vinculados = cumsum(n_vinculados),
+      c_vinculados_premium = cumsum(n_vinculados_premium)
+      ) %>%
+    mutate(
+      prob_premium = c_premium/(c_nonpremium + c_premium),
+      ratio_premium = c_premium/(c_nonpremium + c_premium) * 1/apriori_premium,
+      prob_premium_target = c_target_premium/c_target,
+      ratio_premium_target = c_target_premium/c_target * 1/apriori_premium,
+      prob_premium_vinculados = c_vinculados_premium/c_vinculados,
+      ratio_premium_vinculados =  c_vinculados_premium/c_vinculados * 1/apriori_premium
+      ) 
+  }
+
+```
+
+
+```{r}
+
+df.by_price_q <- df %>% calc_segmentation()
+
+```
+
+### Tabla: Número de clientes objetivo de Premium por quantil 
+
+
+```{r}
+
+df.prob_no_accum <- 
+  df.by_price_q %>% 
+  premium_probabilities(p.premium["Yes"])
+
+df.prob_no_accum %>%
+  select(price_q, min_price, n_premium, n_nonpremium, n_target, n_target_premium, prob_premium, ratio_premium, prob_premium_target, prob_premium_vinculados) %>%
+kable()
+
+```
+
+### Tabla: Número de clientes objetivo de Premium por encima de precio de vivienda x 
+
+
+```{r}
+
+df.prob_accum <- 
+  df.by_price_q %>% 
+  premium_accum_probabilities(p.premium["Yes"])
+
+
+df.prob_accum %>%
+  select(price_q, c_target, prob_premium, ratio_premium, prob_premium_target, prob_premium_vinculados) %>%
+  kable()
+
+```
+
+
+
+```{r Grafico con los puntos de target territorial, echo=FALSE, fig.width=10}
+
+obj_target = 2e5
+
+df.prob_accum %>%
+  ggplot() +
+  geom_line(aes(x=min_price, y = c_target )) +
+  geom_hline(y = obj_target, color = "blue") +
+  ggtitle("Clientes objetivo de la campaña") +
+  xlab("Precio de corte de la vivienda") +
+  ylab("Número de clientes")
+
+```
+
+
+
+
+# 5. Analisis para la Territorial Este: id = 1964
+
+## Carga y procesado de los datos
+
+Obtenemos los datos para los clientes donde los filtros de partida son: 
+
+  - Pertenecen a la entidad BBVA (*p.cod_paisoalf = 'ES' AND p.cod_entalfa = '0182'*)
+  - clientes etiquetados con el Plan Uno, es decir activos
+  - Pertemecen a la Terrirorial Este - para ello cruzamos con Unidad Principal y seleccionamos los que estan adscritos a *u.cod_ofialfa = '1964'* con nivel *u.cod_nvelofic = '50'* que se corresponde con las territoriales. 
+
+
+```{r Carga de datos territorial }
+
+q.premium_territorial = "
+SELECT c.cod_persctpn cod_persona, c.fec_nacimi fec_nacimi, 
+       u.cod_ofialfa cod_ofialfa, 
+       g.cod_segmsubo cod_segmsubo, g.segmento5c segmento5c,
+       uno.cod_segmento_plan_uno cod_segmento_plan_uno,
+       p.precision precision, p.price price, p.num_candidates num_candidates 
+FROM da_pro.clientes_corp c 
+JOIN da_pro.calculo_corp_unidad_principal u
+ON (c.cod_paisoalf = u.cod_paisoalf AND c.cod_entalfa = u.cod_entalfa AND c.cod_persctpn = u.cod_persctpn 
+    AND c.partition_id = u.partition_id AND c.partition_id = '20151031'
+    AND c.cod_paisoalf = 'ES' AND c.cod_entalfa = '0182'
+    AND u.cod_nvelofic = '50' AND u.cod_ofialfa = '1964'
+   )
+JOIN clarity_elements.segmento_global_unico g
+ON (CAST(c.cod_persctpn AS INT) = g.cod_persona)
+JOIN clarity_elements.segmento_plan_uno uno
+ON (CAST(c.cod_persctpn AS int) = uno.cod_persona)
+JOIN da_madiva.address_price p
+ON (c.cod_paisoalf = p.cod_paisoalf AND c.cod_entalfa = p.cod_entalfa AND c.cod_persctpn = p.cod_persctpn 
+    AND p.cod_domicper = 1
+   )
+" 
+
+df.premium_territorial <- qhive(q.premium_territorial)
+
+
+```
+
+```{r Test numero de clientes territorial, eval=FALSE, echo=FALSE}
+nrow(df.premium_territorial)
+```
+
+El número de clientes de partida es (`r nrow(df.premium_territorial)`). Acondicionamos y filtramos de forma similar mediante Segmento Global por los que son clientes particulares (*segmento5c > 0* ).
+
+
+```{r Preparacion de los datos territorial}
+
+df.premium_territorial$segmento5c <- factor(df.premium_territorial$segmento5c)
+df.premium_territorial$cod_segmsubo <- factor(df.premium_territorial$cod_segmsubo)
+df.premium_territorial$cod_segmento_plan_uno <- factor(df.premium_territorial$cod_segmento_plan_uno)
+
+df <- df.premium_territorial %>% 
+  select(cod_persona,fec_nacimi,
+         cod_segmsubo,segmento5c,cod_segmento_plan_uno, 
+         precision,price,num_candidates) %>%
+  filter(segmento5c != 0 ) %>%
+  mutate(years = toYears(fec_nacimi) )
+
+```
+
+## Analisis exploratorio de los precios de la vivienda para la Territorial Este
+
+```{r Summary del precio Territorial}
+
+summary(df$price)
+```
+
+```{r Distribucion de los precios de la vivienda territorial, message=FALSE, echo=FALSE, fig.width=7}
+
+
+df %>%
+  filter(price > 1e4 & price < 1e7) %>%  
+  ggplot() +
+  geom_bar(aes(x = price)) + 
+  scale_x_log10() +
+  ggtitle("Distribucion de precios de vivienda (Territorial Este)") +
+  xlab("Precio estimado Madiva") +
+  ylab("Número de viviendas")
+
+```
+
+- En comparación con los valores generales, vemos que los precios son en general más bajos. La mediana está en torno a los 125.000 y la media en los 165.000.
+
+
+## ¿Cuál es la distribución de precio en función del segmento para la Territorial Este ?
+
+Exploramos la distribución de los precios en función de los diferentes segmentos de valor (Segmento Global, 1 a 5 donde 3,4,5 son valor). 
+
+Pintamos la estimacion previa que teníamos para el corte de valor, en torno a 450.000 euros. Usamos el mismo en este caso que para todos los clientes.
+
+```{r Distribución por segmento global territorial, echo=FALSE, message=FALSE, fig.width=7}
+
+precio.corte <- 350000
+
+df %>%
+  filter(price > 1e4 & price < 1e7) %>%  
+  ggplot(aes(x = price, fill = segmento5c )) + 
+  geom_bar() + 
+  facet_grid(segmento5c ~ . , scales = "free_y") +
+  scale_x_log10() +
+  geom_vline( x = precio.corte, color = "lightblue") +
+  ggtitle("Distribucion de precios de vivienda por segmentos de valor (Territorial Este)") +
+  xlab("Precio estimado Madiva") +
+  ylab("Número de viviendas")
+
+```
+
+Se confirma la tendencia de que los precios de las viviendas son más bajos. Tambien parece que las diferencias entre los segmentos son más acusadas, al menos entre los de valor.
+
+Visualizamos esos mismos datos mediante un gráfico de Boxplots: 
+
+```{r Boxplots de las distribuciones de precio territorial, echo=FALSE, message=FALSE, fig.width=7}
+
+df %>%
+  ggplot() + 
+  geom_boxplot(aes(x=segmento5c, y = price, fill = segmento5c )) +
+  scale_fill_brewer()+  
+  scale_y_log10() + 
+  geom_hline( y = precio.corte, color = "lightblue") +
+  ggtitle("Distribucion de precios de vivienda por segmentos de valor (Territorial Este)") +
+  xlab("Segmento global unificado") +
+  ylab("Precio estimado Madiva")
+
+```
+
+Exploramos los deciles en función de la vivienda
+
+```{r Deciles de precio territorial, echo=FALSE}
+# Number of quantiles to analyze the distribution
+num_tiles = 20
+
+df <- df %>% 
+  mutate( price_q = as.factor(ntile(price, num_tiles)))
+          
+
+df.cortes <- df %>% 
+  group_by(price_q) %>% 
+  summarise(min = min(price), max = max(price), avg=mean(price), median = median(price))
+
+kable(df.cortes)
+
+```
+
+En este caso, para el 5% de precio superior, el precio mínimo desciende a 377.000 euros. 
+
+## ¿Cuál es la proporción de clientes premium en la Territorial Este?
+
+Filtramos los clientes por la segmentacion de vinculacion, para obtener una probabilidad de premium. Nos quedamos solo con aquellos cuya estimacion creemos que es más cercana a la realidad (P = vinculados, V = previnculados, T = transaccionales)
+
+```{r Probabilidad de Premium territorial, echo=FALSE}
+
+table.premium_territorial <-   
+  df %>%
+  filter(cod_segmento_plan_uno == "P" | cod_segmento_plan_uno == "V" | cod_segmento_plan_uno == "T" ) %>%
+#  filter(cod_segmento_plan_uno != "R"  ) %>%    
+  mutate(premium = ifelse(segmento5c == 5 |  segmento5c == 4 | segmento5c == 3, 'Yes', 'No')) %>%
+  select(premium,price_q) %>%
+  table()
+
+
+# P(premium) - probabilidad a priori de ser premium
+p.premium_territorial <- prop.table(margin.table(table.premium_territorial,1))
+  
+p.premium_territorial 
+  
+```
+
+
+## Probabilidad Premium condicionada al precio (quantil)
+
+```{r Probabilidad de Premium, condicionada al quantil- territorial, echo=FALSE, fig.width=7}
+
+# P(premium|price_q) - probabilidad de ser premium dado el precio (cuartil) de la casa
+kable(prop.table(table.premium_territorial, 2))
+
+table.premium_territorial %>%
+  prop.table(2) %>%
+  as.data.frame %>%
+  ggplot(aes(x=price_q, y=Freq, fill=premium, order=desc(premium)))+
+  geom_bar(stat="identity")+
+#  scale_fill_brewer()+ 
+  geom_hline( y = p.premium_territorial['Yes'], color = "blue") +
+  ggtitle("Distribucion de Premiums en funcion de precio (V,P,T)") +
+  ylab("P(Premium|Precio casa)") +
+  xlab("Quantil (20) de precio")
+
+```
+
+
+## ¿Cual es el punto de corte adecuado para la Territorial Este?
+
+Usando la división en cuantiles anterior, buscamos cual es el punto de corte adecuado para obtener un ratio efectivo y un número de clientes objetivo adecuado. 
+
+Para el número de clientes objetivo (n_target) nos quedamos con clientes cuyo: 
+  - Precio de vivienda estimado > corte 
+  - Segmento Plan Uno es V (Previnculado) o R (Básico)
+  - Mayor de 18 años y menor de 60 años
+
+
+
+```{r}
+
+df.by_price_q.territorial <- df %>% calc_segmentation()
+
+```
+
+### Tabla: Número de clientes objetivo de Premium por quantil 
+
+
+```{r}
+
+df.prob_no_accum.territorial <- 
+  df.by_price_q.territorial %>% 
+  premium_probabilities(p.premium_territorial["Yes"])
+
+df.prob_no_accum.territorial %>%
+  select(price_q, min_price, n_premium, n_nonpremium, n_target, n_target_premium, prob_premium, ratio_premium, prob_premium_target, prob_premium_vinculados) %>%
+kable()
+
+```
+
+### Tabla: Número de clientes objetivo de Premium por encima de precio de vivienda x 
+
+
+```{r}
+
+df.prob_accum.territorial <- 
+  df.by_price_q.territorial %>%
+  premium_accum_probabilities(p.premium_territorial["Yes"])
+
+
+df.prob_accum.territorial %>%
+  select(price_q, c_target, prob_premium, ratio_premium, prob_premium_target, prob_premium_vinculados) %>%
+  kable()
+
+```
+
+
+
+```{r Grafico con los puntos de target, echo=FALSE, fig.width=10}
+
+obj_target = 2e4
+
+df.prob_accum.territorial %>%
+  ggplot() +
+  geom_line(aes(x=min_price, y = c_target )) +
+  geom_hline(y = obj_target, color = "blue") +
+  ggtitle("Clientes objetivo de la campaña") +
+  xlab("Precio de corte de la vivienda") +
+  ylab("Número de clientes")
+
+```
+
+
+Es posible que tanto el precio como el punto de corte sea mejor bajarlo para trabajar con la territorial Este. 
+
+# 6. Conclusiones
+
+  - Se calcula la tasa de clientes Premium entre los clientes BBVA. La tasa de premium entre particulares calculada a partir de los vinculados, pre-vinculados y transaccionales es $P(premium)$ = `r p.premium["Yes"]`
+  
+  - Se han calculado varios valores de corte para el precio de la casa, que pueden ser usados en función de las necesidades de cada campaña. El valor previamente calculado de **450.000 euros** es un valor razonable que separa al 5% de los clientes de la casa más cara.
+  
+  - Se calcula la tasa de clientes Premium entre los clientes de la Territorial Este. La tasa de premium que se obtiene en este cas es de $P_{TE}(premium)$ = `r p.premium_territorial["Yes"]`
+
+  - Se calculan del mismo modo los valores de corte para la captación de clientes Premium en la territorial Este. En este caso los valores del precio de la casa son algo más bajos, como en cierta manera se puede esperar ya que son Madrid y Barcelona las que seguramente concentran los mayores precios. Un análisis similar al general sugiere que un punto de corte orientativo para la seleccion de clientes de valor está en **350.000 euros** para el precio de la casa. Con este corte se obtendrían en torno a *14500 clientes poco vinculados y actualmente etiquetados como de no valor* (antes de pasar ningún otro filtro de actividad o recursos).
+ponde aproximadamente con el quantil 20 de más valor:
+
+```{r}
+
+df.prob_no_accum.territorial[df.prob_no_accum.territorial$price_q == '20',]
+
+```
+
+
+** Creación bolsa clientes DT Este**
+
+La bolsa final generada tiene las siguientes características:
+
+* Clientes particulare: segmento5c > 0
+* Territorial Este: oficina principal cumple cod_nvelofic = '50' AND cod_ofialfa = '1964'
+* Clientes básicos, previnculados o sin plan uno: plan uno = null o R (básico) o V (previnculado)
+* Clientes de no valor: segmento5c = 1,2
+* Edad entre 18 y 59 años: fec_nacimi between 1956 and 1997
+* 1a vivienda: cod_domicper = 1
+* Vivienda > 350000
+
+```{r Bote Final Territorial Este, eval=FALSE}
+q.bote_filtros <- 
+  "create table da_madiva.campanna_ene2016_bote_filtrado as
+  select c.cod_persctpn, price as variable1
+  FROM da_pro.clientes_corp c 
+  JOIN da_pro.calculo_corp_unidad_principal u
+  ON (c.cod_paisoalf = u.cod_paisoalf AND c.cod_entalfa = u.cod_entalfa AND c.cod_persctpn = u.cod_persctpn 
+      AND c.partition_id = u.partition_id AND c.partition_id = '20151031'
+      AND c.cod_paisoalf = 'ES' AND c.cod_entalfa = '0182'
+      AND u.cod_nvelofic = '50' AND u.cod_ofialfa = '1964'   )
+  JOIN clarity_elements.segmento_global_unico g ON CAST(c.cod_persctpn AS INT) = g.cod_persona
+  join da_pro.segmento_plan_uno sg on trim(sg.cod_persctpn) = trim(c.cod_persctpn) and sg.partition_id = '20151031' and sg.cod_entalfa = '0182'
+  JOIN da_madiva.address_price p
+  ON (c.cod_paisoalf = p.cod_paisoalf AND c.cod_entalfa = p.cod_entalfa AND c.cod_persctpn = p.cod_persctpn 
+      AND cast(trim(cod_domicper) as int)  = 1
+     )
+   where c.partition_id = '20151031' and c.cod_paisoalf = 'ES' AND c.cod_entalfa = '0182' 
+   and segmento5c in (1,2)
+   and (cod_segpref is null or substr(trim(cod_segpref), 2, 1) in ('R', 'V'))
+   and price > 350000
+   and year(fec_nacimi) between 1956 and 1997
+  "
+do.hive(q.bote_filtros)
+
+
+q.bote_completo <- 
+  "create table da_madiva.campanna_ene2016_bote_todos as
+  select c.cod_persctpn, price as variable1
+  FROM da_pro.clientes_corp c 
+  JOIN da_pro.calculo_corp_unidad_principal u
+  ON (c.cod_paisoalf = u.cod_paisoalf AND c.cod_entalfa = u.cod_entalfa AND c.cod_persctpn = u.cod_persctpn 
+      AND c.partition_id = u.partition_id AND c.partition_id = '20151031'
+      AND c.cod_paisoalf = 'ES' AND c.cod_entalfa = '0182'
+      AND u.cod_nvelofic = '50' AND u.cod_ofialfa = '1964'   )
+  JOIN clarity_elements.segmento_global_unico g ON CAST(c.cod_persctpn AS INT) = g.cod_persona
+  join da_pro.segmento_plan_uno sg on trim(sg.cod_persctpn) = trim(c.cod_persctpn) and sg.partition_id = '20151031' and sg.cod_entalfa = '0182'
+  JOIN da_madiva.address_price p
+  ON (c.cod_paisoalf = p.cod_paisoalf AND c.cod_entalfa = p.cod_entalfa AND c.cod_persctpn = p.cod_persctpn 
+      AND cast(trim(cod_domicper) as int)  = 1
+     )
+   where c.partition_id = '20151031' and c.cod_paisoalf = 'ES' AND c.cod_entalfa = '0182' 
+   and segmento5c in (1,2)
+   and (cod_segpref is null or substr(trim(cod_segpref), 2, 1) in ('R', 'V'))
+   --and price > 350000
+   and year(fec_nacimi) between 1956 and 1997
+  "
+do.hive(q.bote_completo)
+
+```
+
+```{r count botes}
+n.total <- qimpala("select count(*) from da_madiva.campanna_ene2016_bote_todos")
+n.filtro <- qimpala("select count(*) n from da_madiva.campanna_ene2016_bote_filtrado")
+```
+
+Con eso se obtiene un total de `r n.filtro` clientes.
+

@@ -1,0 +1,335 @@
+---
+title: "GAC - Example Branch"
+author: "Maria Hernandez"
+date: "25/2/2015"
+output: html_document
+---
+
+
+```{r, echo=FALSE}
+# This is the first mandatory section.
+
+title     <- '[CBC 2.0 - Productivity Model]: Branch Example'
+keywords  <- 'usuario,cod_user,cod_eve_trn,tiempo,oficina'
+```
+
+```{r mandatory, echo=FALSE}
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(plyr)) 
+options(warn=-1)
+
+source('~/bda_clarity/tools/warehouse_basics.R')
+```
+
+
+```{r set-options, echo=FALSE, out.width='\\textwidth'}
+options(width = 10000)
+#out.width='\\textwidth', fig.width=10, 
+#library(plyr)
+library(reshape)
+library(ggplot2)
+library(stringr)
+#library(data.table)
+#library('scales')
+#options(scipen=10)
+```
+
+
+```{r dependencies, cache=TRUE, echo=FALSE}
+
+txc_full <- clarity.use_table(DEPENDENCY_FULL_PRO_TABLE,
+                         'transacciones_por_canal',
+                         select = '*', sqname='txc_full')
+
+evento_last <- clarity.use_table(DEPENDENCY_FULL_PRO_TABLE,
+                         'transacciones_por_canal',
+                         select = '*', sqname='txc_full')
+
+detalle_evento_last <- clarity.use_table(DEPENDENCY_FULL_PRO_TABLE,
+                         'transacciones_por_canal',
+                         select = '*', sqname='txc_full')
+
+grupo_evento_last <- clarity.use_table(DEPENDENCY_FULL_PRO_TABLE,
+                         'transacciones_por_canal',
+                         select = '*', sqname='txc_full')
+```
+
+```{r defineBranch}
+#oficina <- '0973'
+oficina <- '2982'
+```
+
+
+Let's explore the data for the well-known branch `r oficina`
+
+### Create the sample table for 2014
+
+The filters:
+
+* Operations identified as CASH
+* Branch of Level 10 and in Territoriales '0051', '0063', '0072', '1523', '1525', '1964', '8302'
+* Year 2014
+* Canal = 1, Servicing = 1
+* Hours: 08:30 - 14:15
+* Position Employee: 'R80', 'T59',  'R42'
+  
+
+```{r createData, cache=TRUE, echo=FALSE}
+query <- "
+create table mariah.txc_caja_gestores_$$branch$$ as
+select txc.*, 
+des_grupo_evento, 
+des_eventos, 
+des_detalle_evento
+from da_pro.transacciones_por_canal as txc 
+  -- filtro operaciones de caja
+	join mariah.op_caja ev on cast(trim(txc.cod_geve_trn) as int) = ev.cod_geve_trn and cast(trim(txc.cod_eve_trn) as int) = ev.cod_eve_trn and cast(trim(txc.cod_deve_trn) as int) = ev.cod_deve_trn
+	-- filtro por territoriales
+	join (
+	  select cod_ofihi
+	  from da_pro.jerarquia_oficinas
+	  where cod_entalfa = '0182' and COD_NIVELGR = '50' and cod_ofialfa in ('0051', '0063', '0072', '1523', '1525', '1964', '8302')
+	  and cod_nivhi = '10'
+	  and partition_id = '20140930'
+	  group by cod_ofihi
+	  ) x on txc.cod_ofictrn = x.cod_ofihi
+	left join catalogo_txc_test.grupo_evento  on (grupo_evento.partition_Id = '20140731' and cast(trim(grupo_evento.cod_grupo_evento) as int) = cast(trim(txc.cod_geve_trn) as int))
+	left join catalogo_txc_test.eventos on (eventos.partition_Id = '20140430' and cast(trim(eventos.cod_eventos) as int) = cast(trim(txc.cod_eve_trn) as int))
+	left join catalogo_txc_test.detalle_evento on (detalle_evento.partition_Id = '20140531' and cast(trim(detalle_evento.cod_detalle_evento) as int) = cast(trim(txc.cod_deve_trn) as int))
+where txc.partition_id like '2014%'
+  and cod_serv_dv = '0001'
+  and cod_canal_dv = '01'
+  and (
+    hour(hms_soli_trn) between 9 and 13 or
+   (hour(hms_soli_trn) = 8 and minute(hms_soli_trn) >= 30) or
+   (hour(hms_soli_trn) = 14 and minute(hms_soli_trn) <= 15)
+  )
+  and txc.cod_ofictrn = '$$branch$$'
+  and trim(cod_cargousu) in ('R80', 'T59', 'R42')"
+
+query <- gsub('$$branch$$', oficina , query, fixed=TRUE)
+#do.hive(query)
+```
+
+
+### Number of users and PUESTOs
+
+Let's compute which users and puestos appear in the data for this particular branch. We count how many operations each user carries out in each physical position. 
+
+```{r userPuesto, echo=FALSE}
+query <- "
+select trim(cod_user) as cod_user, cod_cargousu, cod_npuesto, count(*) nop
+from mariah.txc_caja_gestores_$$branch$$
+group by cod_user, cod_cargousu, cod_npuesto
+order by cod_user, cod_cargousu, cod_npuesto
+"
+query <- gsub('$$branch$$', oficina , query, fixed=TRUE)
+ofi <- qimpala(query)
+```
+
+A sample of the table:
+
+```{r}
+head(ofi, 10)
+```
+
+We see that there are `r length(unique(ofi$cod_user))` different users and `r length(unique(ofi$cod_npuesto))` different puestos. 
+
+For the branch 2982, there is supposed to be 3 cashiers. Let's plot the distribution accross User and Puesto. 
+
+```{r graphOfi, echo=FALSE}
+library(plyr)
+library(ggplot2)
+
+ggplot(ofi, aes(x=cod_npuesto, y=cod_user)) + geom_point(aes(size=nop, color=cod_cargousu))
+
+```
+
+```{r statsUser, echo=FALSE}
+library(plyr)
+user.stats <- ddply(ofi, .(cod_user), summarise, nop=sum(nop))
+user.stats$nop_p <- user.stats$nop/sum(user.stats$nop)
+#user.stats
+````
+
+We observe that even though there are several users, only `r nrow(subset(user.stats, nop_p >= 0.1))` of them have more than 10% of the transactions. For those, we cannot infer which place they use in the branch, since they all share position 3 and 6.
+
+
+```{r userOp, echo=FALSE}
+
+ggplot(user.stats, aes(x=cod_user, y=nop_p)) + 
+  geom_bar(stat="identity") + 
+  geom_hline(yintercept=0.1) + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 0))
+```
+
+## Let's compute statistics
+
+### Productivity
+
+Let's compute the productivity in that branch. We will measure productivity as the average time spent for each cashier to complete a transaction. We filter out those transactions that have an interval time out of (15s - 15min)
+
+```{r createDifTiempo, cache=TRUE, echo=FALSE}
+query <- "
+create table mariah.txc_caja_gestores_$$branch$$_join as
+select cod_ofictrn, cod_user, cod_cargousu, cod_npuesto, 
+  cod_persona, lag(cod_persona, 1, 0) over w as cod_persona_ant, 
+	tx.hms_soli_trn as hora, lag(hms_soli_trn, 1, 0) over w as hora_ant, 
+    (unix_timestamp(hms_soli_trn)-unix_timestamp(lag(hms_soli_trn, 1, 0) over w))/60.0 as dif_minutos,
+	cod_eve_trn, des_eventos, lag(des_eventos, 1, 0) over w as eve_ant, 
+	cod_deve_trn, des_detalle_evento, lag(des_detalle_evento, 1, 0) over w as deve_ant,
+    imp_trans, lag(imp_trans, 1, 0) over w as imp_ant, 
+    cod_trnfims
+from mariah.txc_caja_gestores_'$$branch$$' tx
+window w as (partition by cod_user, cod_ofictrn, fec_soli_trn order by hms_soli_trn)
+"
+query <- gsub('$$branch$$', oficina , query, fixed=TRUE)
+#do.hive(query)
+```
+
+
+```{r selectOps}
+query <- "
+  select trim(cod_user) as cod_user, cod_ofictrn, cod_cargousu, 
+  trim(des_eventos) as eve, trim(des_detalle_evento) as detall, 
+  concat(trim(des_eventos), '-', trim(des_detalle_evento)) as evento,
+  dif_minutos as diff
+  from mariah.txc_caja_gestores_$$branch$$_join
+  where eve_ant != '0' 
+  and dif_minutos between 0.25 and 15
+"
+query <- gsub('$$branch$$', oficina , query, fixed=TRUE)
+
+ops <- qimpala(query)
+```
+
+
+```{r, cache=TRUE, echo=FALSE}
+library(stringr)
+ops$cod_user <- str_trim(ops$cod_user)
+```
+
+```{r computeStats, echo=FALSE}
+library(plyr)
+op.stats <- ddply(ops,.(cod_user, cod_ofictrn, cod_cargousu, eve, detall, evento),
+                  summarise,
+                  nOp=length(diff),
+                  mean=mean(diff), sd = sd(diff),
+                  q25 = quantile(diff, probs = 0.25),
+                  q50_median = quantile(diff, probs = 0.50),
+                  q75 = quantile(diff, probs = 0.75))
+```
+
+
+```{r, echo=FALSE}
+#head(op.stats, 20)
+```
+
+Let's see some plots:
+
+First, we see that the distribution among the operations is diverse. Here we plot what's the percentage of each type of operation for every cashier for that branch in a year:
+
+```{r plotOperations1, fig.height=10, fig.width=15, out.width='\\textwidth', echo=FALSE}
+
+op.count <- ddply(ops,.(eve, detall),
+                  summarise, nOp=length(diff), pOp=length(diff)/nrow(ops))
+
+ggplot(op.count, aes(x=paste(eve,detall, sep="\n"), y=pOp)) + 
+  geom_bar(stat="identity") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 0)) + 
+  ggtitle("Percentage of each type of operation occuring in a branch") 
+```
+
+```{r plotOperations2, echo=FALSE}
+
+ggplot(subset(op.count, pOp >= 0.01), aes(x=paste(eve,detall, sep="\n"), y=pOp)) + 
+  geom_bar(stat="identity") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 0)) + coord_flip() + 
+  ggtitle("Operations occuring more than 1%") 
+```
+
+Now we are going to see the distribution of the time spent for each operation for the most repeated operations in that branch (more than 1%)
+
+```{r plotStats, fig.height=10, fig.width=15, out.width='\\textwidth'}
+
+ggplot(subset(ops, 
+              cod_user %in% unique(subset(user.stats, nop_p >= 0.1)$cod_user) &
+                paste0(eve, detall) %in% paste0(subset(op.count, pOp >= 0.01)$eve,
+                                                subset(op.count, pOp >= 0.01)$detall))
+        , aes(x=diff, color=cod_user)) + geom_density() + 
+ facet_wrap(~eve+detall, scales="free_y", ncol=3)
+```
+
+And finally, we compute the statistics for each user. An example for the top operations and the cashiers identified above:
+
+```{r tableStats, out.width='\\textwidth'}
+options(digits=2)
+
+d <- subset(op.stats, 
+       cod_user %in% unique(subset(user.stats, nop_p >= 0.1)$cod_user) & 
+         evento %in% paste0(subset(op.count, pOp >= 0.01)$eve, '-',
+                                                subset(op.count, pOp >= 0.01)$detall))
+
+d[with(d, order(detall, cod_user)), -c(4,6)]
+```
+
+```{r writeOutput, echo=FALSE}
+write.table(op.stats[,-c(6)], 
+            file=paste0("productividad_cajeros_", oficina, ".tsv"), sep="\t", 
+            row.names=FALSE, col.names=TRUE)
+```
+
+### Attendance and Availability
+
+We will compute how many clients attend to each branch in every time slot and day of the year. With this data, we can compare the number of people in the branch with the total number of cashiers. 
+
+First, we are going to check how many operations do not have a filled `cclien`.
+
+```{r emptyCclien, echo=FALSE}
+query <- "select des_eventos as eve, des_detalle_evento as deve, 
+  count(*) nop, 
+  sum(case when trim(cod_persona) != '@' then 1 else 0 end) as nop_inform,
+sum(case when trim(cod_persona) != '@' then 1 else 0 end)*1.0/count(*) as p_inform
+  from mariah.txc_caja_gestores_$$branch$$_join
+  group by des_eventos, des_detalle_evento
+  order by p_inform asc"
+
+# query <- "
+# select (case when trim(cod_pers_trs) != '@' or trim(cod_pers_ctr) != '@' or trim(cod_pers_c1) != '@' then 'informado' 
+#         else 'vacio' end) as cod_persona, des_eventos, count(*) n
+#  from txc_caja_gestores
+#  group by cod_persona, des_eventos
+#  order by des_eventos, cod_persona"
+
+query <- gsub('$$branch$$', oficina , query, fixed=TRUE)
+empty <- qimpala(query)
+```
+
+```{r, fig.width=15, fig.height=10}
+ggplot(subset(empty, p_inform < 0.98), aes (x=paste(eve, deve, sep='\n'), y=p_inform)) + geom_bar(stat="identity") + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+We observe that there are some operations that does not include `cclien`. The operations that have some with empty client, sorted by percentage:
+
+```{r topEmpty, cache=TRUE, echo=FALSE}
+subset(empty, p_inform < 1)
+```
+
+
+```{r attendanceData, echo=FALSE}
+query <- "select cod_ofictrn, to_date(hms_soli_trn) dia, cod_npuesto, periodo_id.id as periodo_id, count(distinct cod_pers_trs) as npers
+  from mariah.txc_caja_gestores_$$branch$$ txc
+    join mariah.periodo_id
+  where hms_soli_trn between 
+  from_unixtime(unix_timestamp(concat(to_date(hms_soli_trn), ' ', periodo_id.inicio))) and from_unixtime(unix_timestamp(concat(to_date(hms_soli_trn), ' ', periodo_id.fin)))
+  group by cod_ofictrn, to_date(hms_soli_trn), cod_npuesto, periodo_id.id
+  order by dia, periodo_id, cod_npuesto"
+
+query <- gsub('$$branch$$', oficina , query, fixed=TRUE)
+afluencia <- qimpala(query)
+```
+
+```{r, echo=FALSE}
+#head(afluencia, 50)
+```

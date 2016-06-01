@@ -1,0 +1,148 @@
+---
+output:
+  html_document:
+    self_contained: no
+    theme: cerulean
+---
+
+---
+title: ""
+author: "BBVA D&A - Captación"
+date: "23/12/2015"
+output: html_document
+---
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- 'Lenguajes de acceso a bbva.es'
+keywords  <- 'bbva.es, language'  
+```
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(grid))
+suppressMessages(library(hexbin))
+suppressMessages(library(lattice))
+suppressMessages(library(plyr))
+suppressMessages(library(reshape))
+suppressMessages(library(reshape2))
+suppressMessages(library(scales))
+
+suppressPackageStartupMessages(library('googleVis'))
+suppressPackageStartupMessages(library('ggplot2'))
+suppressPackageStartupMessages(library('knitr') )
+op <- options(gvis.plot.tag="chart")
+
+options(warn=-1, scipen=3, width=120)
+source('~/bda_clarity/tools/warehouse_basics.R')
+source('~/bda_clarity/tools/write.hive.R')
+
+
+# Multiple plot function
+#
+# ggplot objects can be passed in ..., or to plotlist (as a list of ggplot objects)
+# - cols:   Number of columns in layout
+# - layout: A matrix specifying the layout. If present, 'cols' is ignored.
+#
+# If the layout is something like matrix(c(1,2,3,3), nrow=2, byrow=TRUE),
+# then plot 1 will go in the upper left, 2 will go in the upper right, and
+# 3 will go all the way across the bottom.
+#
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  library(grid)
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+
+```
+
+
+```{r consultas_colectivos, cache=TRUE, echo=FALSE, eval = TRUE}
+
+
+languages = qhive("select cod_language, count(distinct cod_visitor_id), partition_id
+                    from da_omniture.omniture_bbvamice_master
+                    where substr(cod_language, 1, 1) not in ('1', '2', '3', '4', '5', '6','7','8','9','0')
+                    and cod_language LIKE '%(%'
+                    group by cod_language, partition_id
+                    ORDER BY partition_id")
+
+names(languages) = c("language", "total_by_month", "month")
+
+```
+
+
+### Lenguajes de acceso a bbva.es
+
+Se han contabilizado los lenguajes de acceso mensuales configurados en el navegador para cada cookie registrada. A continuación se muestran los resultados obtenidos.
+
+#### Agregado total
+
+```{r accesos_totales, cache=TRUE, echo=FALSE, eval = TRUE, fig.width=15, fig.height=15, fig.align='center'}
+
+languages_global = languages[,1:2]
+languages_global = ddply(languages_global,.(language), summarize, total = sum(total_by_month))
+languages_global$perc = 100*languages_global$total/sum(languages_global$total)
+languages_global = languages_global[ order(-languages_global$perc),]
+
+ggplot(languages_global[languages_global$language != "spanish (spain)" 
+                        & languages_global$language != "english (united kingdom)"
+                        & languages_global$language != "english (uk)"
+                        & languages_global$language != "english (united states)",], aes(x = language, y = perc))+ 
+  geom_bar(binwidth = 1, stat = "identity") +
+  xlab("language")+
+  ylab("%") + 
+  theme(legend.position="none", axis.text.x = element_text(angle = 63, hjust = 1, colour="black", size = 10), 
+        axis.text.y = element_text(colour="black")) +
+  ggtitle("Accesos mensuales por idioma")
+
+kable( languages_global, format = "markdown", align = 'l', caption = "Cookies por idioma")
+
+
+```
+
+#### Accesos mensuales
+
+En la siguiente tabla se muestran las cookies mensuales por idioma
+
+```{r accesos_mensuales, cache=TRUE, echo=FALSE, eval = TRUE, fig.width=15, fig.height=15, fig.align='center'}
+
+kable( languages, format = "markdown", align = 'l', caption = "Cookies mensuales por idioma")
+
+
+```

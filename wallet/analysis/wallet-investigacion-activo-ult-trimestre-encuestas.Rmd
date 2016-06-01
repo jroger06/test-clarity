@@ -1,0 +1,1598 @@
+---
+title: "Wallet Investigacion Encuestas <br/>"
+output: html_document
+---
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- "[Wallet]: Investigación de mercado - Encuestas"
+
+keywords  <- 'wallet, investigacion'  
+```
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(grid))
+suppressMessages(library(hexbin))
+suppressMessages(library(lattice))
+suppressMessages(library(reshape))
+suppressMessages(library(plyr))
+suppressMessages(library(stringr))
+suppressMessages(library(digest))
+suppressMessages(library(lattice))
+
+
+options(warn=-1, scipen=3, width=150)
+source('~/bda_clarity/tools/methods_connect.R') ;
+source('~/bda_clarity/tools/warehouse_basics.R') ;
+source('~/bda_clarity/tools/write.hive.R') ;
+```
+
+**Para el analisis se recoge información desde Noviembre 2013 hasta Marzo 2015. Para la extracción para las encuestas se excluirán empleados, clientes no particulares, menores de 18 años y mayores de 80 años,  clientes sin algún número de teléfono informado y clientes que no autorizan usar sus datos para campañas y no hayan firmado la LOPD. También deberían excluirse los que se oponenen a la nueva claúsula de la LOPD pero actualmente no se han podido identificar:**
+
+<br/>
+
+# A. Construcción colectivo y filtros
+
+1. Se crea la tabla de clientes wallet apuntando como 
+    + **activos** aquellos que se conectaron al menos una vez en el 1Q2015
+    + **inactivos** cuentan los demás clientes que han descargado la app pero no se conectaron en el 1Q2015.
+    + **BBVANet** son los clientes que accedieron a BBVANET al menos una vez en el 1Q2015. Se considera que un cliente accedió a BBVANET si en el mes pertenece en algúno de los segmentos comportamentales de 1 a 6:
+<br/> *Segmentación comportamental:*
+<br/> *1  Net contrata*
+<br/> *2  Net opera elevado*
+<br/> *3  Net opera básico*
+<br/> *4  Net consulta ATM elevado*
+<br/> *5  Net consulta ATM básico*
+<br/> *6	Net consulta*
+<br/> *7	ATM avanzado*
+<br/> *8	ATM básico*
+<br/> *9	Oficina ATM reducido*
+<br/> *10	Oficina*
+<br/> *11	Poco uso de canales*
+<br/> *12	Sin uso*
+<br/> Finalmente se extrae una muestra aleatoria de los clientes BBVANet de tamaño parecido que los wallet activos / inactivos y se junta con la tabla de clientes wallet unicos
+```{r CREAR_TABLA, eval=TRUE, echo=FALSE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_mariadrav.wallet_tablon_encuestas as
+        select * from da_mariadrav.wallet_tablon_analisis_investigacion_entrega
+        where xti_idefisco in ('1', '6', '7') 
+          and xti_sexo in ('M', 'V')
+          and cod_edad>=18 and cod_edad<=80
+          and xsn_empleado = ''
+          and concat(tfno_gest,tfno_par,tfno_mov) != '' 
+          and filtro_lopd = 1
+          and xsn_enviopub != 'N' 
+          and xsn_enviotmk != 'N'")
+```
+<br/> **Esta es la distribución de los clientes según actividad Wallet:**
+<br/> Wallet Activo:**`r qhive("select count(distinct cod_pers_trs) as dist_pers from da_mariadrav.wallet_tablon_encuestas where categoria_usuario='Wallet Activo'")`**
+<br/> Wallet Inactivo:**`r qhive("select count(distinct cod_pers_trs) as dist_pers from da_mariadrav.wallet_tablon_encuestas where categoria_usuario='Wallet Inactivo'")`**
+<br/> BBVANet:**`r qhive("select count(distinct cod_pers_trs) as dist_pers from da_mariadrav.wallet_tablon_encuestas where categoria_usuario='BBVANet'")`**
+
+<br/> Se comprueba que hay al menos 700 usuarios inactivos con antigüedad <= 6m para el estudio cuali. 
+De hecho hay **`r qhive("select count(distinct cod_pers_trs) from da_mariadrav.wallet_tablon_encuestas where antiguedad_wallet_months <= 6 and categoria_usuario ='Wallet Inactivo'")`** clientes <br/> 
+
+<br/> 
+
+**Análisis información de teléfono informado, validado** <br/> 
+```{r MOVIL_INFO, eval=TRUE, echo=FALSE, cache=TRUE}
+# Móvil
+movil <- qhive("select categoria_usuario, inf_telefono, count(distinct cod_pers_trs) as dist_pers 
+      from da_mariadrav.wallet_tablon_encuestas
+      group by categoria_usuario, inf_telefono")
+
+movil$inf_telefono <- ifelse(substr(movil$inf_telefono,1,2)=='00', '3. No Informado',
+                             ifelse(substr(movil$inf_telefono,1,2)=='01', '1. Validado', '2. Informado'))
+                             
+# Get the levels for type in the required order
+movil = arrange(movil, categoria_usuario, inf_telefono)
+
+# Calculate the % inf_telefono
+movil = ddply(movil, .(categoria_usuario), transform, percent_dist_pers = dist_pers/sum(dist_pers) * 100)
+movil$label_percent_dist_pers = paste0(sprintf("%.0f", movil$percent_dist_pers), "%")
+
+# Order
+movil = movil[order(movil$categoria_usuario, movil$inf_telefono),]
+
+#Graph
+graph_movil <- ggplot(movil, aes(x = factor(categoria_usuario), y = percent_dist_pers, fill = inf_telefono, label=movil$label_percent_dist_pers, ymax=max(percent_dist_pers))) + 
+  geom_bar(stat = "identity", width = .7) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("clientes distintos") + 
+  ggtitle("Información teléfono móvil") + 
+  geom_text(aes(y = percent_dist_pers, label = label_percent_dist_pers), position = "stack", size = 3.5) +
+  scale_fill_brewer()
+graph_movil
+
+```
+
+<br/>
+
+# B. Análisis de las variables
+
+<br/>
+
+**1. Estudio variables sociodemográficas:**
+<br/> *Análisis Edad, Antigüedad BBVA, Antigüedad Wallet, Género, Ciudad, Segmento según Plan Uno*
+<br/> 
+
+* Edad: La aplicación se usa por la gente más joven mientras que para edades mayores a 45 años el colectivo Wallet es menor que el de BBVANet. No se aprecia mucha diferencia en las distribuciones de los clientes Activos e Inactivos. 
+<br/>
+
+```{r EDAD_DATOS, eval=TRUE, echo=FALSE, cache=TRUE}
+edad <- qhive("select categoria_usuario, cod_edad,
+              case when cod_edad>=18 and cod_edad<=24 then '01. 18-24'
+                   when cod_edad>=25 and cod_edad<=34 then '02. 24-34'
+                   when cod_edad>=35 and cod_edad<=44 then '03. 35-44'
+                   when cod_edad>=45 and cod_edad<=59 then '04. 45-59'
+                   when cod_edad>=60 then '05. >=60'
+               end as grupos_edad,
+              count(distinct cod_pers_trs) as conteo_dist_pers
+              from da_mariadrav.wallet_tablon_encuestas
+              group by categoria_usuario, 
+                       cod_edad, 
+                       case  when cod_edad>=18 and cod_edad<=24 then '01. 18-24'
+                             when cod_edad>=25 and cod_edad<=34 then '02. 24-34'
+                             when cod_edad>=35 and cod_edad<=44 then '03. 35-44'
+                             when cod_edad>=45 and cod_edad<=59 then '04. 45-59'
+                             when cod_edad>=60 then '05. >=60'
+                         end")
+```
+
+```{r EDAD, eval=TRUE, echo=FALSE, cache=TRUE}
+edad$categoria_usuario_ord <- ifelse(edad$categoria_usuario=="Wallet Activo", 
+                                                 paste0("01. ", edad$categoria_usuario),
+                                                 ifelse(edad$categoria_usuario=="Wallet Inactivo", 
+                                                        paste0("02. ", edad$categoria_usuario), 
+                                                        paste0("03. ", edad$categoria_usuario)))
+
+ggplot(edad, aes(x=cod_edad)) + geom_histogram( aes(y=conteo_dist_pers), stat="identity", binwidth=.5, colour="white", fill="blue")+ ggtitle("Histograma de la edad x categoría usuario") +  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("clientes distintos") + 
+    facet_grid(categoria_usuario_ord ~ .)
+ 
+ # Ver la distribución de edad por grupos
+edad_gr = unique(ddply(edad, .(grupos_edad, categoria_usuario), transform, conteo_dist_pers_gr = sum(conteo_dist_pers))[, c(1, 3, 6)])
+
+   # Get the levels for type in the required order
+edad_gr = arrange(edad_gr, categoria_usuario, grupos_edad)
+
+  # Calculate the percentages
+edad_gr = ddply(edad_gr, .(categoria_usuario), transform, percent_dist_pers = conteo_dist_pers_gr/sum(conteo_dist_pers_gr) * 100)
+
+edad_gr$label_percent_dist_pers = paste0(sprintf("%.0f", edad_gr$percent_dist_pers), "%")
+
+  # Order
+edad_gr = edad_gr[order(edad_gr$categoria_usuario, edad_gr$grupos_edad),]
+
+  #Graph
+graph_edad_gr <- ggplot(edad_gr, aes(x = factor(categoria_usuario), y = percent_dist_pers, fill = grupos_edad, label=label_percent_dist_pers, ymax=max(percent_dist_pers))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("clientes distintos") + ggtitle("Grupos edad") + 
+  geom_text(aes(y = percent_dist_pers, label = label_percent_dist_pers), position = "stack", size = 3.5) +
+  scale_fill_brewer()
+graph_edad_gr
+
+
+```
+
+<br/> 
+
+* Distribución del genero: Los hombres usan más wallet que las mujeres 
+<br/> 
+```{r GENERO_DATOS, eval=TRUE, echo=FALSE, cache=TRUE}
+sexo <- qhive("select categoria_usuario, xti_sexo, count(distinct cod_pers_trs) as conteo_dist_pers
+              from da_mariadrav.wallet_tablon_encuestas
+              group by categoria_usuario, xti_sexo")
+```
+
+```{r GENERO, eval=TRUE, echo=FALSE, cache=TRUE}
+  # Get the levels for type in the required order
+sexo = arrange(sexo, categoria_usuario, xti_sexo)
+
+  # Calculate the percentages
+sexo = ddply(sexo, .(categoria_usuario), transform, percent_dist_pers = conteo_dist_pers/sum(conteo_dist_pers) * 100, pos = cumsum((conteo_dist_pers/sum(conteo_dist_pers)) - (0.5 * conteo_dist_pers/sum(conteo_dist_pers)))*100)
+
+sexo$label_percent_dist_pers = paste0(sprintf("%.0f", sexo$percent_dist_pers), "%")
+sexo$des_sexo <- ifelse(sexo$xti_sexo=="M", 'Mujer','Varón')
+
+  # Order
+sexo = sexo[order(sexo$categoria_usuario, sexo$xti_sexo),]
+
+  #Graph
+graph_sexo <- ggplot(sexo, aes(x = factor(categoria_usuario), y = percent_dist_pers, fill = des_sexo, label=label_percent_dist_pers, ymax=max(percent_dist_pers))) + 
+  geom_bar(stat = "identity", width = .7) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("clientes distintos") +
+  ggtitle("Sexo de los Clientes Wallet") + 
+  geom_text(aes(y = pos, label = label_percent_dist_pers), position = "stack", size = 3.5)  +
+  scale_fill_brewer()
+graph_sexo
+```
+
+<br/> 
+
+* Análisis territorial:
+<br/>
+
+```{r TERRITORIAL_BARS, eval=TRUE, echo=FALSE, cache=TRUE}
+
+territorial <- qhive("select categoria_usuario, territorial, count(distinct cod_pers_trs) as conteo_dist_pers
+              from da_mariadrav.wallet_tablon_encuestas
+              group by categoria_usuario, territorial")
+
+```
+
+```{r TERRITORIAL1, eval=TRUE, echo=FALSE, cache=TRUE}
+  # Baras territorial
+ # Get the levels for type in the required order
+territorial = arrange(territorial, categoria_usuario, territorial)
+
+  # Calculate the percentages
+territorial = ddply(territorial, .(categoria_usuario), transform, percent_dist_pers = conteo_dist_pers/sum(conteo_dist_pers) * 100)
+
+territorial$label_percent_dist_pers = paste0(sprintf("%.0f", territorial$percent_dist_pers), "%")
+
+  # Order
+territorial = territorial[order(territorial$categoria_usuario, territorial$territorial),]
+
+  #Graph
+ggplot(territorial, aes(x = factor(categoria_usuario), y = percent_dist_pers, fill = territorial, label=label_percent_dist_pers, ymax=max(percent_dist_pers))) + 
+  geom_bar(stat = "identity", width = .7) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + 
+  ylab("clientes distintos") + 
+  ggtitle("% Clientes Wallet x Territorial") + 
+  geom_text(aes(y = percent_dist_pers, label = label_percent_dist_pers), position = "stack", size = 3.5) +
+  scale_fill_brewer()
+
+```
+
+<br/>
+
+* * A continuación se muestra el detalle de clientes por territorial: 
+<br/>
+```{r TERRITORIAL_PCT, eval=TRUE, echo=FALSE, cache=TRUE}
+territorial <- ddply(territorial, .(categoria_usuario), transform, percent_dist_pers = paste0(sprintf("%.1f", conteo_dist_pers/sum(conteo_dist_pers) * 100), "%"))
+cast(territorial[,c(1,2,4)], territorial ~ categoria_usuario)
+```
+
+<br/> 
+
+* PlanUno: La aplicación se usa principalmente por los clientes previnculados y transaccionales.
+<br/>
+```{r PLAN_UNO_DATOS, eval=TRUE, echo=FALSE, cache=TRUE}
+planuno <- qhive("select categoria_usuario, 
+                 segm_plan_uno, 
+                 case segm_plan_uno when 'P' then 'Vinculado'
+                                    when 'R' then 'Basico'
+                                    when 'T' then 'Transaccional'
+                                    when 'V' then 'Previnculado'
+                 end as des_segm_plan_uno,
+                 count(distinct cod_pers_trs) as conteo_dist_pers
+              from da_mariadrav.wallet_tablon_encuestas
+              group by categoria_usuario, segm_plan_uno")
+```
+
+```{r PLAN_UNO, eval=TRUE, echo=FALSE, cache=TRUE}
+#Categoria x planuno
+  # Get the levels for type in the required order
+planuno = arrange(planuno, categoria_usuario, des_segm_plan_uno)
+
+  # Calculate the percentages
+planuno = ddply(planuno, .(categoria_usuario), transform, percent_dist_pers = conteo_dist_pers/sum(conteo_dist_pers) * 100)
+
+planuno$label_percent_dist_pers = paste0(sprintf("%.0f", planuno$percent_dist_pers), "%")
+
+  # Order
+planuno = planuno[order(planuno$categoria_usuario, planuno$des_segm_plan_uno),]
+
+  #Graph
+graph_planuno <- ggplot(planuno, aes(x = factor(categoria_usuario), y = percent_dist_pers, fill = des_segm_plan_uno, label=label_percent_dist_pers, ymax=max(percent_dist_pers))) +
+  geom_bar(stat = "identity", width = .7) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("clientes distintos") + 
+  ggtitle("% Clientes x Segmento PlanUno") + 
+  geom_text(aes(y = percent_dist_pers, label = label_percent_dist_pers), position = "stack", size = 3.5) +
+  scale_fill_brewer()
+graph_planuno
+```
+
+<br/>
+
+* Antigüedad en BBVA: La aplicación se usa más por los clientes relativamente nuevos en el Banco. 
+<br/>
+```{r ANTIGUEDAD_BBVA_DATOS, eval=TRUE, echo=FALSE, cache=TRUE}
+
+antig_bbva <- qhive("select categoria_usuario, 
+                    antiguedad_months/12 as antiguedad_bbva_years,
+                    case when antiguedad_months<=12 then '01. <= 1 año'
+                           when antiguedad_months>12 and antiguedad_months<=24 then '02. 1 - 2 años'
+                           when antiguedad_months>24 and antiguedad_months<=60 then '03. 2 - 5 años'
+                           when antiguedad_months>60 and antiguedad_months<=120 then '04. 5 - 10 años'
+                           else '05. > 10 años'
+                       end as grupos_antiguedad,
+                    count(distinct cod_pers_trs) as conteo_dist_pers
+                    from da_mariadrav.wallet_tablon_encuestas
+                    where antiguedad_months>0
+                      and antiguedad_months is NOT NULL
+                    group by categoria_usuario, antiguedad_months/12,
+                    case when antiguedad_months<=12 then '01. <= 1 año'
+                           when antiguedad_months>12 and antiguedad_months<=24 then '02. 1 - 2 años'
+                           when antiguedad_months>24 and antiguedad_months<=60 then '03. 2 - 5 años'
+                           when antiguedad_months>60 and antiguedad_months<=120 then '04. 5 - 10 años'
+                           else '05. > 10 años'
+                       end")
+
+antig_bbva_hist <- qhive("select distinct cod_pers_trs, categoria_usuario, 
+                    antiguedad_months/12 as antiguedad_bbva_years
+                    from da_mariadrav.wallet_tablon_encuestas
+                    where antiguedad_months>0
+                      and antiguedad_months is NOT NULL")
+```
+
+```{r ANTIGUEDAD_BBVA, eval=TRUE, echo=FALSE, cache=TRUE}
+
+antig_bbva_hist$categoria_usuario_ord <- ifelse(antig_bbva_hist$categoria_usuario=="Wallet Activo", 
+                                                 paste0("01. ", antig_bbva_hist$categoria_usuario),
+                                                 ifelse(antig_bbva_hist$categoria_usuario=="Wallet Inactivo", 
+                                                        paste0("02. ", antig_bbva_hist$categoria_usuario), 
+                                                        paste0("03. ", antig_bbva_hist$categoria_usuario)))
+# Histograma
+ggplot(antig_bbva_hist, aes(x=antiguedad_bbva_years)) +
+  geom_histogram(  stat="bin", binwidth=1, colour="white", fill="blue") + 
+  ggtitle("Histograma de la antigüedad en BBVA (años)") + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + 
+  xlim(0, 30) + 
+  ylab("clientes distintos") + 
+  facet_grid(categoria_usuario_ord ~ .)
+
+ # Ver la distribución por grupos
+  # Get the levels for type in the required order
+antig_bbva_gr = arrange(antig_bbva, categoria_usuario, grupos_antiguedad)
+antig_bbva_gr = unique(ddply(antig_bbva_gr, .(grupos_antiguedad, categoria_usuario), transform, conteo_dist_pers_gr = sum(conteo_dist_pers))[, c(1, 3, 5)])
+
+  # Calculate the percentages
+antig_bbva_gr = ddply(antig_bbva_gr, .(categoria_usuario), transform, percent_dist_pers = conteo_dist_pers_gr/sum(conteo_dist_pers_gr) * 100, pos = cumsum((conteo_dist_pers_gr/sum(conteo_dist_pers_gr)) - (0.5 * conteo_dist_pers_gr/sum(conteo_dist_pers_gr)))*100)
+
+antig_bbva_gr$label_percent_dist_pers = paste0(sprintf("%.0f", antig_bbva_gr$percent_dist_pers), "%")
+
+  # Order
+antig_bbva_gr = antig_bbva_gr[order(antig_bbva_gr$categoria_usuario, antig_bbva_gr$grupos_antiguedad),]
+
+  #Graph
+graph_antig_bbva_gr <- ggplot(antig_bbva_gr, aes(x = factor(categoria_usuario), y = percent_dist_pers, fill = grupos_antiguedad, label=label_percent_dist_pers, ymax=max(percent_dist_pers))) + 
+  geom_bar(stat = "identity", width = .7) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + 
+  ylab("clientes distintos") + 
+  ggtitle("Grupos antiguedad en BBVA (años)") + 
+  geom_text(aes(y = pos, label = label_percent_dist_pers), position = "stack", size = 3.5) +
+  scale_fill_brewer()
+graph_antig_bbva_gr
+
+```
+
+<br/> 
+
+* Distribución de la antigüedad en Wallet: La aplicación se usa más al principio cuando se contrata pero a medida que pase el tiempo se usa menos.
+<br/>
+```{r ANTIGUEDAD_WALLET_DATOS, eval=TRUE, echo=FALSE, cache=TRUE}
+
+antig_wallet <- qhive("select categoria_usuario, 
+                      antiguedad_wallet_months,
+                      case when antiguedad_wallet_months<=3 then '01. <= 3 meses'
+                           when antiguedad_wallet_months>3 and antiguedad_wallet_months<=6 then '02. 3 - 6 meses'
+                           when antiguedad_wallet_months>6 and antiguedad_wallet_months<=12 then '03. 6 - 12 meses'
+                           else '04. > 12 meses'
+                       end as grupos_ant_wall_mon,
+                      count(distinct cod_pers_trs) as conteo_dist_pers
+                      from da_mariadrav.wallet_tablon_encuestas
+                      where categoria_usuario !='BBVANet' and antiguedad_wallet_months>=0
+                      group by categoria_usuario, antiguedad_wallet_months,
+                      case when antiguedad_wallet_months<=3 then '01. <= 3 meses'
+                           when antiguedad_wallet_months>3 and antiguedad_wallet_months<=6 then '02. 3 - 6 meses'
+                           when antiguedad_wallet_months>6 and antiguedad_wallet_months<=12 then '03. 6 - 12 meses'
+                           else '04. > 12 meses'
+                       end ")
+
+```
+
+```{r ANTIGUEDAD_WALLET, eval=TRUE, echo=FALSE, cache=TRUE}
+antig_wallet$categoria_usuario_ord <- ifelse(antig_wallet$categoria_usuario=="Wallet Activo", 
+                                                 paste0("01. ", antig_wallet$categoria_usuario),
+                                                 ifelse(antig_wallet$categoria_usuario=="Wallet Inactivo", 
+                                                        paste0("02. ", antig_wallet$categoria_usuario), 
+                                                        paste0("03. ", antig_wallet$categoria_usuario)))
+# Histograma
+ggplot(antig_wallet, aes(x=antiguedad_wallet_months)) + 
+  geom_histogram(aes(y=conteo_dist_pers), stat="identity", binwidth=.5, colour="white", fill="blue") + 
+  ggtitle("Histograma de la antigüedad en Wallet (meses)")  + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) +
+  ylab("clientes distintos") + 
+  facet_grid(categoria_usuario_ord ~ .)
+
+
+ # Ver la distribución de antigüedad wallet por grupos
+antig_wallet_gr = unique(ddply(antig_wallet, .(grupos_ant_wall_mon, categoria_usuario), transform, conteo_dist_pers_gr = sum(conteo_dist_pers))[, c(1, 3, 6)])
+
+   # Get the levels for type in the required order
+antig_wallet_gr = arrange(antig_wallet_gr, categoria_usuario, grupos_ant_wall_mon)
+
+  # Calculate the percentages
+antig_wallet_gr = ddply(antig_wallet_gr, .(categoria_usuario), transform, percent_dist_pers = conteo_dist_pers_gr/sum(conteo_dist_pers_gr) * 100)
+
+antig_wallet_gr$label_percent_dist_pers = paste0(sprintf("%.0f", antig_wallet_gr$percent_dist_pers), "%")
+
+  # Order
+antig_wallet_gr = antig_wallet_gr[order(antig_wallet_gr$categoria_usuario, antig_wallet_gr$grupos_ant_wall_mon),]
+
+  #Graph
+graph_ant_wall_gr <- ggplot(antig_wallet_gr, aes(x = factor(categoria_usuario), y = percent_dist_pers, fill = grupos_ant_wall_mon, label=label_percent_dist_pers, ymax=max(percent_dist_pers))) + 
+  geom_bar(stat = "identity", width = .7) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + 
+  ylab("clientes distintos") +
+  ggtitle("Grupos antigüedad wallet en meses") + 
+  geom_text(aes(y = percent_dist_pers, label = label_percent_dist_pers), position = "stack", size = 3.5) +
+  scale_fill_brewer()
+graph_ant_wall_gr
+
+```
+
+<br/>
+**2. Estudio perfil digital:** 
+<br/> *franjas horarias de acceso, segmento comportamental, mix_actividad - agrupación del segmento comportamental, frecuencia conexión* 
+<br/>
+
+<br/>
+
+* Franjas horarias:
+<br/>
+```{r FRANJAS, eval=TRUE, echo=FALSE, cache=TRUE}
+franjas <- qhive("select distinct categoria_usuario, cod_pers_trs, hour_soli_trn
+                 from da_mariadrav.wallet_tablon_encuestas
+                 where categoria_usuario != 'BBNANet'")
+
+# Histograma
+ggplot(franjas, aes(x=hour_soli_trn)) + 
+  geom_histogram(stat="bin", binwidth=.5, colour="white", fill="blue")  + 
+  scale_x_discrete(breaks = seq(0, 24, by = 3)) + 
+  ggtitle("Histograma de las franjas horarias de acceso a la aplicación")  + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) +
+  ylab("clientes distintos") + 
+  facet_grid(categoria_usuario ~ .)
+
+```
+
+* Segmento Comportamental:  
+<br/>
+
+```{r COMPORTAMENTAL_DATOS, eval=TRUE, echo=FALSE, cache=TRUE}
+segm_comp <- qhive("select categoria_usuario, 
+                   case when segmento_comportamental = 1 then '01. Net contrata'
+                   when segmento_comportamental = 2 then '02. Net opera elevado'
+                   when segmento_comportamental = 3 then '03. Net opera básico'
+                   when segmento_comportamental = 4 then '04. Net consulta ATM elevado'
+                   when segmento_comportamental = 5 then '05. Net consulta ATM básico'
+                   when segmento_comportamental = 6 then '06. Net consulta'
+                   when segmento_comportamental = 7 then '07. ATM avanzado'
+                   when segmento_comportamental = 8 then '08. ATM básico'
+                   when segmento_comportamental = 9 then '09. Oficina ATM reducido'
+                   when segmento_comportamental = 10 then '10. Oficina'
+                   when segmento_comportamental = 11 then '11. Poco uso de canales'
+                   when segmento_comportamental = 12 then '12. Sin uso'
+                   end as segmento_comportamental, 
+                   count(distinct cod_pers_trs) as count_dist_pers
+                   from da_mariadrav.wallet_tablon_encuestas
+                   group by categoria_usuario, segmento_comportamental")
+
+```
+
+```{r COMPORTAMENTAL, eval=TRUE, echo=FALSE, cache=TRUE}
+
+  # Get the levels for type in the required order
+segm_comp = arrange(segm_comp, categoria_usuario, segmento_comportamental)
+
+  # Calculate the percentages
+segm_comp = ddply(segm_comp, .(categoria_usuario), transform, percent_dist_pers = count_dist_pers/sum(count_dist_pers) * 100)
+
+segm_comp$label_percent_dist_pers = paste0(sprintf("%.0f", segm_comp$percent_dist_pers), "%")
+
+  # Order
+segm_comp = segm_comp[order(segm_comp$segmento_comportamental, segm_comp$categoria_usuario),]
+
+  #Graph
+graph_segm_cat <- ggplot(segm_comp, aes(x = factor(categoria_usuario), y = percent_dist_pers, fill = segmento_comportamental, label=label_percent_dist_pers, ymax=max(percent_dist_pers))) + 
+  geom_bar(stat = "identity", width = .7) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("clientes distintos") + ggtitle("Segmento comportamental") + 
+  geom_text(aes(y = percent_dist_pers, label = label_percent_dist_pers), position = "stack", size = 3.5) +
+  scale_fill_brewer()
+graph_segm_cat
+```
+
+<br/> 
+
+* agrupación segmentos comportamentales:  Los clientes que tienen la app son los que más digitales son... 
+<br/>
+```{r MIX_ACTIVIDAD_DATOS, eval=TRUE, echo=FALSE, cache=TRUE}
+mix_actividad <- qhive("select categoria_usuario, 
+                       case when segmento_comportamental = 1 then '01. Compra'
+                       when segmento_comportamental = 2 then '02. Transaccional avanzado'
+                       when segmento_comportamental = 3 then '03. Transaccional basico' 
+                       when segmento_comportamental in (4, 5, 6) then '04. Consultivo'
+                       when segmento_comportamental in (7, 8, 9, 10, 11) then '05. Other'
+                       when segmento_comportamental = 12 then '12. Sin uso' 
+                       end as mix_actividad, 
+                       count(distinct cod_pers_trs) as count_dist_pers 
+                       from da_mariadrav.wallet_tablon_encuestas
+                       group by categoria_usuario, segmento_comportamental, mix_actividad")
+
+```
+
+```{r MIX_ACTIVIDAD, eval=TRUE, echo=FALSE, cache=TRUE}
+# Ver la distribución de antigüedad wallet por grupos
+mix_actividad = unique(ddply(mix_actividad, .(mix_actividad, categoria_usuario), transform, count_dist_pers = sum(count_dist_pers))[, c(1, 2, 3)])
+
+ # Get the levels for type in the required order
+mix_actividad = arrange(mix_actividad, categoria_usuario, mix_actividad )
+
+  # Calculate the percentages
+mix_actividad = ddply(mix_actividad, .(categoria_usuario), transform, percent_dist_pers = count_dist_pers/sum(count_dist_pers) * 100)
+
+mix_actividad$label_percent_dist_pers = paste0(sprintf("%.0f", mix_actividad$percent_dist_pers), "%")
+
+  # Order
+mix_actividad = mix_actividad[order(mix_actividad$mix_actividad, mix_actividad$categoria_usuario),]
+
+  #Graph
+graph_mix_actividad <- ggplot(mix_actividad, aes(x = factor(categoria_usuario), y = percent_dist_pers, fill = mix_actividad, label=label_percent_dist_pers, ymax=max(percent_dist_pers))) + 
+  geom_bar(stat = "identity", width = .7) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("clientes distintos") + 
+  ggtitle("Grupos segmento comportamental") + 
+  geom_text(aes(y = percent_dist_pers, label = label_percent_dist_pers), position = "stack", size = 3.5) +
+  scale_fill_brewer()
+graph_mix_actividad
+```
+
+<br/> 
+
+* frecuencia conexion a canales digitales: ... y usan más a menudo los canales digitales.
+<br/>
+```{r FREC_ACCESO_DATOS, eval=TRUE, echo=FALSE, cache=TRUE}
+frecuencia <- qhive("select categoria_usuario, 
+                    case when frecuencia = 'intensivo' then '01. intensivo'
+                    when frecuencia = 'semanal' then '02. semanal'
+                    when frecuencia = 'mensual' then '03. mensual'
+                    when frecuencia = 'trimestral' then '04. trimestral'
+                    when frecuencia = 'anual' then '05. anual'
+                    end as frecuencia, 
+                    count(distinct cod_pers_trs) as count_dist_pers
+                    from da_mariadrav.wallet_tablon_encuestas
+                    group by categoria_usuario,  frecuencia")
+
+```
+
+```{r FREC_ACCESO, eval=TRUE, echo=FALSE, cache=TRUE}
+ # Get the levels for type in the required order
+frecuencia = arrange(frecuencia, categoria_usuario, frecuencia )
+
+  # Calculate the percentages
+frecuencia = ddply(frecuencia, .(categoria_usuario), transform, percent_dist_pers = count_dist_pers/sum(count_dist_pers) * 100)
+frecuencia$label_percent_dist_pers = paste0(sprintf("%.0f", frecuencia$percent_dist_pers), "%")
+
+  # Order
+frecuencia = frecuencia[order(frecuencia$frecuencia, frecuencia$categoria_usuario),]
+
+  #Graph
+graph_frecuencia <- ggplot(frecuencia, aes(x = factor(categoria_usuario), y = percent_dist_pers, fill = frecuencia, label=label_percent_dist_pers, ymax=max(percent_dist_pers))) + 
+  geom_bar(stat = "identity", width = .7) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("% clientes distintos") + 
+  ggtitle("Frecuencia de acceso a canales") + 
+  geom_text(aes(y = percent_dist_pers, label = label_percent_dist_pers), position = "stack", size = 3.5) +
+  scale_fill_brewer()
+graph_frecuencia
+
+```
+
+<br/>
+
+**3. Estudio contratación de la tarjeta Wallet o Sticker**
+<br/> *Análisis tenencia de tarjeta wallet, Tenencia de sticker, Nº medio de tarjetas activas. (Ver en ANEXO en qué consisten las tarjetas Habituales)* <br/>
+
+```{r TENENCIA_TARJETAS_DATOS, eval=TRUE, echo=FALSE, cache=TRUE}
+# Tenencia de tarjeta wallet y de sticker
+tar_stick_num <- qhive("select tar.*, clie.num_clientes
+                       from ( select categoria_usuario,
+                              sum(ind_tar_wallet) as ind_tar_wallet,
+                              sum(ind_sticker) as ind_sticker,
+                              sum(ind_debito) as ind_debito, 
+                              sum(ind_credito) as ind_credito
+                              from (select categoria_usuario, cod_pers_trs, 
+                                    max(ind_tar_wallet) as ind_tar_wallet, 
+                                    max(ind_sticker) as ind_sticker,
+                                    max(case when ten_debito_credito ='Debito' then ind_habitual end) as ind_debito,
+                                    max(case when ten_debito_credito ='Credito' then ind_habitual end) as ind_credito
+                                    from da_mariadrav.wallet_tablon_encuestas
+                                    group by categoria_usuario, cod_pers_trs
+                                    ) A
+                              group by categoria_usuario
+                            ) tar left join 
+                            (select categoria_usuario, count(distinct cod_pers_trs) as num_clientes
+                            from da_mariadrav.wallet_tablon_encuestas
+                            group by categoria_usuario
+                            ) clie
+                       on tar.categoria_usuario=clie.categoria_usuario")
+
+
+# Nº medio de tarjetas activas
+
+tar_stick_mean <- qhive("select categoria_usuario, 
+                              cod_pers_trs, sum(num_tar_wallet) as num_tar_wallet, sum(num_sticker) as num_sticker, 
+                              sum(case when ten_debito_credito ='Debito' then num_habitual else 0 end) as num_debito,
+                              sum(case when ten_debito_credito ='Credito' then num_habitual else 0 end) as num_credito
+                              from (select distinct categoria_usuario, cod_pers_trs, num_tar_wallet,
+                                    num_sticker, num_habitual, ten_debito_credito 
+                                    from da_mariadrav.wallet_tablon_encuestas) a
+                        group by categoria_usuario, cod_pers_trs")
+
+```
+
+<br/> 
+
+* Tenencia de tarjeta wallet y de sticker 
+<br/> 
+```{r TENENCIA_TARJETAS, eval=TRUE, echo=FALSE, cache=TRUE}
+tar_stick_num<- melt(tar_stick_num, id=c(1,6))
+tar_stick_num$variable <- ifelse(tar_stick_num$variable=='ind_tar_wallet', '01. Tarjeta Wallet',
+                        ifelse(tar_stick_num$variable=='ind_sticker', '02. Sticker', 
+                               ifelse(tar_stick_num$variable=='ind_debito', '04. Débito',
+                                      ifelse(tar_stick_num$variable=='ind_credito', '03. Crédito', 'No tenencia'))))
+
+
+ # Get the levels for type in the required order
+tar_stick_num = arrange(tar_stick_num, categoria_usuario, variable )
+
+  # Calculate the percentages
+tar_stick_num = ddply(tar_stick_num, .(categoria_usuario), transform, percent_dist_pers = value/num_clientes * 100, pos = cumsum((value/num_clientes) - (0.5 * value/num_clientes))*100)
+
+tar_stick_num$label_percent_dist_pers = paste0(sprintf("%.0f", tar_stick_num$percent_dist_pers), "%")
+
+  # Order
+tar_stick_num = tar_stick_num[order(tar_stick_num$variable, tar_stick_num$categoria_usuario),]
+
+  #Graph
+graph_tar_stick_num <- ggplot(tar_stick_num, aes(x = factor(categoria_usuario), y = percent_dist_pers, fill=variable, label=label_percent_dist_pers, ymax=max(percent_dist_pers))) + 
+  geom_bar(stat = "identity", width = .7, position='dodge') + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("clientes distintos") + 
+  ggtitle("Posesión de Tarjetas") + 
+  geom_text(aes(label = label_percent_dist_pers), position = position_dodge(width=0.9), vjust=-0.25, size = 3.5) +
+  scale_fill_brewer()
+graph_tar_stick_num
+```
+<br/> 
+
+* Nº medio de tarjetas activas 
+<br/>
+```{r NUM_TARJETAS, eval=TRUE, echo=FALSE, cache=TRUE}
+tar_stick_mean<- melt(tar_stick_mean, c(1,2))
+tar_stick_mean<- unique(tar_stick_mean[!is.na(tar_stick_mean$variable),])
+tar_stick_mean$tipo_tarjeta <- ifelse(tar_stick_mean$variable=='num_tar_wallet', '01. Tarjeta Wallet',
+                                    ifelse(tar_stick_mean$variable=='num_sticker', '02. Sticker', 
+                                           ifelse(tar_stick_mean$variable=='num_debito', '04. Débito', '03. Crédito')))
+
+ddply(tar_stick_mean, c("categoria_usuario", "tipo_tarjeta"), summarise,
+               N_clientes    = sum(!is.na(value)),
+               media         = round(mean(value, na.rm=TRUE), 1),
+               mediana       = round(median(value, na.rm=TRUE), 1),
+               desv_tipica   = round(sd(value, na.rm=TRUE), 1),
+               minimo        = round(min(value, na.rm=TRUE), 0),
+               maximo        = round(max(value, na.rm=TRUE), 0)
+)
+
+```
+
+<br/> 
+**4. Estudio Funcionalidades**
+<br/> *Análisis: activación de tarjetas, bloqueo de tarjetas, pago móvil diferenciando si ha sido con o sin sticker, consulta de movimientos, aplazamiento de pagos, recepción de notificaciones, uso de promociones: No se tiene información del uso de promociones sólo de si el cliente recibió alguna promoción Wallet* <br/>
+<br/>
+
+```{r FUNCIONALIDADES_DATOS, eval=TRUE, echo=FALSE, cache=TRUE}
+
+do.hive("create table if not exists da_mariadrav.funcionalidades_datos_encuestas as 
+        select  cod_pers_trs, categoria_usuario,
+        max(activacion_tarjetas) as activacion_tarjetas,
+        max(bloqueo_tarjetas) as bloqueo_tarjetas,
+        case when max(num_movimientos)> 0 then 1 else 0 end as num_movimientos,
+        max(consulta_movim) as consulta_movim,
+        max(aplazamiento_pagos) as aplazamiento_pagos,
+        max(notificaciones_alta) as notificaciones_alta,
+        max(notificaciones_baja) as notificaciones_baja,
+        case when max(notificaciones_baja) = 1 or max(notificaciones_alta) = 1 then 1 else 0 end as notificaciones,
+        max(accion_comercial) as accion_comercial
+        from da_mariadrav.wallet_tablon_encuestas
+        where categoria_usuario != 'BBVANet'
+        group by cod_pers_trs, categoria_usuario")
+              
+do.hive("create table if not exists da_mariadrav.funcionalidades_datos_encuestas_activos as 
+        select cod_pers_trs,
+        max(activacion_tarjetas_ult_trim) as activacion_tarjetas,
+        max(bloqueo_tarjetas_ult_trim) as bloqueo_tarjetas,
+        case when max(num_movimientos_ult_trim)> 0 then 1 else 0 end as num_movimientos,
+        max(consulta_movim_ult_trim) as consulta_movim,
+        max(aplazamiento_pagos_ult_trim) as aplazamiento_pagos,
+        max(notificaciones_alta_ult_trim) as notificaciones_alta,
+        max(notificaciones_baja_ult_trim) as notificaciones_baja,
+        case when max(notificaciones_baja_ult_trim) = 1 or max(notificaciones_alta_ult_trim) = 1 then 1 else 0 end as notificaciones,
+        max(accion_comercial_ult_trim) as accion_comercial
+        from da_mariadrav.wallet_tablon_encuestas
+        where categoria_usuario = 'Wallet Activo'
+        group by cod_pers_trs")
+              
+```
+
+4.1. Activación de tarjetas: Es una opción que se usa más por los activos. Un 31% de ellos la usó en algún momento desde el alta en wallet y de ellos un 10% la usó en el último trimestre.
+
+```{r ACTIVACION_TARJETAS_DATOS, eval=TRUE, echo=FALSE, cache=TRUE}
+
+activacion_tarjetas <- qhive("select categoria_usuario,
+                             case when activacion_tarjetas = 1 then 'Sí' else 'No' 
+                             end as resumen_activacion_tarjetas,
+                             count(cod_pers_trs) as conteo_dist_pers
+                             from da_mariadrav.funcionalidades_datos_encuestas
+                             group by categoria_usuario, case when activacion_tarjetas = 1 then 'Sí' else 'No' end")
+
+activacion_tarjetas_activos <- qhive("select case when activacion_tarjetas = 1 then 'Sí' else 'No' 
+                                             end as resumen_activacion_tarjetas,
+                                     count(distinct cod_pers_trs) as conteo_dist_pers
+                                     from da_mariadrav.funcionalidades_datos_encuestas_activos 
+                                     group by case when activacion_tarjetas = 1 then 'Sí' else 'No' end")
+              
+```
+
+```{r ACTIVACION_TARJETAS, eval=TRUE, echo=FALSE, cache=TRUE}
+#Gráfico 
+ # Get the levels for type in the required order
+activacion_tarjetas = arrange(activacion_tarjetas, categoria_usuario, resumen_activacion_tarjetas )
+
+  # Calculate the percentages
+activacion_tarjetas = ddply(activacion_tarjetas, .(categoria_usuario), transform, percent_dist_pers = conteo_dist_pers/sum(conteo_dist_pers) * 100, pos = cumsum((conteo_dist_pers/sum(conteo_dist_pers)) - (0.5 * conteo_dist_pers/sum(conteo_dist_pers)))*100)
+
+activacion_tarjetas$label_percent_dist_pers = paste0(sprintf("%.0f", activacion_tarjetas$percent_dist_pers), "%")
+
+  # Order
+activacion_tarjetas = activacion_tarjetas[order(activacion_tarjetas$resumen_activacion_tarjetas, activacion_tarjetas$categoria_usuario),]
+
+  #Graph
+graph_activacion_tarjetas <- ggplot(activacion_tarjetas, aes(x = factor(categoria_usuario), y = percent_dist_pers, fill = resumen_activacion_tarjetas, label=label_percent_dist_pers, ymax=max(percent_dist_pers))) + 
+  geom_bar(stat = "identity", width = .7) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("clientes distintos") + 
+  ggtitle("Activación de tarjetas en la app") + 
+  geom_text(aes(y = pos, label = label_percent_dist_pers), position = "stack", size = 3.5) +
+  scale_fill_brewer()
+graph_activacion_tarjetas
+
+#Gráfico en el último trimestre
+  # Calculate the percentages
+activacion_tarjetas_activos$percent_dist_pers = activacion_tarjetas_activos$conteo_dist_pers/sum(activacion_tarjetas_activos$conteo_dist_pers) * 100
+activacion_tarjetas_activos$label_percent_dist_pers = paste0(sprintf("%.0f", activacion_tarjetas_activos$percent_dist_pers), "%")
+
+  #Graph
+graph_activacion_tarjetas_activos <- ggplot(activacion_tarjetas_activos, aes(x = resumen_activacion_tarjetas, y = percent_dist_pers, label=label_percent_dist_pers, ymax=(max(percent_dist_pers)+0.1*max(percent_dist_pers)))) + 
+  geom_bar(stat = "identity", width = .7, fill='blue') + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("clientes distintos") + 
+  ggtitle(expression(atop(paste('Activación de tarjetas en la app'), atop(italic(paste('Clientes Wallet Activos, último trimestre')), "")))) + 
+  geom_text(aes(y = percent_dist_pers, label = label_percent_dist_pers), position = "stack", size = 3.5, vjust=-2) +
+  scale_fill_brewer()
+graph_activacion_tarjetas_activos
+
+```
+
+<br/> 
+
+4.2. Bloqueo de tarjetas: Se usa por el 32% de los activos y 19% de los inactivos. <br/>
+```{r BLOQUEO_TARJETAS_DATOS, eval=TRUE, echo=FALSE, cache=TRUE}
+
+bloqueo_tarjetas <- qhive("select categoria_usuario,
+                             case when bloqueo_tarjetas = 1 then 'Sí' else 'No' 
+                             end as resumen_bloqueo_tarjetas,
+                             count(cod_pers_trs) as conteo_dist_pers
+                             from da_mariadrav.funcionalidades_datos_encuestas
+                             group by categoria_usuario, case when bloqueo_tarjetas = 1 then 'Sí' else 'No' end")
+
+bloqueo_tarjetas_activos <- qhive("select case when bloqueo_tarjetas = 1 then 'Sí' else 'No' 
+                                             end as resumen_bloqueo_tarjetas,
+                                     count(distinct cod_pers_trs) as conteo_dist_pers
+                                     from da_mariadrav.funcionalidades_datos_encuestas_activos 
+                                     group by case when bloqueo_tarjetas = 1 then 'Sí' else 'No' end")
+
+```
+
+
+```{r BLOQUEO_TARJETAS, eval=TRUE, echo=FALSE, cache=TRUE}
+#Gráfico 
+ # Get the levels for type in the required order
+bloqueo_tarjetas = arrange(bloqueo_tarjetas, categoria_usuario, resumen_bloqueo_tarjetas)
+
+  # Calculate the percentages
+bloqueo_tarjetas = ddply(bloqueo_tarjetas, .(categoria_usuario), transform, percent_dist_pers = conteo_dist_pers/sum(conteo_dist_pers) * 100, pos = cumsum((conteo_dist_pers/sum(conteo_dist_pers)) - (0.5 * conteo_dist_pers/sum(conteo_dist_pers)))*100)
+bloqueo_tarjetas$label_percent_dist_pers = paste0(sprintf("%.0f", bloqueo_tarjetas$percent_dist_pers), "%")
+
+  # Order
+bloqueo_tarjetas = bloqueo_tarjetas[order(bloqueo_tarjetas$resumen_bloqueo_tarjetas, bloqueo_tarjetas$categoria_usuario),]
+
+  #Graph
+graph_bloqueo_tarjetas <- ggplot(bloqueo_tarjetas, aes(x = factor(categoria_usuario), y = percent_dist_pers, fill = resumen_bloqueo_tarjetas, label=label_percent_dist_pers, ymax=max(percent_dist_pers))) + 
+  geom_bar(stat = "identity", width = .7) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("clientes distintos") + 
+  ggtitle("Bloqueo de tarjetas en la app") + 
+  geom_text(aes(y = pos, label = label_percent_dist_pers), position = "stack", size = 3.5) +
+  scale_fill_brewer()
+graph_bloqueo_tarjetas
+
+
+#Gráfico en el último trimestre
+  # Calculate the percentages
+bloqueo_tarjetas_activos$percent_dist_pers = bloqueo_tarjetas_activos$conteo_dist_pers/sum(bloqueo_tarjetas_activos$conteo_dist_pers) * 100
+bloqueo_tarjetas_activos$label_percent_dist_pers = paste0(sprintf("%.0f", bloqueo_tarjetas_activos$percent_dist_pers), "%")
+
+  #Graph
+graph_bloqueo_tarjetas_activos <- ggplot(bloqueo_tarjetas_activos, aes(x = resumen_bloqueo_tarjetas, y = percent_dist_pers, label=label_percent_dist_pers, ymax=(max(percent_dist_pers)+0.1*max(percent_dist_pers)))) + 
+  geom_bar(stat = "identity", width = .7, fill='blue') + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("clientes distintos") + 
+  ggtitle(expression(atop(paste('Bloqueo de tarjetas en la app'), atop(italic(paste('Clientes Wallet Activos, último trimestre')), "")))) + 
+  geom_text(aes(y = percent_dist_pers, label = label_percent_dist_pers), position = "stack", size = 3.5, vjust=-2) +
+  scale_fill_brewer()
+graph_bloqueo_tarjetas_activos
+
+```
+
+<br/> 
+
+4.3. Pago móvil, diferenciando si ha sido con o sin sticker o si por una tarjeta habitual. Las habituales figuran con dos valores: tarjeta de crédito o tarjeta de débito. <br/> 
+
+```{r PAGO_MOVIL_DATOS, eval=TRUE, echo=FALSE, cache=TRUE}
+
+############################ PAGO MOVIL ############################################
+
+pago_movil<- qhive("select categoria_usuario, 
+                   case when tipo_tarjeta='Habitual' then debito_credito
+                        when tipo_tarjeta is not NULL then tipo_tarjeta
+                        else 'No pagos'
+                   end as tipo_tarjeta,
+                   count(distinct cod_pers_trs) as conteo_dist_pers
+                   from da_mariadrav.wallet_tablon_encuestas
+                     group by categoria_usuario, 
+                   case when tipo_tarjeta='Habitual' then debito_credito
+                        when tipo_tarjeta is not NULL then tipo_tarjeta
+                        else 'No pagos'
+                   end")
+
+pago_movil_activos<- qhive("select case when tipo_tarjeta_ult_trim != '' then tipo_tarjeta_ult_trim else 'No pagos' end as tipo_tarjeta, debito_credito_ult_trim as debito_credito,
+                    count(distinct cod_pers_trs) as conteo_dist_pers
+                    from da_mariadrav.wallet_tablon_encuestas
+                     where categoria_usuario = 'Wallet Activo'
+                    group by case when tipo_tarjeta_ult_trim != '' then tipo_tarjeta_ult_trim else 'No pagos' end, debito_credito_ult_trim")
+
+############################ NUMERO MEDIO TARJETAS ############################################
+num_tarjetas <- qhive("select categoria_usuario, cod_pers_trs,
+                   case when tipo_tarjeta='Habitual' then debito_credito
+                        when tipo_tarjeta is not NULL then tipo_tarjeta
+                        else 'No pagos'
+                   end as tipo_tarjeta,
+                   avg(num_tarjetas) as num_tarjetas
+                   from da_mariadrav.wallet_tablon_encuestas
+                   group by categoria_usuario, cod_pers_trs,
+                   case when tipo_tarjeta='Habitual' then debito_credito
+                        when tipo_tarjeta is not NULL then tipo_tarjeta
+                        else 'No pagos'
+                   end")
+
+############################ NUMERO MOVIMIENTOS ############################################
+num_movimientos <- qhive("select categoria_usuario, cod_pers_trs,
+                   case when tipo_tarjeta='Habitual' then debito_credito
+                        when tipo_tarjeta is not NULL then tipo_tarjeta
+                        else 'No pagos'
+                   end as tipo_tarjeta,
+                   avg(num_movimientos) as num_movimientos
+                   from da_mariadrav.wallet_tablon_encuestas
+                   group by categoria_usuario, cod_pers_trs,
+                   case when tipo_tarjeta='Habitual' then debito_credito
+                        when tipo_tarjeta is not NULL then tipo_tarjeta
+                        else 'No pagos'
+                   end")
+
+############################ IMPORTE MOVIMIENTOS ############################################
+
+imp_movimientos <- qhive("select categoria_usuario, cod_pers_trs,
+                   case when tipo_tarjeta='Habitual' then debito_credito
+                        when tipo_tarjeta is not NULL then tipo_tarjeta
+                        else 'No pagos'
+                   end as tipo_tarjeta,
+                   avg(imp_movimientos) as imp_movimientos
+                   from da_mariadrav.wallet_tablon_encuestas
+                   group by categoria_usuario, cod_pers_trs,
+                   case when tipo_tarjeta='Habitual' then debito_credito
+                        when tipo_tarjeta is not NULL then tipo_tarjeta
+                        else 'No pagos'
+                   end")
+
+```
+
+```{r PAGO_MOVIL, eval=TRUE, echo=FALSE, cache=TRUE}
+############################ PAGO MOVIL ############################################
+#Gráfico 
+pago_movil$tipo_tarjeta <- ifelse(pago_movil$tipo_tarjeta=='Tarjeta Wallet', '01. Tarjeta Wallet',
+                                  ifelse(pago_movil$tipo_tarjeta=='Sticker', '02. Sticker',
+                                         ifelse(pago_movil$tipo_tarjeta=='Credito', '03. Crédito',
+                                                ifelse(pago_movil$tipo_tarjeta=='Debito', '04. Débito', '05. No pagos'))))
+
+ # Get the levels for type in the required order
+pago_movil = arrange(pago_movil, categoria_usuario, tipo_tarjeta )
+
+  # Calculate the percentages
+pago_movil = ddply(pago_movil, .(categoria_usuario), transform, percent_dist_pers = conteo_dist_pers/sum(conteo_dist_pers) * 100, pos = cumsum((conteo_dist_pers/sum(conteo_dist_pers)) - (0.5 * conteo_dist_pers/sum(conteo_dist_pers)))*100)
+
+pago_movil$label_percent_dist_pers = paste0(sprintf("%.0f", pago_movil$percent_dist_pers), "%")
+
+  # Order
+pago_movil = pago_movil[order(pago_movil$tipo_tarjeta, pago_movil$categoria_usuario),]
+
+  #Graph
+graph_pago_movil <- ggplot(pago_movil, aes(x = factor(categoria_usuario), y = percent_dist_pers, fill=tipo_tarjeta, label=label_percent_dist_pers, ymax=max(percent_dist_pers))) + 
+  geom_bar(stat = "identity", width = .7, position='dodge') + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("clientes distintos") + 
+  ggtitle("Pago móvil") + 
+  geom_text(aes(label = label_percent_dist_pers), position = position_dodge(width=0.9), vjust=-0.25, size = 3.5) +
+  scale_fill_brewer()
+graph_pago_movil
+
+
+#Gráfico en el último trimestre
+pago_movil_activos$tipo_tarjeta=ifelse(pago_movil_activos$tipo_tarjeta=='Tarjeta Wallet', '01. Tarjeta Wallet',
+                               ifelse(pago_movil_activos$tipo_tarjeta=='Sticker', '02. Sticker',
+                                      ifelse(pago_movil_activos$tipo_tarjeta=='Habitual' & pago_movil_activos$debito_credito == 'Credito', '03. Crédito',
+                                             ifelse(pago_movil_activos$tipo_tarjeta=='Habitual' & pago_movil_activos$debito_credito == 'Debito', '04. Débito','05. No pagos'))))
+
+  # Calculate the percentages
+pago_movil_activos$percent_dist_pers = pago_movil_activos$conteo_dist_pers/sum(pago_movil_activos$conteo_dist_pers) * 100
+pago_movil_activos$label_percent_dist_pers = paste0(sprintf("%.0f", pago_movil_activos$percent_dist_pers), "%")
+
+  #Graph
+graph_pago_movil_activos <- ggplot(pago_movil_activos, aes(x = tipo_tarjeta, y = percent_dist_pers, label=label_percent_dist_pers, ymax=(max(percent_dist_pers)+0.1*max(percent_dist_pers)))) + 
+  geom_bar(stat = "identity", width = .7, fill='blue') + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("clientes distintos") + 
+  ggtitle(expression(atop(paste('Tipo de tarjeta que usa en la app'), atop(italic(paste('Clientes Wallet Activos, último trimestre')), "")))) + 
+  geom_text(aes(y = percent_dist_pers, label = label_percent_dist_pers), position = "stack", size = 3.5, vjust=-2) +
+  scale_fill_brewer()
+graph_pago_movil_activos
+
+```
+
+<br/> 
+
+* Número medio de tarjetas por tipo de tarjeta <br/> 
+```{r PAGO_MOVIL_NUM_TARJETAS, eval=TRUE, echo=FALSE, cache=TRUE}
+############################ NUMERO TARJETAS ############################################
+num_tarjetas$tipo_tarjeta=ifelse(num_tarjetas$tipo_tarjeta=='Tarjeta Wallet', '01. Tarjeta Wallet',
+                                  ifelse(num_tarjetas$tipo_tarjeta=='Sticker', '02. Sticker',
+                                         ifelse(num_tarjetas$tipo_tarjeta=='Credito', '03. Crédito',
+                                                ifelse(num_tarjetas$tipo_tarjeta=='Debito', '04. Débito', '05. No pagos'))))
+
+ddply(num_tarjetas, c("categoria_usuario", "tipo_tarjeta"), summarise,
+               N_clientes    = sum(!is.na(num_tarjetas)),
+               media         = round(mean(num_tarjetas, na.rm=TRUE), 1),
+               mediana       = round(median(num_tarjetas, na.rm=TRUE), 1),
+               desv_tipica   = round(sd(num_tarjetas, na.rm=TRUE), 1),
+               minimo        = round(min(num_tarjetas, na.rm=TRUE), 0),
+               maximo        = round(max(num_tarjetas, na.rm=TRUE), 0)
+)
+
+```
+
+<br/>
+
+* Número medio de movimientos por tipo de tarjeta <br/> 
+```{r PAGO_MOVIL_NUM_MOVIMIENTOS, eval=TRUE, echo=FALSE, cache=TRUE}
+############################ NUMERO MOVIMIENTOS ############################################
+############################ NUMERO MOVIMIENTOS ############################################
+num_movimientos$tipo_tarjeta=ifelse(num_movimientos$tipo_tarjeta=='Tarjeta Wallet', '01. Tarjeta Wallet',
+                                  ifelse(num_movimientos$tipo_tarjeta=='Sticker', '02. Sticker',
+                                         ifelse(num_movimientos$tipo_tarjeta=='Credito', '03. Crédito',
+                                                ifelse(num_movimientos$tipo_tarjeta=='Debito', '04. Débito', '05. No pagos'))))
+
+ddply(num_movimientos, c("categoria_usuario", "tipo_tarjeta"), summarise,
+               N_clientes    = sum(!is.na(num_movimientos)),
+               media         = round(mean(num_movimientos, na.rm=TRUE), 1),
+               mediana       = round(median(num_movimientos, na.rm=TRUE), 1),
+               desv_tipica   = round(sd(num_movimientos, na.rm=TRUE), 1),
+               minimo        = round(min(num_movimientos, na.rm=TRUE), 1),
+               maximo           = round(max(num_movimientos, na.rm=TRUE), 1)
+)
+
+
+```
+
+<br/> 
+
+* Importe medio por tipo de tarjeta <br/> 
+```{r PAGO_MOVIL_IMP_MOVIMIENTOS, eval=TRUE, echo=FALSE, fig.width=10, fig.height=8, cache=TRUE}
+############################ IMPORTE MOVIMIENTOS ############################################
+
+# Histograma
+ggplot(imp_movimientos[imp_movimientos$tipo_tarjeta != 'No pagos',], aes(x=imp_movimientos)) + 
+  geom_histogram(  stat="bin", binwidth=30, colour="white", fill="blue") + 
+  ggtitle("Histograma de los importes por tipo de tarjeta y usuario") + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + 
+  xlim(0, 1200) + 
+  ylab("clientes distintos") + 
+  facet_grid(categoria_usuario ~ tipo_tarjeta)
+
+
+
+imp_movimientos$tipo_tarjeta=ifelse(imp_movimientos$tipo_tarjeta=='Tarjeta Wallet', '01. Tarjeta Wallet',
+                                  ifelse(imp_movimientos$tipo_tarjeta=='Sticker', '02. Sticker',
+                                         ifelse(imp_movimientos$tipo_tarjeta=='Credito', '03. Crédito',
+                                                ifelse(imp_movimientos$tipo_tarjeta=='Debito', '04. Débito', '05. No pagos'))))
+
+ddply(imp_movimientos[imp_movimientos$tipo_tarjeta != 'No pagos',], c("categoria_usuario", "tipo_tarjeta"), summarise,
+               N_clientes    = sum(!is.na(imp_movimientos)),
+               media         = paste0(round(mean(imp_movimientos, na.rm=TRUE), 0)," €"),
+               mediana       = paste0(round(median(imp_movimientos, na.rm=TRUE), 0)," €"),
+               desv_tipica   = paste0(round(sd(imp_movimientos, na.rm=TRUE), 0)," €"),
+               minimo        = paste0(round(min(imp_movimientos, na.rm=TRUE), 0)," €"),
+               maximo        = paste0(round(max(imp_movimientos, na.rm=TRUE), 0)," €")
+)
+
+```   
+
+
+<br/> 
+
+4.4. Consulta de movimientos: Es la opción más utilizada. El 72% de los activos la han usado y el 54% de ellos la usaron en el último trimestre. El 48% de los que ahora son inactivos usaron esta opción en algún momento. <br/>
+```{r CONSULTA_MOVIMIENTOS_DATOS, eval=TRUE, echo=FALSE, cache=TRUE}
+consulta_movim <- qhive("select categoria_usuario,
+                             case when consulta_movim = 1 then 'Sí' else 'No' 
+                             end as resumen_consulta_movim,
+                             count(cod_pers_trs) as conteo_dist_pers
+                             from da_mariadrav.funcionalidades_datos_encuestas
+                             group by categoria_usuario, case when consulta_movim = 1 then 'Sí' else 'No' end")
+
+consulta_movim_activos <- qhive("select case when consulta_movim = 1 then 'Sí' else 'No' 
+                                             end as resumen_consulta_movim,
+                                     count(distinct cod_pers_trs) as conteo_dist_pers
+                                     from da_mariadrav.funcionalidades_datos_encuestas_activos 
+                                     group by case when consulta_movim = 1 then 'Sí' else 'No' end")
+
+```
+
+```{r CONSULTA_MOVIMIENTOS, eval=TRUE, echo=FALSE, cache=TRUE}
+#Gráfico 
+  # Get the levels for type in the required order
+consulta_movim = arrange(consulta_movim, categoria_usuario, resumen_consulta_movim)
+
+  # Calculate the percentages
+consulta_movim = ddply(consulta_movim, .(categoria_usuario), transform, percent_dist_pers = conteo_dist_pers/sum(conteo_dist_pers) * 100, pos = cumsum((conteo_dist_pers/sum(conteo_dist_pers)) - (0.5 * conteo_dist_pers/sum(conteo_dist_pers)))*100)
+
+consulta_movim$label_percent_dist_pers = paste0(sprintf("%.0f", consulta_movim$percent_dist_pers), "%")
+
+  # Order
+consulta_movim = consulta_movim[order(consulta_movim$resumen_consulta_movim, consulta_movim$categoria_usuario),]
+
+  #Graph
+graph_consulta_movim <- ggplot(consulta_movim, aes(x = factor(categoria_usuario), y = percent_dist_pers, fill = resumen_consulta_movim, label=label_percent_dist_pers, ymax=max(percent_dist_pers))) + 
+  geom_bar(stat = "identity", width = .7) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("% clientes distintos") + 
+  ggtitle("Consulta de movimientos en la app") + 
+  geom_text(aes(y = pos, label = label_percent_dist_pers), position = "stack", size = 3.5) +
+  scale_fill_brewer()
+graph_consulta_movim
+
+#Gráfico en el último trimestre
+  # Calculate the percentages
+consulta_movim_activos$percent_dist_pers = consulta_movim_activos$conteo_dist_pers/sum(consulta_movim_activos$conteo_dist_pers) * 100
+consulta_movim_activos$label_percent_dist_pers = paste0(sprintf("%.0f", consulta_movim_activos$percent_dist_pers), "%")
+
+  #Graph
+graph_consulta_movim_activos <- ggplot(consulta_movim_activos, aes(x = resumen_consulta_movim, y = percent_dist_pers, label=label_percent_dist_pers, ymax=(max(percent_dist_pers)+0.1*max(percent_dist_pers)))) + 
+  geom_bar(stat = "identity", width = .7, fill='blue') + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("% clientes distintos") + 
+  ggtitle(expression(atop(paste('Consulta de movimientos en la app'), atop(italic(paste('Clientes Wallet Activos, último trimestre')), "")))) + 
+  geom_text(aes(y = percent_dist_pers, label = label_percent_dist_pers), position = "stack", size = 3.5, vjust=-2) +
+  scale_fill_brewer()
+graph_consulta_movim_activos
+
+```
+
+<br/> 
+
+4.5. Aplazamiento de pagos: Sólo el 2% de lso activos han usado esta opción en algún momento. <br/>
+```{r APLAZAMIENTO_PAGOS_DATOS, eval=TRUE, echo=FALSE, cache=TRUE}
+
+############################ APLAZAMIENTO PAGOS ############################################
+aplazamiento_pagos <- qhive("select categoria_usuario,
+                             case when aplazamiento_pagos = 1 then 'Sí' else 'No' 
+                             end as resumen_aplazamiento_pagos,
+                             count(cod_pers_trs) as conteo_dist_pers
+                             from da_mariadrav.funcionalidades_datos_encuestas
+                             group by categoria_usuario, case when aplazamiento_pagos = 1 then 'Sí' else 'No' end")
+
+aplazamiento_pagos_activos <- qhive("select case when aplazamiento_pagos = 1 then 'Sí' else 'No' 
+                                             end as resumen_aplazamiento_pagos,
+                                     count(distinct cod_pers_trs) as conteo_dist_pers
+                                     from da_mariadrav.funcionalidades_datos_encuestas_activos 
+                                     group by case when aplazamiento_pagos = 1 then 'Sí' else 'No' end")
+
+############################ NUMERO APLAZAMIENTO PAGOS ############################################
+num_aplazamiento_pagos <- qhive("select categoria_usuario, cod_pers_trs,
+                                 sum(num_aplazamiento_pagos) as num_aplazamiento_pagos
+                                 from (select distinct categoria_usuario, cod_pers_trs,
+                                        num_aplazamiento_pagos, hour_soli_trn 
+                                      from da_mariadrav.wallet_tablon_encuestas
+                                      where aplazamiento_pagos=1
+                                        and categoria_usuario != 'BBVANet'
+                                      ) a
+                                 group by categoria_usuario, cod_pers_trs")
+
+############################ IMPORTE APLAZAMIENTO PAGOS ############################################
+
+imp_aplazamiento_pagos <- qhive("select categoria_usuario, cod_pers_trs,
+                         sum(imp_aplazamiento_pagos) as imp_aplazamiento_pagos
+                         from ( select distinct categoria_usuario, cod_pers_trs, 
+                                imp_aplazamiento_pagos, hour_soli_trn 
+                                from da_mariadrav.wallet_tablon_encuestas
+                                where aplazamiento_pagos=1
+                                  and categoria_usuario != 'BBVANet'
+                              ) a
+                         group by categoria_usuario, cod_pers_trs")
+              
+```
+
+```{r APLAZAMIENTO_PAGOS, eval=TRUE, echo=FALSE, cache=TRUE}
+#Gráfico
+ # Get the levels for type in the required order
+aplazamiento_pagos = arrange(aplazamiento_pagos, categoria_usuario, resumen_aplazamiento_pagos)
+
+  # Calculate the percentages
+aplazamiento_pagos = ddply(aplazamiento_pagos, .(categoria_usuario), transform, percent_dist_pers = conteo_dist_pers/sum(conteo_dist_pers) * 100, pos = cumsum((conteo_dist_pers/sum(conteo_dist_pers)) - (0.5 * conteo_dist_pers/sum(conteo_dist_pers)))*100)
+aplazamiento_pagos$label_percent_dist_pers = paste0(sprintf("%.0f", aplazamiento_pagos$percent_dist_pers), "%")
+
+  # Order
+aplazamiento_pagos = aplazamiento_pagos[order(aplazamiento_pagos$resumen_aplazamiento_pagos, aplazamiento_pagos$categoria_usuario),]
+
+  #Graph
+graph_aplazamiento_pagos <- ggplot(aplazamiento_pagos, aes(x = factor(categoria_usuario), y = percent_dist_pers, fill = resumen_aplazamiento_pagos, label=label_percent_dist_pers, ymax=max(percent_dist_pers))) + 
+  geom_bar(stat = "identity", width = .7) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("% clientes distintos") + 
+  ggtitle("Aplazamiento de pagos en la app") + 
+  geom_text(aes(y = pos, label = label_percent_dist_pers), position = "stack", size = 3.5) +
+  scale_fill_brewer()
+graph_aplazamiento_pagos
+
+#Gráfico en el último trimestre
+  # Calculate the percentages
+aplazamiento_pagos_activos$percent_dist_pers = aplazamiento_pagos_activos$conteo_dist_pers/sum(aplazamiento_pagos_activos$conteo_dist_pers) * 100
+aplazamiento_pagos_activos$label_percent_dist_pers = paste0(sprintf("%.0f", aplazamiento_pagos_activos$percent_dist_pers), "%")
+
+  #Graph
+graph_aplazamiento_pagos_activos <- ggplot(aplazamiento_pagos_activos, aes(x = resumen_aplazamiento_pagos, y = percent_dist_pers, label=label_percent_dist_pers, ymax=(max(percent_dist_pers)+0.1*max(percent_dist_pers)))) + 
+  geom_bar(stat = "identity", width = .7, fill='blue') + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("% clientes distintos") + 
+  ggtitle(expression(atop(paste('Aplazamiento de pagos en la app'), atop(italic(paste('Clientes Wallet Activos, último trimestre')), "")))) + 
+  geom_text(aes(y = percent_dist_pers, label = label_percent_dist_pers), position = "stack", size = 3.5, vjust=-2) +
+  scale_fill_brewer()
+graph_aplazamiento_pagos_activos
+
+```
+
+
+<br/>
+
+* Número medio de aplazamiento de pagos (entre los clientes que usaron esta funcionalidad) <br/> 
+```{r APLAZAMIENTO_PAGOS_NUM, eval=TRUE, echo=FALSE, cache=TRUE}
+############################ NUMERO APLAZAMIENTOS ############################################
+
+ddply(num_aplazamiento_pagos, c("categoria_usuario"), summarise,
+               N_clientes    = sum(!is.na(num_aplazamiento_pagos)),
+               media         = round(mean(num_aplazamiento_pagos, na.rm=TRUE), 1),
+               mediana       = round(median(num_aplazamiento_pagos, na.rm=TRUE), 1),
+               desv_tipica   = round(sd(num_aplazamiento_pagos, na.rm=TRUE), 1),
+               minimo        = round(min(num_aplazamiento_pagos, na.rm=TRUE), 1),
+               maximo           = round(max(num_aplazamiento_pagos, na.rm=TRUE), 1)
+)
+
+
+```
+
+<br/> 
+
+* Importe medio de aplazamiento de pagos (entre los clientes que usaron esta funcionalidad) <br/> 
+```{r APLAZAMIENTO_PAGOS_IMP, eval=TRUE, echo=FALSE, fig.width=10, fig.height=6, cache=TRUE}
+############################ IMPORTE APLAZAMIENTOS ############################################
+
+# Histograma
+ggplot(imp_aplazamiento_pagos, aes(x=imp_aplazamiento_pagos)) + 
+  geom_histogram(  stat="bin", binwidth=30, colour="white", fill="blue") + 
+  ggtitle("Histograma de los importes por categoria de usuario") + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + 
+  xlim(0, 1200) + 
+  ylab("clientes distintos") + 
+  facet_grid(~ categoria_usuario )
+
+
+ddply(imp_aplazamiento_pagos, c("categoria_usuario"), summarise,
+               N_clientes    = sum(!is.na(imp_aplazamiento_pagos)),
+               media         = paste0(round(mean(imp_aplazamiento_pagos, na.rm=TRUE), 0)," €"),
+               mediana       = paste0(round(median(imp_aplazamiento_pagos, na.rm=TRUE), 0)," €"),
+               desv_tipica   = paste0(round(sd(imp_aplazamiento_pagos, na.rm=TRUE), 0)," €"),
+               minimo        = paste0(round(min(imp_aplazamiento_pagos, na.rm=TRUE), 0)," €"),
+               maximo        = paste0(round(max(imp_aplazamiento_pagos, na.rm=TRUE), 0)," €")
+)
+
+```  
+
+<br/> 
+
+4.6. Notificaciones (solicitud de alta / baja en el servicio de notificaciones): El servicio de alta de notificaciones se usa por el 94% de los clientes Activos en Wallet. El 73% de los clientes inactivos Wallet usaron este servicio alguna vez. El 59% de los activos usaron el alta de notificaciones en el último trimestre. <br/>
+
+```{r NOTIFICACIONES_DATOS, eval=TRUE, echo=FALSE, cache=TRUE}
+
+notificaciones <- qhive("select categoria_usuario,
+                        case when notificaciones_alta = 1 and notificaciones_baja = 1 then 'Alta & Baja'
+                             when notificaciones_alta = 1 then 'Alta'
+                             when notificaciones_baja = 1 then 'Baja'
+                             else 'No' 
+                        end as resumen_alta_baja,   
+                        count(distinct cod_pers_trs) as conteo_dist_pers
+                        from da_mariadrav.funcionalidades_datos_encuestas
+                        group by categoria_usuario, case when notificaciones_alta = 1 and notificaciones_baja = 1 then 'Alta & Baja' when notificaciones_alta = 1 then 'Alta' when notificaciones_baja = 1 then 'Baja' else 'No' end")
+
+notificaciones_activos <- qhive("select case when notificaciones_alta = 1 and notificaciones_baja = 1 then 'Alta & Baja'
+                             when notificaciones_alta = 1 then 'Alta'
+                             when notificaciones_baja = 1 then 'Baja'
+                             else 'No' 
+                        end as resumen_alta_baja,   
+                        count(distinct cod_pers_trs) as conteo_dist_pers
+                        from da_mariadrav.funcionalidades_datos_encuestas_activos
+                        group by case when notificaciones_alta = 1 and notificaciones_baja = 1 then 'Alta & Baja' when notificaciones_alta = 1 then 'Alta' when notificaciones_baja = 1 then 'Baja' else 'No' end")
+   
+```
+
+```{r NOTIFICACIONES, eval=TRUE, echo=FALSE, cache=TRUE}
+#Gráfico
+ # Get the levels for type in the required order
+notificaciones = arrange(notificaciones, categoria_usuario, resumen_alta_baja)
+
+  # Calculate the percentages
+notificaciones = ddply(notificaciones, .(categoria_usuario), transform, percent_dist_pers = conteo_dist_pers/sum(conteo_dist_pers) * 100, pos = cumsum((conteo_dist_pers/sum(conteo_dist_pers)) - (0.5 * conteo_dist_pers/sum(conteo_dist_pers)))*100)
+
+
+notificaciones$label_percent_dist_pers = paste0(sprintf("%.0f", notificaciones$percent_dist_pers), "%")
+
+  # Order
+notificaciones = notificaciones[order(notificaciones$resumen_alta_baja, notificaciones$categoria_usuario),]
+
+  #Graph
+graph_notificaciones <- ggplot(notificaciones, aes(x = factor(categoria_usuario), y = percent_dist_pers, fill = resumen_alta_baja, label=label_percent_dist_pers, ymax=max(percent_dist_pers))) + 
+  geom_bar(stat = "identity", width = .7) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("% clientes distintos") + 
+  ggtitle("Alta / Baja notificaciones en la app") + 
+  geom_text(aes(label = label_percent_dist_pers), position = "stack", size = 3.5) +
+  scale_fill_brewer()
+graph_notificaciones
+
+
+#Gráfico en el último trimestre
+  # Calculate the percentages
+notificaciones_activos$percent_dist_pers = notificaciones_activos$conteo_dist_pers/sum(notificaciones_activos$conteo_dist_pers) * 100
+notificaciones_activos$label_percent_dist_pers = paste0(sprintf("%.0f", notificaciones_activos$percent_dist_pers), "%")
+
+  #Graph
+graph_notificaciones_activos <- ggplot(notificaciones_activos, aes(x = resumen_alta_baja, y = percent_dist_pers, label=label_percent_dist_pers, ymax=(max(percent_dist_pers)+0.1*max(percent_dist_pers)))) + 
+  geom_bar(stat = "identity", width = .7, fill='blue') + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("% clientes distintos") + 
+  ggtitle(expression(atop(paste('Alta / Baja notificaciones en la app'), atop(italic(paste('Clientes Wallet Activos, último trimestre')), "")))) + 
+  geom_text(aes(y = percent_dist_pers, label = label_percent_dist_pers), position = "stack", size = 3.5, vjust=-2) +
+  scale_fill_brewer()
+graph_notificaciones_activos
+
+```
+
+<br/> 
+
+4.7. acción comercial Wallet: El 68% de los activos y el 69% de los inactivos recibieron en algún momento alguna campaña wallet. Ninguno de los activos recibió campañas en el último trimestre. <br/> 
+```{r ACCION_COMERCIAL_DATOS, eval=TRUE, echo=FALSE, cache=TRUE}
+
+accion_comercial <- qhive("select categoria_usuario,
+                             case when accion_comercial = 1 then 'Sí' else 'No' 
+                             end as resumen_accion_comercial,
+                             count(cod_pers_trs) as conteo_dist_pers
+                             from da_mariadrav.funcionalidades_datos_encuestas
+                             group by categoria_usuario, case when accion_comercial = 1 then 'Sí' else 'No' end")
+
+accion_comercial_activos <- qhive("select case when accion_comercial = 1 then 'Sí' else 'No' 
+                                             end as resumen_accion_comercial,
+                                     count(distinct cod_pers_trs) as conteo_dist_pers
+                                     from da_mariadrav.funcionalidades_datos_encuestas_activos 
+                                     group by case when accion_comercial = 1 then 'Sí' else 'No' end")
+```
+
+```{r ACCION_COMERCIAL, eval=TRUE, echo=FALSE, cache=TRUE}
+#Gráfico
+ # Get the levels for type in the required order
+accion_comercial = arrange(accion_comercial, categoria_usuario, resumen_accion_comercial)
+
+  # Calculate the percentages
+accion_comercial = ddply(accion_comercial, .(categoria_usuario), transform, percent_dist_pers = conteo_dist_pers/sum(conteo_dist_pers) * 100, pos = cumsum((conteo_dist_pers/sum(conteo_dist_pers)) - (0.5 * conteo_dist_pers/sum(conteo_dist_pers)))*100)
+accion_comercial$label_percent_dist_pers = paste0(sprintf("%.0f", accion_comercial$percent_dist_pers), "%")
+
+  # Order
+accion_comercial = accion_comercial[order(accion_comercial$resumen_accion_comercial, accion_comercial$categoria_usuario),]
+
+  #Graph
+graph_accion_comercial <- ggplot(accion_comercial, aes(x = factor(categoria_usuario), y = percent_dist_pers, fill = resumen_accion_comercial, label=label_percent_dist_pers, ymax=max(percent_dist_pers))) + 
+  geom_bar(stat = "identity", width = .7) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("clientes distintos") + 
+  ggtitle("Recepción de acción comercial en la app") + 
+  geom_text(aes(y = pos, label = label_percent_dist_pers), position = "stack", size = 3.5) +
+  scale_fill_brewer()
+graph_accion_comercial
+
+```   
+
+**No nos consta que algún cliente haya recibido una acción comercial en el último trimestre. **
+
+
+<br/> 
+
+***Combinación de funcionalidades: % de clientes que han usado todas las funcionalidades, o 6 de ellas o 5 etc.***
+<br/> 
+```{r FUNCIONALIDADES_RESUMEN_DATOS, eval=TRUE, echo=FALSE, cache=TRUE}
+
+funcionalidades <- qhive("select categoria_usuario,
+                          activacion_tarjetas + bloqueo_tarjetas + num_movimientos + consulta_movim + aplazamiento_pagos + notificaciones + accion_comercial as num_funcionalidades,
+                    count(cod_pers_trs) as conteo_dist_pers
+                    from da_mariadrav.funcionalidades_datos_encuestas
+                    group by categoria_usuario, activacion_tarjetas + bloqueo_tarjetas + num_movimientos + consulta_movim + aplazamiento_pagos + notificaciones + accion_comercial")
+
+funcionalidades_activos <- qhive("select activacion_tarjetas + bloqueo_tarjetas + num_movimientos + consulta_movim + aplazamiento_pagos + notificaciones + accion_comercial as num_funcionalidades,
+                    count(cod_pers_trs) as conteo_dist_pers
+                    from da_mariadrav.funcionalidades_datos_encuestas_activos
+                    group by activacion_tarjetas + bloqueo_tarjetas + num_movimientos + consulta_movim + aplazamiento_pagos + notificaciones + accion_comercial")
+
+```
+
+```{r FUNCIONALIDADES_RESUMEN, eval=TRUE, echo=FALSE, cache=TRUE}
+#Gráfico
+  # Get the levels for type in the required order
+funcionalidades = arrange(funcionalidades, categoria_usuario, num_funcionalidades)
+
+# Calculate the % des_ctgcom
+funcionalidades = ddply(funcionalidades, .(categoria_usuario), transform, percent_dist_pers = conteo_dist_pers/sum(conteo_dist_pers) * 100, pos = cumsum((conteo_dist_pers/sum(conteo_dist_pers)) - (0.5 * conteo_dist_pers/sum(conteo_dist_pers)))*100)
+
+funcionalidades$label_percent_dist_pers = paste(sprintf("%.0f", funcionalidades$percent_dist_pers ),"%")
+
+# Order
+funcionalidades = funcionalidades[order(funcionalidades$num_funcionalidades, funcionalidades$categoria_usuario),]
+
+#Graph
+graph_funcionalidades <- ggplot(funcionalidades, aes(x = factor(categoria_usuario), y = percent_dist_pers, fill = factor(num_funcionalidades), label=percent_dist_pers, ymax=max(percent_dist_pers))) + 
+  geom_bar(stat = "identity", width = .7) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("% clientes distintos") + 
+  ggtitle("# funcionalidades usadas") + 
+  geom_text(aes(label = label_percent_dist_pers), position = "stack", size = 3.5) +
+  scale_fill_brewer()
+graph_funcionalidades
+
+cast(funcionalidades[,c(1,2,5)], num_funcionalidades ~ categoria_usuario)
+
+
+#Gráfico en el último trimestre
+  # Calculate the percentages
+funcionalidades_activos$percent_dist_pers = funcionalidades_activos$conteo_dist_pers/sum(funcionalidades_activos$conteo_dist_pers) * 100
+funcionalidades_activos$label_percent_dist_pers = paste0(sprintf("%.0f", funcionalidades_activos$percent_dist_pers), "%")
+funcionalidades_activos$num_funcionalidades = ifelse(is.na(funcionalidades_activos$num_funcionalidades),0, funcionalidades_activos$num_funcionalidades)
+
+  #Graph
+graph_funcionalidades_activos <- ggplot(funcionalidades_activos, aes(x = factor(num_funcionalidades), y = percent_dist_pers, fill = num_funcionalidades, label=label_percent_dist_pers, ymax=(max(percent_dist_pers)+0.1*max(percent_dist_pers)))) + 
+  geom_bar(stat = "identity", width = .7, fill='lightblue') + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) +
+  ylab("Clientes distintos") + 
+  ggtitle(expression(atop(paste('# Funcionalidades usadas'), atop(italic(paste('Clientes Wallet Activos, último trimestre')), ""))))  + 
+  theme(legend.position="none") + 
+  geom_text(aes(y = percent_dist_pers), position = "stack", size = 3.5, vjust=-2)
+graph_funcionalidades_activos
+
+```
+
+<br/>
+**5. Estudio tenencia otros productos financieros en BBVA (hipoteca, préstamos, depósitos, planes de pensiones, nóminas/pensiones domiciliadas, etc.)**
+<br/>
+
+* Se calcula el número de clientes que tienen al menos un producto. Pueden aparecer clientes sin productos porque se cruza información de diferentes fuentes.
+<br/> 
+```{r TENENCIA_PRODUCTOS_DATOS, eval=TRUE, echo=FALSE, cache=TRUE}
+qhive("select categoria_usuario, 
+       sum(case when ind_contrapartida=1 then 1 else 0 end) as Tiene_productos,
+       sum(case when ind_contrapartida=0 then 1 else 0 end) as No_tiene_productos
+       from(SELECT categoria_usuario, cod_pers_trs, ind_contrapartida,
+            rank() over (PARTITION BY categoria_usuario, cod_pers_trs ORDER BY ind_contrapartida DESC) as rank
+            FROM (SELECT DISTINCT categoria_usuario, cod_pers_trs,
+                  case when des_contrapartida is not null then 1 else 0 end as ind_contrapartida
+                  FROM da_mariadrav.wallet_tablon_encuestas
+                  ) a
+             ) r where rank=1
+        group by categoria_usuario")
+```
+
+<br/> 
+
+* Se calcula el número de clientes que tienen cada uno de los productos.
+<br/> 
+```{r TENENCIA_PRODUCTOS1, eval=TRUE, echo=FALSE, cache=TRUE}
+#Penetración de productos por número de clientes descediente
+
+produ <- qhive("select categoria_usuario,
+                    des_contrapartida, 
+                    count(distinct cod_pers_trs) as num_clientes 
+                    from da_mariadrav.productos_comb where des_contrapartida !=''
+                    group by categoria_usuario, des_contrapartida")
+```   
+
+```{r TENENCIA_PRODUCTOS2, eval=TRUE, echo=FALSE, cache=TRUE, warning=FALSE, fig.width=10, fig.height=10, echo=FALSE}
+
+# Get the levels for type in the required order
+produ = arrange(produ, des_contrapartida, categoria_usuario)
+
+# Calculate the %
+produ = ddply(produ, .(des_contrapartida), transform, percent_dist_pers = num_clientes/sum(num_clientes) * 100)
+produ$label_percent_dist_pers = paste(sprintf("%.0f", produ$percent_dist_pers ),"%")
+
+# Order
+produ = produ[order(produ$categoria_usuario, desc(produ$num_clientes) ),]
+
+graph_produ <- ggplot(produ, aes(x=des_contrapartida, y=num_clientes, fill = categoria_usuario, label="", ymax=max(num_clientes))) + 
+  geom_bar(stat = "identity",position='dodge', width=1) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank(), axis.text.y  = element_text(size=8), legend.position="bottom") +
+  xlab("Producto") + 
+  ggtitle(expression(atop(paste('# de clientes que tienen contratado algún producto'), atop(italic(paste('Clientes distribuidos por categoria de usuario')), ""))))  + 
+  geom_text(aes(y = num_clientes), position = "dodge", size = 3.5) +
+   scale_fill_brewer() +
+  coord_flip() 
+graph_produ
+
+```   
+
+<br/>
+
+*Número de clientes que tienen contratado algún producto* <br/>
+```{r TENENCIA_PRODUCTOS3, eval=TRUE, echo=FALSE, cache=TRUE, warning=FALSE, echo=FALSE}
+cast(produ[, c(1,2,3)],  des_contrapartida ~ categoria_usuario)
+```   
+
+<br/>
+
+*% de clientes que tienen contratado algún producto distribuidos por categoria de usuario* <br/>
+```{r TENENCIA_PRODUCTOS4, eval=TRUE, echo=FALSE, cache=TRUE, warning=FALSE, echo=FALSE}
+cast(produ[, c(1,2,5)],  des_contrapartida ~ categoria_usuario)
+```   
+
+
+```{r eval=FALSE, echo=FALSE, cache=TRUE, warning=FALSE, echo=FALSE}
+# produ2$label_Wallet_Activo = paste(sprintf("%.0f", produ2$Wallet_Activo ),"%")
+
+# produ2$label_Wallet_Inactivo = paste(sprintf("%.0f", produ2$Wallet_Inactivo ),"%")
+
+# produ2$label_BBVANet = paste(sprintf("%.0f", produ2$BBVANet),"%")
+
+```
+
+<br/> 
+
+#ANEXO#
+<br/> 
+
+***Tarjetas Habituales***
+<br/> *Dado que hay muchos tipos de tarjetas se seleccionar aquellas que son más comunes:*
+
+| COD_comprod | des_comprod                            |
+|:-----------:|:--------------------------------------:|
+|    2369     | TARJETA DESPUES BBVA                   |
+|    2265     | TARJETA AHORA BBVA                     |
+|    6709     | TARJETA DIEZ                           |
+|    2366     | TARJETA AHORA BLUE BBVA                |
+|    3037     | PACK-DUO BBVA                          |
+|    9994     | TARJETA ANTES BBVA                     |
+|    2497     | TARJETA A TU RITMO BBVA                |
+|    2154     | TARJETA BLUE BBVA                      |
+|    2306     | TARJETA VIRTUAL BBVA                   |
+|    7938     | TARJETA A TU RITMO COMPLEMENTARIA BBVA |
+|    9482     | TARJETA 3 MESES SIN                    |
+|    2494     | TARJETA DESPUES BLUE BBVA              |
+|    2496     | TARJETA DESPUES ORO BBVA               |
+|    4169     | TARJETA ANTES BLUE BBVA                |
+|    0561     | TARJETA NEGOCIOS DEBITO                |
+|    9841     | TARJETA NEGOCIOS CREDITO               |
+|    5990     | TARJETA BLUE BBVA MENSUAL              |
+|    6048     | TARJETA LIGA BBVA                      |
+|    2511     | TARJETA A TU RITMO BLUE BBVA           |
+|    5989     | TARJETA DIEZ MENSUAL                   |
+
+
+***FUENTES***
+
+*SINFO - NFC:*
+
+* Telefono validado - tfno_gest
+* email validado - email
+* Indicador de móvil validado - inf_movil
+* Indicador de email validado - inf_email
+* Edad - edad_edad
+* Género - sexo_sexo
+* Antigüedad BBVA
+* Nombre y Apellidos
+
+*clarity_attributes.Big_Big_table:*
+
+* Ciudad - cod_postal_ciudad_des_ciudadg
+* Segmento según Plan Uno -  segmento_plan_uno_cod_segmento_plan_uno
+
+
+*clarity_elements.metricas_segm_comport, da_pro.transacciones_por_canal*
+
+* Tipología usuario Banca Online (según alguna segmentación interna sobre nivel de uso de BO) -  segmento_comportamental <= 6
+* Franjas horarias de conexión
+
+*da_martalamela.wallet_antiguedad_usuarios*
+
+* Antigüedad en BBVA Wallet -  antiguedad_days
+
+*da_pro.productos_contratados*
+
+* Tenencia de tarjeta wallet - cod_comprod = 8425
+* Tenencia de sticker - cod_comprod = 3199
+* Nº medio de tarjetas activas-  distinct cod_idcontra para cod_comprod 3199, 8425
+* Tenencia otros productos financieros en BBVA (hipoteca, préstamos, depósitos, planes de pensiones, nóminas/pensiones domiciliadas, etc.)- des_ctgcom
+
+*da_pro.movimientos_tarjeta_detalle_corp*
+
+* Nº operaciones realizadas Tarjeta wallet e importes - count(all), suma importe
+* Modalidad de pago Tarjeta Wallet - join productos_contratados y ver cod_comprod 3199, 8425
+* NO SE ENCONTRÓ INFORMACION: Si pre-pago: importes medios recargados - ¿pago en comercio online? ¿todos los 3199?
+
+*Funcionalidades*
+
+*da_pro.transacciones_por_canal*
+
+* 1. activación de tarjetas - cod_trnfims 1231
+* 4. consulta de movimientos - cod_trnfims 0190 o TCTFT976 o 0559 (prepago)
+* 5. aplazamiento de pagos - cod_trnfims 1620 o TCTFTL66
+* 6. recepción de notificaciones - cod_trnfims 1681 (baja) o 1680 (alta)
+
+*da_pro.movimientos_tarjeta_detalle_corp*
+
+* 3. pago móvil, diferenciando si ha sido con o sin sticker -	cod_comprod 3199, 8425
+
+*sinfo_master.oportunidades_comerciales*
+
+* 7. uso de promociones: Sólo existe información de clientes que recibieron alguna oferta comercial wallet (cupones etc.) y no del éxito de ellas -	cod_acom wallet
+
+*da_pro.productos_contratados, da_pro.productos_contratados_detalle, da_pro.saldos_cuenta_persona_fisica*
+
+* Otros productos contratados
+

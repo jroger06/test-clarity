@@ -1,0 +1,569 @@
+---
+title: "Análisis preliminar de los usuarios wallet (vs no wallet)"
+---
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- '[Wallet]: Análisis preliminar de los usuarios wallet (vs no wallet)'
+
+keywords  <- 'wallet, digital, online, bbva.es, bbvanet, transaccionalidad, productos, sociodemograficos, campañas, acciones comerciales, rentabilidad, comportamiento'  
+```
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+# This avoids loading messages and warnings showing up
+suppressMessages(library(DBI))
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(lattice))
+suppressMessages(library(reshape))
+suppressMessages(library(plyr))
+
+options(warn=-1, scipen=3, width=150)
+source('~/bda_clarity/tools/warehouse_basics.R') ;
+source('~/bda_clarity/tools/write.hive.R') ;
+```
+
+```{r echo=FALSE, eval=FALSE}
+# Dependencies
+da_pro.transacciones_por_canal <- clarity.use_table(DEPENDENCY_FULL_PRO_TABLE,
+                                                    'da_pro.transacciones_por_canal',
+                                                    select = '*')
+da_pro.intervinientes_corp <- clarity.use_table(DEPENDENCY_FULL_PRO_TABLE,
+                                                    'da_pro.intervinientes_corp',
+                                                    select = '*')
+da_pro.rentabilidad_clientes <- clarity.use_table(DEPENDENCY_FULL_PRO_TABLE,
+                                                    'da_pro.rentabilidad_clientes',
+                                                    select = '*')
+clarity_elements.detalle_productos_saldos_cliente <- clarity.use_table(DEPENDENCY_OTHER_TABLES,
+                                                            'clarity_intermediate.detalle_productos_saldos_cliente',
+                                                            select = '*',
+                                                            sqname = 'clarity_intermediate.detalle_productos_saldos_cliente')
+clarity_elements.metricas_segm_comport <- clarity.use_table(DEPENDENCY_OTHER_TABLES,
+                                                            'clarity_elements.metricas_segm_comport',
+                                                            select = '*',
+                                                            sqname = 'clarity_elements.metricas_segm_comport')
+```
+
+LAST UPDATE: **`r qhive("select max(partition_id) from da_martalamela.wallet_cod_serv_dv")`**
+NEW VERSION: WALLET_ANALISIS_RENTABILIDAD.RMD
+
+Tenemos que realizar una comparativa de los siguientes grupos:
+
++ Usuarios wallet
++ Usuarios activos wallet en el periodo analizado
++ Usuarios no wallet, activos en BBVA Net y menores de 64 años (grupo considerado como control)
+
+Algunas métricas interesantes podrían ser:
+
++ margen/cliente
++ nº tarjetas/cliente
++ nº transacciones acumuladas (crédito y débito)
++ volumen de compras acumuladas (crédito y débito)
++ % actividad últimos 3 meses
++ % cancelación tarjetas
++ IRENE
++ etc
+
+Comenzamos identificando qué es un _usuario wallet_, y qué definimos como _usuario activo_. Basándonos en el dashboard recibido por parte de la gente de wallet, un usuario wallet es todo aquel cliente que se ha descargado la aplicación y ha hecho login. Un usuario activo sería aquel que ha hecho login en el último mes.
+
+Viendo el análisis previo realizado de los datos (se pueden consultar los RMDs etiquetados como Wallet), consideramos que un usuario wallet es aquel que en algún momento de todo el histórico **ha hecho uso de la aplicación wallet**, entendiendo como tal que existe al menos un registro en la tabla de Transacciones Por Canal asociado a ese cliente y etiquetado como:
+
+| cod_trnfims |     des_trnfims     | 
+|:-----------:|:-------------------:|
+|  ADCTT007   | ALTA TARJETA WALLET | 
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_cod_pers_trs_ADCTT007 as
+select
+cod_pers_trs,
+min(partition_id) as first_partition_id
+from da_pro.transacciones_por_canal
+where cod_pers_trs not like '%@%'
+and trim(cod_trnfims) like 'ADCTT007'
+group by cod_pers_trs")
+```
+
+¿Cuántos clientes hay asociados a ese código de transacción cod_trnfims='ADCTT007'?
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select count(distinct cod_pers_trs)
+       from da_martalamela.wallet_cod_pers_trs_ADCTT007")
+```
+
+¿Cómo se distribuyen a lo largo del histórico?
+En noviembre de 2013 se lanza la tarjeta wallet para empleados, y en diciembre de 2013 para clientes.
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+first_partition_id <- qhive("select first_partition_id,
+       count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+       from da_martalamela.wallet_cod_pers_trs_ADCTT007
+       where cast(first_partition_id as int) >= 20131130
+       group by first_partition_id
+       order by first_partition_id")
+
+graph_first_partition_id <- ggplot(data=first_partition_id, aes(x=first_partition_id, y=count_distinct_cod_pers_trs, ymax = 1.1*max(count_distinct_cod_pers_trs), label=count_distinct_cod_pers_trs)) + geom_line(aes(group=1), colour="#CC0066") + geom_point(colour="#CC0066") + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + ylab("# clientes distintos") + ggtitle("# Clientes 1ª Transacción Alta Tarjeta Wallet") + geom_text(aes(y = count_distinct_cod_pers_trs, vjust=-1), position = "stack", size = 3.5, colour="#CC0066")
+graph_first_partition_id
+```
+
+No confundamos con el evolutivo histórico de clientes que tienen asociada una transacción de Alta Tarjeta Wallet, no solo la primera de ellas.
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+ADCTT007 <- qhive("select partition_id,
+       count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+       from da_martalamela.wallet_cod_trnfims
+       where trim(cod_trnfims) like 'ADCTT007'
+       and cast(partition_id as int) >= 20131130
+       group by partition_id
+       order by partition_id")
+
+graph_ADCTT007 <- ggplot(data=ADCTT007, aes(x=partition_id, y=count_distinct_cod_pers_trs, ymax = 1.1*max(count_distinct_cod_pers_trs), label=count_distinct_cod_pers_trs)) + geom_line(aes(group=1), colour="#66CC99") + geom_point(colour="#66CC99") + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + ylab("# clientes distintos") + ggtitle("# Clientes cod_trnfims='ADCTT007' - Alta Tarjeta Wallet") + geom_text(aes(y = count_distinct_cod_pers_trs, vjust=-1), position = "stack", size = 3.5, colour="#66CC99")
+graph_ADCTT007
+```
+
+Hemos de comparar este conjunto de clientes con los usuarios no wallet, activos en BBVA Net y menores de 64 años (grupo considerado como control). Para ello extraemos de la tabla de segmentación comportamental en la Net los grupos 1 a 6 (1-contratan,..., 6-consultan) que serían los usuarios que consideramos activos en BBVA Net y cruzamos con Edad (atributo Clarity) para filtrar menores de 64 años. También cruzamos con nuestro grupo de usuarios wallet para que un cliente no esté en ambos botes.
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select segmento_comportamental, mix_actividad
+from clarity_elements.metricas_segm_comport
+group by segmento_comportamental, mix_actividad
+order by segmento_comportamental")
+```
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_grupocontrol as
+      select usuarionet.cod_persona as cod_persona
+      from
+      (
+        select distinct cod_persona
+        from clarity_elements.metricas_segm_comport
+        where segmento_comportamental <= 6
+      ) usuarionet
+      left join clarity_elements.edad edad
+      on cast(usuarionet.cod_persona as int)=cast(edad.cod_persona as int)
+      left join da_martalamela.wallet_cod_pers_trs_ADCTT007 wallet
+      on cast(usuarionet.cod_persona as int)=cast(wallet.cod_pers_trs as int)
+      where edad >=18 and edad <= 64
+      and first_partition_id is null")
+
+qhive("select count(distinct cod_persona)
+from da_martalamela.wallet_grupocontrol")
+```
+
+**PERFIL DE CLIENTES**
+
+Para estudiar la tenencia y saldos en productos de los usuarios wallet, empezamos utilizando la tabla clarity_intermediate.detalle_productos_saldos_cliente que cruza a cada cliente con la tabla de intervinientes para obtener todos los contratos de productos asociados a éste, y su fecha de contratación, saldos, etc.
+¡OJO! Se usa debug_clarity_intermediate.detalle_productos_saldos_cliente porque hay un error en esa tabla en el momento de ejecución.
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select des_ctgcom,
+      count(distinct cod_persona) as count_distinct_cod_pers_trs
+      from debug_clarity_intermediate.detalle_productos_saldos_cliente
+      group by des_ctgcom
+      order by des_ctgcom")
+
+qhive("select cod_pro_plat,
+      count(distinct cod_persona) as count_distinct_cod_pers_trs
+      from debug_clarity_intermediate.detalle_productos_saldos_cliente
+      where cod_pro_plat is not null
+      group by cod_pro_plat
+      order by cod_pro_plat")
+```
+
+Cruzamos con nuestros usuarios wallet y realizamos el mismo conteo de clientes x producto:
+```{r eval=TRUE, echo=FALSE, cache=TRUE, fig.width=12, fig.height=7}
+tenencia_wallet <- qhive("select des_ctgcom,
+                        count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+                        from da_martalamela.wallet_cod_pers_trs_ADCTT007 wallet
+                        left join
+                        (
+                        select *
+                        from debug_clarity_intermediate.detalle_productos_saldos_cliente
+                        where des_ctgcom is not null
+                        ) productos
+                        on cast(wallet.cod_pers_trs as int)=cast(productos.cod_persona as int)
+                        group by des_ctgcom
+                        order by des_ctgcom")
+
+graph_tenencia_wallet <- ggplot(tenencia_wallet, aes(x = factor(des_ctgcom), y = count_distinct_cod_pers_trs, label=count_distinct_cod_pers_trs, fill = des_ctgcom, ymax = 1.1*max(count_distinct_cod_pers_trs))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10, hjust=1)) + ylab("# clientes distintos") + ggtitle("# Clientes x producto")  + theme(legend.position="none") + geom_text(aes(y = count_distinct_cod_pers_trs, vjust=-1), position = "stack", size = 3.5)
+graph_tenencia_wallet
+
+cod_pro_plat_wallet <- qhive("select cod_pro_plat,
+                        count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+                        from da_martalamela.wallet_cod_pers_trs_ADCTT007 wallet
+                        left join
+                        (
+                        select *
+                        from debug_clarity_intermediate.detalle_productos_saldos_cliente
+                        where cod_pro_plat is not null
+                        ) productos
+                        on cast(wallet.cod_pers_trs as int)=cast(productos.cod_persona as int)
+                        group by cod_pro_plat
+                        order by cod_pro_plat")
+
+graph_cod_pro_plat_wallet <- ggplot(cod_pro_plat_wallet[cod_pro_plat_wallet$cod_pro_plat%in%c("TJ","TD"),], aes(x = factor(cod_pro_plat), y = count_distinct_cod_pers_trs, label=count_distinct_cod_pers_trs, fill = cod_pro_plat, ymax = 1.1*max(count_distinct_cod_pers_trs))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10, hjust=1)) + ylab("# clientes distintos") + ggtitle("# Clientes x cod_pro_plat")  + theme(legend.position="none") + geom_text(aes(y = count_distinct_cod_pers_trs, vjust=-1), position = "stack", size = 3.5)
+graph_cod_pro_plat_wallet
+```
+
+Más adelante estudiaremos la tenencia y saldos para cada uno de estos productos.
+
+Otras características que podemos estudiar de los usuarios wallet y compararlas con el grupo de control podrían ser los siguientes atributos Clarity (en el esquema clarity_elements, tabla con todos ellos agrupados en el esquema clarity_attributes.big_big_table):
+
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_big_big_table as
+        select wallet.*,
+        big.*,
+        'wallet' as tipocliente
+        from da_martalamela.wallet_cod_pers_trs_ADCTT007 wallet
+        left join clarity_attributes.big_big_table big
+        on cast(wallet.cod_pers_trs as int)=cast(big.cod_persona as int)")
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_grupocontrol_big_big_table as
+        select control.cod_persona as cod_pers_trs,
+        intervinientes.first_partition_id,
+        big.*,
+        'control' as tipocliente
+        from da_martalamela.wallet_grupocontrol control
+        left join
+        (
+          select cod_persctpn,
+          min(partition_id) as first_partition_id
+          from da_pro.intervinientes_corp
+          group by cod_persctpn
+        ) intervinientes
+        on cast(control.cod_persona as int)=cast(intervinientes.cod_persctpn as int)
+        left join clarity_attributes.big_big_table big
+        on cast(control.cod_persona as int)=cast(big.cod_persona as int)")
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_big_big_table_all as
+        select unioned.*
+        from
+        (
+          select wallet.*
+          from da_martalamela.wallet_big_big_table wallet
+          union all
+          select control.*
+          from da_martalamela.wallet_grupocontrol_big_big_table control
+        ) unioned")
+```
+
++ Sexo
+```{r eval=TRUE, echo=FALSE, cache=TRUE, fig.width=12, fig.height=7}
+atribute_sexo <- qhive("select sexo_sexo as sexo,
+                       tipocliente,
+                       count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+                       from da_martalamela.wallet_big_big_table_all
+                       group by sexo_sexo,tipocliente
+                       order by sexo")
+
+# Get the levels for type in the required order
+atribute_sexo$tipocliente = factor(atribute_sexo$tipocliente)
+atribute_sexo = arrange(atribute_sexo, tipocliente)
+atribute_sexo = atribute_sexo[!is.na(atribute_sexo$sexo)&atribute_sexo$sexo!='E',]
+
+# Calculate the percentages
+atribute_sexo = ddply(atribute_sexo, .(tipocliente), transform, percent_distinct_cod_pers_trs = count_distinct_cod_pers_trs/sum(count_distinct_cod_pers_trs) * 100)
+atribute_sexo$label_percent_distinct_cod_pers_trs = paste0(sprintf("%.0f", atribute_sexo$percent_distinct_cod_pers_trs), "%")
+
+# Order
+atribute_sexo$tipocliente = factor(atribute_sexo$tipocliente,levels(atribute_sexo$tipocliente)[c(2,1)])
+
+graph_group_atribute_sexo <- ggplot(atribute_sexo, aes(x = tipocliente, y = percent_distinct_cod_pers_trs, group=sexo, fill = sexo, label=label_percent_distinct_cod_pers_trs, ymax = 1.1*max(percent_distinct_cod_pers_trs))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("% clientes distintos") + ggtitle("% clientes x sexo") + geom_text(aes(y = percent_distinct_cod_pers_trs, label = label_percent_distinct_cod_pers_trs), position = "stack", size = 3.5)
+graph_group_atribute_sexo
+```
+
++ Edad
+```{r eval=TRUE, echo=FALSE, cache=TRUE, fig.width=12, fig.height=7}
+atribute_edad <- qhive("select edad,
+                        group_edad,
+                        tipocliente,
+                        count(distinct big.cod_pers_trs) as count_distinct_cod_pers_trs
+                        from da_martalamela.wallet_big_big_table_all big
+                        left join
+                        (
+                          select cod_pers_trs,
+                          edad_edad as edad,
+                          case
+                            when edad_edad>=18 and edad_edad<=29 then '18-29'
+                            when edad_edad>29 and edad_edad<=49 then '30-49'
+                            when edad_edad>=50 and edad_edad<=64 then '50-64'
+                            else 'resto'
+                        end as group_edad
+                        from da_martalamela.wallet_big_big_table_all
+                        ) atribute
+                        on cast(big.cod_pers_trs as int)=cast(atribute.cod_pers_trs as int)
+                        group by edad,group_edad,tipocliente
+                        order by edad")
+
+graph_tenencia_wallet <- ggplot(atribute_edad, aes(x = factor(edad), y = count_distinct_cod_pers_trs, label=count_distinct_cod_pers_trs, fill = edad, ymax = 1.1*max(count_distinct_cod_pers_trs))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10, hjust=1)) + ylab("# clientes distintos") + ggtitle("# Clientes x producto")  + theme(legend.position="none")
+graph_tenencia_wallet
+
+# Get the levels for type in the required order
+atribute_edad$tipocliente = factor(atribute_edad$tipocliente)
+atribute_edad = arrange(atribute_edad, tipocliente)
+atribute_edad = atribute_edad[!is.na(atribute_edad$edad)&atribute_edad$group_edad!='resto',]
+
+# Calculate the percentages
+atribute_edad_group = unique(ddply(atribute_edad, .(tipocliente, group_edad), transform, sum_distinct_cod_pers_trs = sum(count_distinct_cod_pers_trs))[,c("tipocliente","group_edad","sum_distinct_cod_pers_trs")])
+atribute_edad_group = ddply(atribute_edad_group, .(tipocliente), transform, percent_distinct_cod_pers_trs = sum_distinct_cod_pers_trs/sum(sum_distinct_cod_pers_trs) * 100)
+atribute_edad_group$label_percent_distinct_cod_pers_trs = paste0(sprintf("%.0f", atribute_edad_group$percent_distinct_cod_pers_trs), "%")
+
+# Order
+atribute_edad_group$tipocliente = factor(atribute_edad_group$tipocliente,levels(atribute_edad_group$tipocliente)[c(2,1)])
+
+graph_group_atribute_edad <- ggplot(atribute_edad_group[!is.na(atribute_edad_group$group_edad),], aes(x = tipocliente, y = percent_distinct_cod_pers_trs, group=group_edad, fill = group_edad, label=label_percent_distinct_cod_pers_trs, ymax = 1.1*max(percent_distinct_cod_pers_trs))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("% clientes distintos") + ggtitle("% clientes x edad (agr)") + geom_text(aes(y = percent_distinct_cod_pers_trs, label = label_percent_distinct_cod_pers_trs), position = "stack", size = 3.5)
+graph_group_atribute_edad
+```
+
++ Segmento GLOBAL
+```{r eval=TRUE, echo=FALSE, cache=TRUE, fig.width=12, fig.height=7}
+atribute_global <- qhive("select case
+                         when segmento_global_unico_cod_segmsubo between 36 and 38 then 'Pymes'
+                         when segmento_global_unico_cod_segmsubo between 41 and 43 then 'Premium'
+                         when segmento_global_unico_cod_segmsubo between 51 and 54 then 'PAES'
+                         when segmento_global_unico_cod_segmsubo between 55 and 62 then 'Particulares'
+                         else 'otros'
+                         end as segmento_global_gr,
+                       tipocliente,
+                       count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+                       from da_martalamela.wallet_big_big_table_all
+                       group by (case
+                         when segmento_global_unico_cod_segmsubo between 36 and 38 then 'Pymes'
+                         when segmento_global_unico_cod_segmsubo between 41 and 43 then 'Premium'
+                         when segmento_global_unico_cod_segmsubo between 51 and 54 then 'PAES'
+                         when segmento_global_unico_cod_segmsubo between 55 and 62 then 'Particulares'
+                         else 'otros'
+                         end),tipocliente
+                       order by tipocliente")
+
+# Get the levels for type in the required order
+atribute_global$tipocliente = factor(atribute_global$tipocliente)
+atribute_global = arrange(atribute_global, tipocliente)
+
+# Calculate the percentages
+atribute_global = ddply(atribute_global, .(tipocliente), transform, percent_distinct_cod_pers_trs = count_distinct_cod_pers_trs/sum(count_distinct_cod_pers_trs) * 100)
+atribute_global$label_percent_distinct_cod_pers_trs = paste0(sprintf("%.0f", atribute_global$percent_distinct_cod_pers_trs), "%")
+
+# Order
+atribute_global = atribute_global[order(atribute_global$percent_distinct_cod_pers_trs),]
+atribute_global$tipocliente = factor(atribute_global$tipocliente,levels(atribute_global$tipocliente)[c(2,1)])
+
+graph_group_atribute_global <- ggplot(atribute_global, aes(x = tipocliente, y = percent_distinct_cod_pers_trs, group=segmento_global_gr, fill = segmento_global_gr, label=label_percent_distinct_cod_pers_trs, ymax = 1.1*max(percent_distinct_cod_pers_trs))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("% clientes distintos") + ggtitle("% clientes x Segmento Global") + geom_text(aes(y = percent_distinct_cod_pers_trs, label = label_percent_distinct_cod_pers_trs), position = "stack", size = 3.5)
+graph_group_atribute_global
+```
+
++ Segmento PLAN UNO
+```{r eval=TRUE, echo=FALSE, cache=TRUE, fig.width=12, fig.height=7}
+atribute_planuno <- qhive("select segmento_plan_uno_cod_segmento_plan_uno,
+                       tipocliente,
+                       count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+                       from da_martalamela.wallet_big_big_table_all
+                       group by segmento_plan_uno_cod_segmento_plan_uno,tipocliente
+                       order by segmento_plan_uno_cod_segmento_plan_uno")
+
+# Get the levels for type in the required order
+atribute_planuno$tipocliente = factor(atribute_planuno$tipocliente)
+atribute_planuno = arrange(atribute_planuno, tipocliente)
+atribute_planuno = atribute_planuno[!is.na(atribute_planuno$segmento_plan_uno_cod_segmento_plan_uno),]
+
+# Calculate the percentages
+atribute_planuno = ddply(atribute_planuno, .(tipocliente), transform, percent_distinct_cod_pers_trs = count_distinct_cod_pers_trs/sum(count_distinct_cod_pers_trs) * 100)
+atribute_planuno$label_percent_distinct_cod_pers_trs = paste0(sprintf("%.0f", atribute_planuno$percent_distinct_cod_pers_trs), "%")
+
+# Order
+atribute_planuno = atribute_planuno[order(atribute_planuno$percent_distinct_cod_pers_trs),]
+atribute_planuno$tipocliente = factor(atribute_planuno$tipocliente,levels(atribute_planuno$tipocliente)[c(2,1)])
+
+graph_group_atribute_planuno <- ggplot(atribute_planuno, aes(x = tipocliente, y = percent_distinct_cod_pers_trs, group=segmento_plan_uno_cod_segmento_plan_uno, fill = segmento_plan_uno_cod_segmento_plan_uno, label=label_percent_distinct_cod_pers_trs, ymax = 1.1*max(percent_distinct_cod_pers_trs))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("% clientes distintos") + ggtitle("% clientes x Plan Uno") + geom_text(aes(y = percent_distinct_cod_pers_trs, label = label_percent_distinct_cod_pers_trs), position = "stack", size = 3.5)
+graph_group_atribute_planuno
+```
+
++ Rentabilidad (Margen) - Noviembre 2014
+```{r eval=TRUE, echo=FALSE, cache=TRUE, fig.width=12, fig.height=7}
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_rentabilidad as
+      select
+      big.cod_pers_trs,
+      big.tipocliente,
+      rent.sum_imp_rca
+      from
+      (
+        select cod_pers_trs, tipocliente
+        from da_martalamela.wallet_big_big_table_all
+      ) big
+      left join
+      (
+        select cod_persctpn,
+        partition_id,
+        sum(CASE WHEN CAST(imp_rca AS DOUBLE) IS NULL THEN 0.0 ELSE CAST(imp_rca AS DOUBLE) END) AS sum_imp_rca
+        from da_pro.rentabilidad_clientes
+        where cast(partition_id as int) = 20141130
+        group by cod_persctpn,partition_id
+      ) rent
+      on cast(trim(big.cod_pers_trs) as int)=cast(trim(rent.cod_persctpn) as int)")
+
+atribute_rentabilidad <- qhive("select tipocliente,
+                              sum(sum_imp_rca) as sum_imp_rca,
+                              count(distinct cod_pers_trs) as count_distinct_cod_pers_trs,
+                              count(case when sum_imp_rca>0 then cod_pers_trs end) as count_cod_pers_trs_imp_rca_positive,
+                              sum(sum_imp_rca)/count(distinct cod_pers_trs) as avg_imp_rca,
+                              round(sum(sum_imp_rca)/count(case when sum_imp_rca>0 then cod_pers_trs end)) as avg_imp_rca_positive
+                              from da_martalamela.wallet_rentabilidad
+                              group by tipocliente")
+
+# Order
+atribute_rentabilidad$tipocliente = factor(atribute_rentabilidad$tipocliente)
+atribute_rentabilidad$tipocliente = factor(atribute_rentabilidad$tipocliente,levels(atribute_rentabilidad$tipocliente)[c(2,1)])
+
+graph_group_atribute_rentabilidad <- ggplot(atribute_rentabilidad, aes(x = tipocliente, y = avg_imp_rca_positive, label=avg_imp_rca_positive, ymax = 1.1*max(avg_imp_rca_positive))) + geom_bar(stat = "identity", width = .7, colour="#3366FF", fill="#3366FF") + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("rentabilidad (€) x cliente") + ggtitle("Rentabilidad media") + geom_text(aes(y = avg_imp_rca_positive, label = avg_imp_rca_positive), position = "stack", size = 3.5, vjust=-1)
+graph_group_atribute_rentabilidad
+
+atribute_rentabilidad_segmento <- qhive("select rentabilidad.tipocliente as tipocliente,
+                              segmento_plan_uno_cod_segmento_plan_uno,
+                              sum(sum_imp_rca) as sum_imp_rca,
+                              count(distinct rentabilidad.cod_pers_trs) as count_distinct_cod_pers_trs,
+                              count(case when sum_imp_rca>0 then rentabilidad.cod_pers_trs end) as count_cod_pers_trs_imp_rca_positive,
+                              sum(sum_imp_rca)/count(distinct rentabilidad.cod_pers_trs) as avg_imp_rca,
+                              round(sum(sum_imp_rca)/count(case when sum_imp_rca>0 then rentabilidad.cod_pers_trs end)) as avg_imp_rca_positive
+                              from da_martalamela.wallet_rentabilidad rentabilidad
+                              left join da_martalamela.wallet_big_big_table_all big
+                              on cast(rentabilidad.cod_pers_trs as int) = cast(big.cod_pers_trs as int)
+                              group by rentabilidad.tipocliente,segmento_plan_uno_cod_segmento_plan_uno
+                              order by tipocliente,segmento_plan_uno_cod_segmento_plan_uno")
+
+atribute_rentabilidad_segmento$segmento <- paste0(atribute_rentabilidad_segmento$tipocliente,'-',atribute_rentabilidad_segmento$segmento_plan_uno_cod_segmento_plan_uno)
+
+# Order
+atribute_rentabilidad_segmento$tipocliente = factor(atribute_rentabilidad_segmento$tipocliente)
+atribute_rentabilidad_segmento$tipocliente = factor(atribute_rentabilidad_segmento$tipocliente,levels(atribute_rentabilidad_segmento$tipocliente)[c(2,1)])
+
+graph_group_atribute_rentabilidad <- ggplot(atribute_rentabilidad_segmento, aes(x = segmento, y = avg_imp_rca_positive, label=avg_imp_rca_positive, ymax = 1.1*max(avg_imp_rca_positive), fill=segmento)) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("rentabilidad (€) x cliente") + ggtitle("Rentabilidad media") + geom_text(aes(y = avg_imp_rca_positive, label = avg_imp_rca_positive), position = "stack", size = 3.5, vjust=-1)
+graph_group_atribute_rentabilidad
+
+
+#qhive("select *
+#from da_martalamela.wallet_rentabilidad_cod_prtda
+#where cod_persctpn like '%21257296%'
+#or cod_persctpn like '%21257366%'
+#or cod_persctpn like '%21257481%'
+#or cod_persctpn like '%21259066%'
+#or cod_persctpn like '%21262486%'
+#or cod_persctpn like '%21262866%'
+#or cod_persctpn like '%21263536%'
+#or cod_persctpn like '%21265871%'
+#or cod_persctpn like '%21267391%'
+#or cod_persctpn like '%21268241%'")
+
+#qhive("select tipocliente,
+#sum(sum_imp_anual) as sum_imp_anual,
+#count(distinct cod_pers_trs) as count_distinct_cod_pers_trs,
+#count(case when sum_imp_anual>0 then cod_pers_trs end) as count_cod_pers_trs_imp_anual_positive,
+#sum(sum_imp_anual)/count(distinct cod_pers_trs) as avg_imp_anual,
+#round(sum(sum_imp_anual)/count(case when sum_imp_anual>0 then cod_pers_trs end)) as avg_imp_anual_positive
+#from da_martalamela.wallet_margen_neto_anual
+#where cast(partition_id as int) = 20141130
+#group by tipocliente")
+
+#qhive("select partition_id,
+#sum(sum_imp_anual) as sum_imp_anual,
+#count(distinct cod_pers_trs) as count_distinct_cod_pers_trs,
+#count(case when sum_imp_anual>0 then cod_pers_trs end) as count_cod_pers_trs_imp_anual_positive,
+#sum(sum_imp_anual)/count(distinct cod_pers_trs) as avg_imp_anual,
+#round(sum(sum_imp_anual)/count(case when sum_imp_anual>0 then cod_pers_trs end)) as avg_imp_anual_positive
+#from da_martalamela.wallet_margen_neto_anual
+#group by partition_id
+#order by partition_id")
+
+#qhive("select rentabilidad.tipocliente as tipocliente,
+#segmento_plan_uno_cod_segmento_plan_uno,
+#sum(sum_imp_anual) as sum_imp_anual,
+#count(distinct rentabilidad.cod_pers_trs) as count_distinct_cod_pers_trs,
+#count(case when sum_imp_anual>0 then rentabilidad.cod_pers_trs end) as count_cod_pers_trs_imp_anual_positive,
+#sum(sum_imp_anual)/count(distinct rentabilidad.cod_pers_trs) as avg_imp_anual,
+#round(sum(sum_imp_anual)/count(case when sum_imp_anual>0 then rentabilidad.cod_pers_trs end)) as avg_imp_anual_positive
+#from da_martalamela.wallet_margen_neto_anual rentabilidad
+#left join da_martalamela.wallet_big_big_table_all big
+#on cast(rentabilidad.cod_pers_trs as int) = cast(big.cod_pers_trs as int)
+#where cast(rentabilidad.partition_id as int) = 20141130
+#group by rentabilidad.tipocliente,segmento_plan_uno_cod_segmento_plan_uno
+#order by tipocliente,segmento_plan_uno_cod_segmento_plan_uno")
+```
+
+**TENENCIA DE PRODUCTOS Y SALDOS**
+
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_detalle_productos_saldos_cliente as
+      select wallet.cod_pers_trs,
+      wallet.tipocliente,
+      productos.*
+      from da_martalamela.wallet_big_big_table_all wallet
+      left join clarity_intermediate.detalle_productos_saldos_cliente productos
+      on cast(wallet.cod_pers_trs as int)=cast(productos.cod_persona as int)")
+```
+
++ Tarjetas de crédito
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_tarjeta_credito as
+        select
+        cod_pers_trs,
+        tipocliente,
+        contratos.cod_idcontra as cod_idcontra,
+        fec_ininter,
+        cod_situdw,
+        partition_id,
+        sum_imp_mvimient
+        from
+        (
+          select cod_pers_trs,
+          tipocliente,
+          cod_idcontra,
+          fec_ininter,
+          cod_situdw
+          from da_martalamela.wallet_detalle_productos_saldos_cliente
+          where cod_pro_plat like '%TJ%'
+          or des_ctgcom like '%TARJETA CREDITO%'
+          or cod_pro_plat like '%TD%'
+        ) contratos
+        left join
+        (
+          select cod_idcontra,
+          partition_id,
+          sum(CASE WHEN CAST(imp_mvimient AS DOUBLE) IS NULL THEN 0.0 ELSE CAST(imp_mvimient AS DOUBLE) END) AS sum_imp_mvimient
+          from da_pro.movimientos_tarjetas_corp
+          group by cod_idcontra,partition_id
+        ) movimientos
+        on cast(trim(contratos.cod_idcontra) as int) = cast(trim(movimientos.cod_idcontra) as int)
+        order by cod_pers_trs, cod_idcontra, partition_id")
+
+atribute_tarjetas <- qhive("select tipocliente,
+partition_id,
+count(distinct cod_pers_trs) as count_distinct_cod_pers_trs,
+count(distinct cod_idcontra) as count_distinct_cod_idcontra,
+sum(sum_imp_mvimient) as sum_imp_mvimient,
+round(sum(sum_imp_mvimient)/count(case when sum_imp_mvimient>0 then cod_pers_trs end),1) as avg_sum_imp_mvimient_positive
+from da_martalamela.wallet_tarjeta_credito
+where partition_id is not null
+group by tipocliente, partition_id
+order by tipocliente, partition_id")
+
+# Order
+atribute_tarjetas$tipocliente = factor(atribute_tarjetas$tipocliente)
+atribute_tarjetas$tipocliente = factor(atribute_tarjetas$tipocliente,levels(atribute_tarjetas$tipocliente)[c(2,1)])
+
+graph_group_atribute_tarjetas <- ggplot(atribute_tarjetas, aes(x = partition_id, colour=tipocliente, y = avg_sum_imp_mvimient_positive, label=avg_sum_imp_mvimient_positive, ymax = 1.1*max(avg_sum_imp_mvimient_positive))) + geom_line(aes(group=tipocliente)) + geom_point() + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10, hjust=1)) + ylab("importe (€) x cliente") + ggtitle("Gasto medio") + geom_text(aes(label = avg_sum_imp_mvimient_positive), size = 3.5, vjust=-1)
+graph_group_atribute_tarjetas
+
+
+qhive("select tipocliente,
+mvt.partition_id,
+count(distinct cod_pers_trs) as count_distinct_cod_pers_trs,
+count(distinct mvt.cod_idcontra) as count_distinct_cod_idcontra,
+sum(imp_mvimient) as sum_imp_mvimient,
+sum(imp_mvimient)/count(distinct cod_pers_trs) as avg_imp_anual,
+sum(imp_mvimient)/count(distinct mvt.cod_idcontra) as avg_imp_anual_contrato,
+round(sum(imp_mvimient)/count(case when imp_mvimient>0 then cod_pers_trs end),1) as avg_sum_imp_mvimient_positive,
+round(sum(imp_mvimient)/count(case when imp_mvimient>0 then mvt.cod_idcontra end),1) as avg_sum_imp_mvimient_contrato
+from da_martalamela.wallet_movimientos_tarjetas_detalle_corp mvt
+left join da_martalamela.wallet_detalle_productos_saldos_cliente det
+on trim(mvt.cod_idcontra)=trim(det.cod_idcontra)
+group by tipocliente, mvt.partition_id
+order by tipocliente, mvt.partition_id")
+```
+

@@ -1,0 +1,1007 @@
+---
+title: "Wallet encuestas - cesión bote <br/>"
+output: html_document
+---
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- "[Wallet]: Investigación de mercado"
+
+keywords  <- 'wallet, investigacion, encuestas'  
+```
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(grid))
+suppressMessages(library(hexbin))
+suppressMessages(library(lattice))
+suppressMessages(library(reshape))
+suppressMessages(library(plyr))
+suppressMessages(library(stringr))
+suppressMessages(library(digest))
+suppressMessages(library(lattice))
+
+
+options(warn=-1, scipen=3, width=150)
+source('~/bda_clarity/tools/methods_connect.R') ;
+source('~/bda_clarity/tools/warehouse_basics.R') ;
+source('~/bda_clarity/tools/write.hive.R') ;
+```
+
+**Para el analisis se recoge información desde Noviembre 2013 hasta Marzo 2015. Para el análisis cuantitativo se excluirán empleados, clientes no particulares, menores de 18 años y mayores de 80 años. Además para las encuestas se excluirán clientes sin algún número de teléfono informado y clientes que no autorizan usar sus datos para campañas y no hayan firmado la LOPD. También deberían excluirse los que se oponenen a la nueva claúsula de la LOPD pero actualmente no se han podido identificar:**
+
+<br/>
+
+# A. Construcción colectivo y filtros
+
+1. Se crea la tabla de clientes wallet apuntando como activos aquellos que se conectaron al menos una vez en el 1Q2015. Como inactivos cuentan los demás clientes que han descargado la app pero no se conectaron en el 1Q2015.
+
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_mariadrav.wallet_clientes as
+select actividad.cod_pers_trs,
+partition_id_alta,
+partition_id,
+categoria_usuario
+from da_martalamela.wallet_active_users_three_months actividad 
+left join da_martalamela.wallet_user_partition_first_connection alta
+  on cast(actividad.cod_pers_trs as int) = cast(alta.cod_pers_trs as int)
+left join (select distinct cod_pers_trs, 
+                  case when ind_conexion_wallet_ult_3m=1 then 'Wallet Activo' else 'Wallet Inactivo' end as categoria_usuario 
+                  from da_martalamela.wallet_active_users_three_months 
+                  where cast(partition_id as int)=20150331) actividad_3m
+  on actividad.cod_pers_trs=actividad_3m.cod_pers_trs")
+```
+
+2. Se crea la tabla de clientes activos BBVANet: Clientes que accedieron a BBVANET al menos una vez en el 1Q2015. Se considera que un cliente accedió a BBVANET si en el mes pertenece en algúno de los segmentos comportamentales de 1 a 6:
+<br/> *Segmentación comportamental:*
+<br/> *1  Net contrata*
+<br/> *2  Net opera elevado*
+<br/> *3  Net opera básico*
+<br/> *4  Net consulta ATM elevado*
+<br/> *5  Net consulta ATM básico*
+<br/> *6	Net consulta*
+<br/> *7	ATM avanzado*
+<br/> *8	ATM básico*
+<br/> *9	Oficina ATM reducido*
+<br/> *10	Oficina*
+<br/> *11	Poco uso de canales*
+<br/> *12	Sin uso*
+<br/> Finalmente se extrae una muestra aleatoria de los clientes BBVANet de tamaño parecido que los wallet activos / inactivos y se junta con la tabla de clientes wallet unicos
+
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_mariadrav.wallet_bbvanet as
+          select cod_pers_trs,
+          rand() as random_number
+          from
+          (
+            select distinct lpad(trim(cast(cod_cliente as string)), 9, '0') as cod_pers_trs
+            from
+            (
+              select distinct cod_cliente, segmento_comportamental
+              from da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20150331 
+              union all 
+              select distinct cod_cliente, segmento_comportamental
+              from da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20150228 
+              union all 
+              select distinct cod_cliente, segmento_comportamental
+              from da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20150131
+            ) digi
+           left join (select distinct cod_pers_trs, categoria_usuario
+                       from da_mariadrav.wallet_clientes) uni
+            on lpad(trim(cast(digi.cod_cliente as string)), 9, '0')=uni.cod_pers_trs
+            where categoria_usuario is null and 
+                  segmento_comportamental >= 1 and 
+                  segmento_comportamental <= 6
+          ) usuarionet
+      ")
+
+do.hive("create table IF NOT EXISTS da_mariadrav.wallet_bbvanet_sample as
+        select b.cod_pers_trs, '' as partition_id_alta, a.partition_id, b.categoria_usuario
+        from 
+          (select distinct partition_id from da_mariadrav.wallet_clientes) a
+          join 
+          (select cod_pers_trs,
+          'BBVANet' as categoria_usuario
+          from da_mariadrav.wallet_bbvanet
+          where random_number <= 134000/3502854
+          ) b ")
+
+do.hive("create table IF NOT EXISTS da_mariadrav.wallet_net_clientes as
+        select *
+        from  da_mariadrav.wallet_clientes
+        union all
+        select * from da_mariadrav.wallet_bbvanet_sample
+        ")
+
+
+```
+
+3. Se pasa la tabla en SINFO para pegar información sociodemografica y de móvil informado. Finalmente se crea una tabla con clientes wallet activos, inactivos y BBVANet.
+
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_mariadrav.wallet_net_clientes_uni as
+        select distinct cod_pers_trs, partition_id_alta, categoria_usuario
+        from da_mariadrav.wallet_net_clientes ")
+
+# proc sql;
+# create table wallet_sociodemo as 
+# select 	DISTINCT
+#  		a.da_mariadrav_wallet_net_clientes as cod_pers_trs,
+#     a.var2 as partiton_id_alta,
+#  	  a.var3 as categoria_usuario,
+# 		b.tfno_gest, b.tfno_par, b.tfno_mov,
+# 		b.cod_mailges, b.des_email,
+# 		b.inf_telefono,
+# 		b.inf_email,
+# 		b.xsn_enviopub,
+# 		b.xsn_enviotmk,
+# 		b.xti_idefisco,
+# 		b.xti_sexo,
+# 		b.cod_edad,
+# 		b.xsn_empleado,
+# 		case when c.COD_MARCA in ('0229', '0305', '0310') then 1 else 0 end as filtro_lopd,
+# 		d.DES_NOMCLIE,
+# 		d.DES_NOMPILA ,
+# 		d.DES_PRIAPELL ,
+# 		d.DES_SEGAPELL ,
+# 		min(d.FEC_ALBBVA , d.FEC_ALTA) as fec_alta format YYMMDD10.,
+#   	intck('month', 
+# 			  mdy(round((var2 - round(var2,10000))/100), var2-round(var2, 100), round(var2/10000)), 
+# 			  mdy(03,31,2015)) as antiguedad_wallet_months,
+# 		intck('month', calculated fec_alta, mdy(03,31,2015)) as antiguedad_months
+# from wallet_clientes_uni_net a left join emailmovil_hoy b
+# on a.da_mariadrav_wallet_net_clientes = b.cod_persona
+# left join lopd.marcas_lopd c
+# on a.da_mariadrav_wallet_net_clientes = input(trim(c.COD_PERSCTPN), 8.)
+# left join sfmav.VSFMANFC d
+# on a.da_mariadrav_wallet_net_clientes = d.cod_persona;
+# quit;
+
+```
+
+<br/> **Esta es la distribución de los clientes según actividad Wallet:**
+<br/> Wallet Activo:**`r qhive("select count(distinct cod_pers_trs) as dist_pers from da_mariadrav.wallet_sociodemo where categoria_usuario='Wallet Activo'")`**
+<br/> Wallet Inactivo:**`r qhive("select count(distinct cod_pers_trs) as dist_pers from da_mariadrav.wallet_sociodemo where categoria_usuario='Wallet Inactivo'")`**
+<br/> BBVANet:**`r qhive("select count(distinct cod_pers_trs) as dist_pers from da_mariadrav.wallet_sociodemo where categoria_usuario='BBVANet'")`**
+
+**CRUCE: clarity_attributes.Big_Big_table: Ciudad, Segmento según Plan Uno.**
+
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+# Pegar campos de big_big_table
+do.hive("create table IF NOT EXISTS da_mariadrav.wallet_sociodemo_ampl as 
+        select a.*,
+        b.cod_postal_ciudad_cod_postal as cod_postal, 
+        b.cod_postal_ciudad_des_ciudadg as des_ciudadg,
+        b.provincia,
+        b.territorial,
+        b.segmento_plan_uno_cod_segmento_plan_uno as segm_plan_uno
+        from  
+          da_mariadrav.wallet_sociodemo a 
+        left join 
+          (select distinct big.cod_persona, big.cod_postal_ciudad_cod_postal, 
+           big.cod_postal_ciudad_des_ciudadg, big.segmento_plan_uno_cod_segmento_plan_uno,
+           prov.provincia, prov.territorial       
+           from clarity_attributes.big_big_table big left join da_mariadrav.provincias prov
+           on substr(lpad(trim(cast(big.cod_postal_ciudad_cod_postal as string)), 5, '0'), 1, 2)=lpad(trim(cast(prov.cod_postal_prov as string)), 2, '0')
+          ) b
+        on cast(a.cod_pers_trs as int) = cast(b.cod_persona as int)")
+
+```
+
+<br/> 
+**Se hace el análisis de los filtros a aplicar y el número de clientes afectados:**
+<br/> Se excluyen: <br/>
+
+* Filtro sd: Filtros sociodemográficos:
+    + Empleados 
+        *(escribir: xsn_empleado = '')*
+    + Menores de edad y mayores de 80 años 
+        *(escribir: cod_edad>=18 and cod_edad<=80)*
+    + Clientes no particulares 
+        *(escirbir: xti_idefisco in ('1', '6', '7') and xti_sexo in ('M', 'V'))* <br/>
+
+* Filtro tel:
+    + Clientes sin ningún teléfono informado 
+        *(escribir: concat(tfno_gest,tfno_par,tfno_mov) != '')* <br/>
+
+* Filtro Robinson y TMK
+    + Clientes que se han negado a ser contactados para ofertas comerciales o llamadas telefónicas
+        *(escribir: xsn_enviopub != 'N' and xsn_enviotmk != 'N')* <br/>
+
+* Filtro LOPD
+    + Clientes que no han firmado la cláusula de LOPD.
+        *(escribir: filtro_lopd = 1)* <br/>
+
+
+
+<br/> Se comprueba que hay al menos 700 usuarios inactivos con antigüedad <= 6m para el estudio cuali. 
+De hecho hay **`r qhive("select count(distinct cod_pers_trs) from da_mariadrav.wallet_sociodemo_ampl where antiguedad_wallet_months <= 6 and categoria_usuario ='Wallet Inactivo' and xti_idefisco in ('1', '6', '7')  and xti_sexo in ('M', 'V') and cod_edad>=18 and cod_edad<=80  and xsn_empleado = ''  and concat(tfno_gest,tfno_par,tfno_mov) != ''  and xsn_enviopub != 'N' and xsn_enviotmk != 'N'  and filtro_lopd = 1")`** clientes <br/> 
+
+<br/> **Finalmente se aplican los filtros sociodemográficos.**
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+#Selección de muestra para el estudio cuanti
+do.hive("create table IF NOT EXISTS da_mariadrav.wallet_clientes_bolsa_cuanti as 
+        select  *
+        from da_mariadrav.wallet_sociodemo_ampl
+        where xti_idefisco in ('1', '6', '7')
+          and xti_sexo in ('M', 'V')
+          and cod_edad>=18 and cod_edad<=80
+          and xsn_empleado = ''
+        ")
+
+```
+
+
+
+La distribución de los clientes una vez aplicados los filtros sociodemográficos es la siguiente:
+<br/> Wallet Activo:**`r qhive("select count(distinct cod_pers_trs) as dist_pers from da_mariadrav.wallet_clientes_bolsa_cuanti where categoria_usuario='Wallet Activo'")`**
+<br/> Wallet Inactivo:**`r qhive("select count(distinct cod_pers_trs) as dist_pers from da_mariadrav.wallet_clientes_bolsa_cuanti where categoria_usuario='Wallet Inactivo'")`**
+<br/> BBVANet:**`r qhive("select count(distinct cod_pers_trs) as dist_pers from da_mariadrav.wallet_clientes_bolsa_cuanti where categoria_usuario='BBVANet'")`**
+
+
+
+**Añadir información del segmento comportamental.** 
+
+<br/>
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+
+do.hive("create table IF NOT EXISTS da_mariadrav.wallet_bolsa_segmcomp as 
+        select a.cod_pers_trs, 
+        b.segmento_comportamental,
+        b.mix_actividad,
+        b.frecuencia
+        from da_mariadrav.wallet_clientes_bolsa_cuanti a left join clarity_elements.metricas_segm_comport b
+        on cast(trim(a.cod_pers_trs) as int) = b.cod_persona")
+```
+
+**Crear la tabla bolsa_cuanti con partition_id**
+
+<br/>
+
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_mariadrav.wallet_clientes_bolsa_cuanti_partition as
+        select a.*, b.partition_id
+        from da_mariadrav.wallet_clientes_bolsa_cuanti a left join da_mariadrav.wallet_net_clientes b
+        on cast(trim(a.cod_pers_trs)as int)=cast(trim(b.cod_pers_trs)as int)")
+```
+
+**Añadir información de tenencia de la tarjeta Wallet o Sticker**
+
+<br/>
+
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+
+do.hive("create table IF NOT EXISTS da_mariadrav.wallet_bolsa_tar_stick_num as   
+  select bolsa.cod_pers_trs, bolsa.partition_id,
+  num_tar_wallet, num_sticker, num_habitual, debito_credito
+  from wallet_clientes_bolsa_cuanti_partition bolsa
+  left join 
+  (
+    select cod_persctpn, partition_id, 
+    count(distinct prod.cod_idcontra) as num_tar_wallet
+    from da_pro.intervinientes_corp inter, da_pro.productos_contratados prod
+    where inter.cod_idcontra=prod.cod_idcontra  
+            and inter.partition_id=prod.partition_id  
+            and inter.partition_id >= '20131130' and inter.partition_id <= '20150331'
+            and cast(trim(prod.cod_comprod) as int) = 8425
+            group by cod_persctpn, inter.partition_id
+    ) inter1
+    on cast(trim(bolsa.cod_pers_trs) as int) = cast(trim(inter1.cod_persctpn) as int)
+       and bolsa.partition_id=inter1.partition_id
+    left join 
+    (
+    select cod_persctpn, partition_id, 
+    count(distinct prod.cod_idcontra) as num_sticker
+    from da_pro.intervinientes_corp inter, da_pro.productos_contratados prod
+    where inter.cod_idcontra=prod.cod_idcontra  
+            and inter.partition_id=prod.partition_id  
+            and inter.partition_id >= '20131130' and inter.partition_id <= '20150331'
+            and cast(trim(prod.cod_comprod) as int) = 3199
+            group by cod_persctpn, inter.partition_id
+    ) inter2
+    on cast(trim(bolsa.cod_pers_trs) as int) = cast(trim(inter2.cod_persctpn) as int)
+       and bolsa.partition_id=inter2.partition_id
+    left join 
+    (
+    select cod_persctpn, partition_id, 
+      case when cast(prod.cod_pgccontr as int)=615 then 'Credito'
+        when cast(prod.cod_pgccontr as int)=616 then 'Debito'
+        end as debito_credito,
+    count(distinct prod.cod_idcontra) as num_habitual
+    from da_pro.intervinientes_corp inter, da_pro.productos_contratados prod
+    where inter.cod_idcontra=prod.cod_idcontra  
+            and inter.partition_id=prod.partition_id  
+            and inter.partition_id >= '20131130' and inter.partition_id <= '20150331'
+            and cast(trim(prod.cod_comprod) as int) in (369,2265,6709,2366,
+                                           3037,9994,2497,2154,2306,7938,
+                                           9482,2494,2496,4169,561,9841,
+                                           5990,6048,2511,5989)
+            group by cod_persctpn, inter.partition_id, prod.cod_pgccontr
+    ) inter3
+    on cast(trim(bolsa.cod_pers_trs) as int) = cast(trim(inter3.cod_persctpn) as int)
+       and bolsa.partition_id=inter3.partition_id")
+
+
+```
+
+**Añadir información de funcionalidades**
+1. activación de tarjetas - cod_trnfims 1231
+2. bloqueo de tarjetas - cod_trnfims 0498 o TCTFT931
+4. consulta de movimientos - cod_trnfims 0190 o TCTFT976 o 0559 (prepago)
+5. aplazamiento de pagos - cod_trnfims 1620 o TCTFTL66
+6. recepción de notificaciones - cod_trnfims 1681 (baja) o 1680 (alta)
+7. acción comercial Wallet
+
+
+```{r VARIABLES_FUNCIONALIDADES, eval=FALSE, echo=FALSE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_mariadrav.wallet_funcionalidades as
+        select bolsa.*, 
+        case when cod_persona != '' then 1 else 0 end as accion_comercial
+        from (
+                select bolsa.cod_pers_trs,  bolsa.partition_id,
+                max(case when trim(trans.cod_trnfims) = '00001231' then 1 else 0 end) as activacion_tarjetas,
+                max(case when trim(trans.cod_trnfims) in ('00000498', 'TCTFT931') then 1 else 0 end) as bloqueo_tarjetas,
+                max(case when trim(trans.cod_trnfims) in ('00000190', 'TCTFT976', '00000559') then 1 else 0 end) as consulta_movim,
+                max(case when trim(trans.cod_trnfims) in ('00001620', 'TCTFTL66') then 1 else 0 end) as aplazamiento_pagos,
+                sum(case when trim(trans.cod_trnfims) = '00001620' then imp_trans else 0 end) as imp_aplazamiento_pagos,
+                sum(case when trim(trans.cod_trnfims) = '00001620' then 1 else 0 end) as num_aplazamiento_pagos,
+                max(case when trim(trans.cod_trnfims) = '00001681' then 1 else 0 end) as notificaciones_baja,
+                max(case when trim(trans.cod_trnfims) = '00001680' then 1 else 0 end) as notificaciones_alta,
+                trans.hour_soli_trn
+                from (
+                      select distinct cod_pers_trs, partition_id 
+                      from da_mariadrav.wallet_clientes_bolsa_cuanti_partition
+                     ) bolsa
+                left join 
+                    ( select distinct cod_pers_trs, cod_trnfims, partition_id, 
+                      hour(hms_soli_trn) as hour_soli_trn, imp_trans
+                      from da_pro.transacciones_por_canal 
+                      where cast(cod_serv_dv as int) in (101, 102)
+                        and partition_id >= '20131130' and partition_id <= '20150331'
+                        and (cast(cod_trnfims as int) in (1231, 498, 190, 559, 1620, 1681, 1680) 
+                              or trim(cod_trnfims) in ('TCTFT931', 'TCTFT976', 'TCTFTL66'))
+                      ) trans 
+                on cast(trim(bolsa.cod_pers_trs) as int) = cast(trim(trans.cod_pers_trs) as int)
+                and bolsa.partition_id=trans.partition_id
+                group by bolsa.cod_pers_trs, bolsa.partition_id, trans.hour_soli_trn
+            ) as bolsa
+        left join
+          (
+          select distinct cod_persona, fap_acom
+          from da_mariadrav.wallet_accop_comercial
+          where cod_canal='0101'
+          )  as opcom
+        on cast(trim(cod_pers_trs) as int) = cast(trim(cod_persona) as int)
+        and concat(substr(partition_id,1,4), substr(partition_id,5,2)) =concat(substr(fap_acom, 1, 4), substr(fap_acom, 6, 2)) ")
+
+# 3. pago móvil, diferenciando si ha sido con o sin sticker
+
+do.hive("create table IF NOT EXISTS da_mariadrav.wallet_intervinientes_corp as
+        select distinct tablon.cod_pers_trs,
+        tablon.categoria_usuario,
+        tablon.partition_id,
+        contratos.cod_idcontra
+        from da_mariadrav.wallet_clientes_bolsa_cuanti_partition tablon
+        left join
+        (
+          select distinct cod_persctpn,
+          cod_idcontra,
+          partition_id
+          from da_pro.intervinientes_corp
+          where partition_id>='20131130' and partition_id<='20150331'
+        ) contratos
+        on cast(trim(tablon.cod_pers_trs) as int)=cast(trim(contratos.cod_persctpn) as int)
+        order by cod_pers_trs,partition_id,cod_idcontra")
+
+do.hive("        
+create table IF NOT EXISTS da_mariadrav.wallet_tarjetas_cod_comprod as
+        select dtdc.cod_idcontra,
+        interv.cod_pers_trs,
+        dtdc.cod_comprod,
+        dtdc.cod_pgccontr,
+        interv.partition_id,
+        case when cast(dtdc.cod_comprod as int)=3199 then 'Sticker'
+        when cast(cod_comprod as int)=8425 then 'Tarjeta Wallet'
+        else 'Habitual' end as tipo_tarjeta,
+        case when cast(dtdc.cod_pgccontr as int)=615 then 'Credito'
+        when cast(dtdc.cod_pgccontr as int)=616 then 'Debito'
+        end as debito_credito
+        from 
+        (
+          select distinct cod_idcontra, cod_comprod, cod_pgccontr, partition_id
+          from da_pro.datos_tarjetas_detalle_corp 
+          where cod_paisoalf like 'ES'
+            and cod_entalfa like '0182'
+            and cast(cod_comprod as int) in (3199,8425,2369,2265,6709,2366,
+                                           3037,9994,2497,2154,2306,7938,
+                                           9482,2494,2496,4169,561,9841,
+                                           5990,6048,2511,5989)
+            and partition_id>='20131130' and partition_id<='20150331'
+         ) dtdc
+        left join
+        (
+         select distinct cod_idcontra,
+         cod_pers_trs,
+           partition_id
+         from da_mariadrav.wallet_intervinientes_corp
+        ) interv
+        on cast(trim(dtdc.cod_idcontra) as int)=cast(trim(interv.cod_idcontra) as int) and 
+        dtdc.partition_id=interv.partition_id
+        where interv.cod_idcontra is not null
+        order by cod_idcontra, partition_id   ")
+
+do.hive("create table IF NOT EXISTS da_mariadrav.wallet_tarjetas_cod_comprod_resumen as
+        select
+        tablon.cod_pers_trs,
+        tablon.categoria_usuario,
+        tablon.partition_id,
+        tarjetas.tipo_tarjeta,
+        tarjetas.debito_credito,
+        tarjetas.num_tarjetas
+        from da_mariadrav.wallet_clientes_bolsa_cuanti_partition tablon
+        left join
+        (
+          select cod_pers_trs,
+          partition_id,
+          tipo_tarjeta,
+          debito_credito,
+          count(distinct cod_idcontra) as num_tarjetas
+          from da_mariadrav.wallet_tarjetas_cod_comprod
+          group by cod_pers_trs, partition_id, tipo_tarjeta, debito_credito
+        ) tarjetas
+        on cast(trim(tablon.cod_pers_trs) as int)=cast(trim(tarjetas.cod_pers_trs) as int) 
+        and tablon.partition_id=tarjetas.partition_id
+        order by cod_pers_trs, categoria_usuario, partition_id, tipo_tarjeta")
+
+do.hive("create table IF NOT EXISTS da_mariadrav.wallet_mtdc_cod_comprod as
+        select tarjetas.partition_id,
+        tarjetas.cod_comprod,
+        tarjetas.cod_pgccontr,
+        tarjetas.tipo_tarjeta,
+        tarjetas.debito_credito,
+        tarjetas.cod_pers_trs,
+        sum(movim.num_movimientos) as num_movimientos, 
+        sum(movim.imp_movimientos) as imp_movimientos
+        from
+        (
+        select distinct partition_id, cod_idcontra, cod_comprod, cod_pgccontr, tipo_tarjeta, debito_credito, cod_pers_trs
+        from da_mariadrav.wallet_tarjetas_cod_comprod
+        ) tarjetas
+        join 
+        (select cod_idcontra, partition_id,
+         count(*) as num_movimientos,
+         sum(imp_mvimient) as imp_movimientos
+          from da_pro.movimientos_tarjetas_detalle_corp 
+         where cod_tip_regi like '%D%'
+          and cod_tip_movi like '%0005%'
+          and partition_id>='20131130' and partition_id<='20150331'
+          group by cod_idcontra, partition_id
+         ) movim
+                on cast(trim(movim.cod_idcontra) as int) = cast(trim(tarjetas.cod_idcontra) as int)
+                and movim.partition_id=tarjetas.partition_id
+        where cod_comprod is not null
+        group by tarjetas.cod_pers_trs, tarjetas.partition_id, tarjetas.cod_comprod, tarjetas.cod_pgccontr, 
+        tarjetas.tipo_tarjeta, tarjetas.debito_credito ")
+
+do.hive("create table IF NOT EXISTS da_mariadrav.wallet_pago_tarjetas as
+        select
+        tablon.*,
+        movimientos.num_movimientos,
+        movimientos.imp_movimientos
+        from da_mariadrav.wallet_tarjetas_cod_comprod_resumen tablon
+        left join
+        (
+          select cod_pers_trs,
+          partition_id,
+          tipo_tarjeta,
+          debito_credito,
+          sum(num_movimientos) as num_movimientos,
+          sum(imp_movimientos) as imp_movimientos
+          from da_mariadrav.wallet_mtdc_cod_comprod
+          group by cod_pers_trs, partition_id, tipo_tarjeta, debito_credito
+        ) movimientos
+        on cast(trim(tablon.cod_pers_trs) as int)=cast(trim(movimientos.cod_pers_trs) as int)
+        and tablon.partition_id= movimientos.partition_id
+        and tablon.tipo_tarjeta= movimientos.tipo_tarjeta
+        and tablon.debito_credito=movimientos.debito_credito
+        order by cod_pers_trs, categoria_usuario, partition_id, tipo_tarjeta")
+
+# do.hive("drop table da_mariadrav.wallet_intervinientes_corp")
+# do.hive("drop table da_mariadrav.wallet_tarjetas_cod_comprod")
+# do.hive("drop table wallet_tarjetas_cod_comprod_resumen")
+# do.hive("drop table wallet_mtdc_cod_comprod")
+
+
+```   
+
+**Añadir información de tenencia otros productos financieros en BBVA**
+
+<br/>
+
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_mariadrav.relacion_cliente_prod_tiempo as
+    select * from
+    (
+      SELECT 
+  cod_persctpn as cod_persona, 
+  cod_pgccontr, 
+	max(trim( if( productos_contratados.cod_comprod is null , productos_contratados_detalle.cod_comprod, productos_contratados.cod_comprod))) cod_comprod,
+	max(trim( if( productos_contratados.cod_pro_plat is null , productos_contratados_detalle.cod_pro_plat, productos_contratados.cod_pro_plat))) cod_pro_plat,
+    cod_idcontra,
+     partition_id
+	FROM da_pro.intervinientes_corp inter
+	LEFT OUTER JOIN 
+    (
+       SELECT 
+       cod_idcontra, 
+       max(cod_comprod) cod_comprod, 
+       max(cod_pro_plat) cod_pro_plat
+       FROM da_pro.productos_contratados
+       where partition_id>='20131130' and partition_id<='20150331'
+       GROUP BY cod_idcontra, partition_id
+     ) productos_contratados
+	ON (trim(inter.cod_idcontra) = trim(productos_contratados.cod_idcontra ))
+  	LEFT OUTER JOIN 
+	( 
+      SELECT 
+      cod_idcontra, 
+      max(cod_comprod) cod_comprod, 
+      max(cod_pro_plat) cod_pro_plat
+      FROM da_pro.productos_contratados_detalle
+      where partition_id>='20131130' and partition_id<='20150331'
+      GROUP BY cod_idcontra, partition_id
+     ) productos_contratados_detalle
+	ON (trim(inter.cod_idcontra) = trim(productos_contratados_detalle.cod_idcontra ))
+      WHERE inter.cod_idcontra is not null and inter.cod_persctpn is not null
+      and partition_id>='20131130' and partition_id<='20150331'
+      and CAST(cod_entalfa AS INT) = 182 
+  	AND trim(cod_ctippe) = 'TIT' 
+    AND cast(cod_ordentit as int) = 1
+  	AND cod_paisoalf LIKE 'ES' 
+  	AND inter.cod_idcontra is not null
+	GROUP BY inter.cod_idcontra, cod_pgccontr, cod_persctpn, partition_id
+      ) inter
+	LEFT OUTER JOIN
+   	(
+	  SELECT 
+	  cod_ccontr, 
+	  max(des_ctgcom) as des_ctgcom 
+	  FROM catalogos_estaticos.jerarquia_abp_productos
+	  GROUP BY cod_ccontr 
+	) jerarquia_ABP_1
+	ON ( CAST(inter.cod_pgccontr as INT) = CAST(jerarquia_ABP_1.cod_ccontr AS INT) )
+	LEFT OUTER JOIN 
+    ( 
+	  SELECT 
+      cod_cclaco, 
+	  max(des_agrcom) as des_agrcom 
+	  FROM catalogos_estaticos.jerarquia_abp_productos
+      where trim(cod_cclaco)!=''
+	  GROUP BY cod_cclaco
+	) jerarquia_ABP_2
+	ON ( CAST(inter.cod_comprod as INT) = CAST(jerarquia_ABP_2.cod_cclaco AS INT) AND 
+         CAST(inter.cod_pgccontr as INT) = CAST(jerarquia_ABP_1.cod_ccontr AS INT) )
+
+        ")
+
+do.hive("create table IF NOT EXISTS da_mariadrav.wallet_bolsa_prod as
+        select distinct bolsa.cod_pers_trs, bolsa.partition_id, 
+          clipro.cod_comprod,
+          clipro.des_ctgcom
+        from da_mariadrav.wallet_clientes_bolsa_cuanti_partition as bolsa 
+        left join 
+        (select distinct partition_id, cod_comprod, des_ctgcom, cod_persona
+        from da_mariadrav.relacion_cliente_prod_tiempo) clipro
+        on cast(trim(bolsa.cod_pers_trs) as int) = cast(clipro.cod_persona as int) ")
+
+
+#Añadir información de contrapartida. 
+do.hive("create table IF NOT EXISTS da_mariadrav.productos as 
+        select distinct cod_pers_trs, 
+        contratos.partition_id, 
+        productos.contrapartida, 
+        productos.cod_comprod
+        from (
+              select distinct tablon.cod_pers_trs,
+              tablon.partition_id,
+              contratos.cod_idcontra
+              from da_mariadrav.wallet_clientes_bolsa_cuanti_partition tablon
+              left join
+              (
+                select distinct cod_persctpn,
+                cod_idcontra,
+                partition_id
+                from da_pro.intervinientes_corp
+                where partition_id>='20131130' and partition_id<='20150331'
+              ) contratos
+              on cast(trim(tablon.cod_pers_trs) as int)=cast(trim(contratos.cod_persctpn) as int)
+              and tablon.partition_id=contratos.partition_id
+            ) contratos
+        left join 
+        (
+        select distinct partition_id, 
+        substr(cod_masccntr, 9, 4) as contrapartida, 
+        cod_comprod, 
+        cod_idcontra
+        from da_pro.saldos_cuenta_persona_fisica
+        where partition_id>='20131130' and partition_id='20150331'
+          and cast(trim(cod_entalfa) as int) = 182
+          and trim(cod_situdw) = 'A'
+          and cast(substr(cod_masccntr, 9, 4) as int) is not NULL
+        ) productos
+        on contratos.cod_idcontra=productos.cod_idcontra
+        and contratos.partition_id=productos.partition_id")
+
+# Combinación de las dos fuentes
+do.hive("create table IF NOT EXISTS da_mariadrav.productos_comb as
+        select distinct b.cod_pers_trs, 
+        case  when upper(trim(a.des_contrapartida)) like '%BITO/CR%' then 'TARJETAS DEBITO/CREDITO'
+              when upper(trim(a.des_contrapartida)) like '%FONDOS DE INVERSI%' then 'FONDOS DE INVERSION' 
+              when upper(trim(a.des_contrapartida)) like '%O DE REMESAS%' then 'ENVIO DE REMESAS'
+              when upper(trim(a.des_contrapartida)) like '%GARANT%' then 'GARANTIAS'
+        else a.des_contrapartida end as des_contrapartida, 
+        b.categoria_usuario
+        from (
+              select distinct a.cod_pers_trs, b.des_contrapartida 
+              from (select distinct a.cod_pers_trs,  a.des_ctgcom
+                    from da_mariadrav.wallet_bolsa_prod a join da_mariadrav.productos b
+                    on a.cod_pers_trs=b.cod_pers_trs and a.cod_comprod = b.cod_comprod
+                    where a.des_ctgcom is not NULL) a
+              left join da_mariadrav.relacion_cgtcom_contrapartida b
+              on upper(a.des_ctgcom) = upper(b.des_ctgcom)
+  
+              union all
+        
+              select distinct a.cod_pers_trs, b.des_contrapartida 
+              from (select distinct a.cod_pers_trs, a.cod_comprod, a.des_ctgcom 
+                    from da_mariadrav.wallet_bolsa_prod a left join da_mariadrav.productos b
+                    on a.cod_pers_trs=b.cod_pers_trs and a.cod_comprod = b.cod_comprod
+                    where b.cod_pers_trs is NULL and a.des_ctgcom is not NULL) a
+              left join da_mariadrav.relacion_cgtcom_contrapartida b
+              on upper(a.des_ctgcom) = upper(b.des_ctgcom)
+
+              union all
+
+              select distinct a.cod_pers_trs, b.des_contrapartida 
+              from (select distinct a.cod_pers_trs, a.contrapartida 
+                    from da_mariadrav.productos a left join da_mariadrav.wallet_bolsa_prod b
+                    on a.cod_pers_trs=b.cod_pers_trs and a.cod_comprod = b.cod_comprod
+                    where b.cod_pers_trs is NULL and a.contrapartida is not NULL) a
+              right join da_mariadrav.relacion_cgtcom_contrapartida b
+              on cast(trim(a.contrapartida) as int) = cast(trim(b.contrapartida) as int)
+        ) a 
+        right join da_mariadrav.wallet_clientes_bolsa_cuanti b
+        on a.cod_pers_trs=b.cod_pers_trs")
+
+```
+
+** Juntar todas las tablas**
+
+<br/>
+```{r eval=FALSE, echo=FALSE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_mariadrav.wallet_tablon_analisis_investigacion as
+        select  bolsa.*,
+        
+                segmcomp.segmento_comportamental,
+                segmcomp.mix_actividad,
+                segmcomp.frecuencia,
+        
+                case when tar_stick.num_tar_wallet >0 then 1 else 0 end as ind_tar_wallet,
+                case when tar_stick.num_sticker >0 then 1 else 0 end as ind_sticker,
+                case when tar_stick.num_habitual >0 then 1 else 0 end as ind_habitual,
+                tar_stick.num_tar_wallet,
+                tar_stick.num_sticker,
+                tar_stick.num_habitual,
+                tar_stick.debito_credito as ten_debito_credito,
+        
+                funcion.hour_soli_trn, 
+                funcion.activacion_tarjetas, 
+                funcion.bloqueo_tarjetas, 
+                funcion.consulta_movim,
+                funcion.aplazamiento_pagos, 
+                funcion.imp_aplazamiento_pagos, 
+                funcion.num_aplazamiento_pagos, 
+                funcion.notificaciones_baja,
+                funcion.notificaciones_alta, 
+                funcion.accion_comercial,
+        
+                tarjetas.tipo_tarjeta,
+                tarjetas.debito_credito,
+                tarjetas.num_tarjetas,
+                tarjetas.num_movimientos,
+                tarjetas.imp_movimientos
+        
+        from da_mariadrav.wallet_clientes_bolsa_cuanti_partition              bolsa
+        
+        left join da_mariadrav.wallet_bolsa_segmcomp                          segmcomp
+        on bolsa.cod_pers_trs=segmcomp.cod_pers_trs
+        
+        left join da_mariadrav.wallet_bolsa_tar_stick_num                     tar_stick
+        on bolsa.cod_pers_trs=tar_stick.cod_pers_trs
+            and bolsa.partition_id=tar_stick.partition_id
+        
+        left join da_mariadrav.wallet_funcionalidades                        funcion
+        on bolsa.cod_pers_trs=funcion.cod_pers_trs 
+           and bolsa.partition_id=funcion.partition_id
+        
+        left join da_mariadrav.wallet_pago_tarjetas                           tarjetas
+        on bolsa.cod_pers_trs=tarjetas.cod_pers_trs
+          and bolsa.partition_id=tarjetas.partition_id")
+``` 
+
+** Finalmente: Crear la tabla de entrega agrupando los datos históricos **
+
+<br/>
+
+```{r eval=FALSE, echo=FALSE, cache=TRUE}
+
+do.hive("create table IF NOT EXISTS da_mariadrav.wallet_tablon_analisis_investigacion_entrega as
+        select  bolsa.*, 
+        case when bolsa.antiguedad_wallet_months <= 6 then 1 else 0 end as ant_wallet_menor_6_meses,
+        case when bolsa.antiguedad_wallet_months <= 12 then 1 else 0 end as ant_wallet_menor_12_meses,
+        segmcomp.segmento_comportamental, segmcomp.mix_actividad, segmcomp.frecuencia,
+        tar_stick.ind_tar_wallet, tar_stick.ind_sticker, tar_stick.ind_habitual, 
+           tar_stick.num_tar_wallet, tar_stick.num_sticker, tar_stick.num_habitual, tar_stick.ten_debito_credito,
+         funcion.hour_soli_trn, funcion.activacion_tarjetas, funcion.bloqueo_tarjetas, funcion.consulta_movim, 
+           funcion.aplazamiento_pagos, funcion.imp_aplazamiento_pagos, funcion.num_aplazamiento_pagos,
+           funcion.notificaciones_baja, funcion.notificaciones_alta, funcion.accion_comercial,
+           funcion.activacion_tarjetas_ult_trim, funcion.bloqueo_tarjetas_ult_trim, funcion.consulta_movim_ult_trim,
+           funcion.aplazamiento_pagos_ult_trim, funcion.imp_aplazamiento_pagos_ult_trim, 
+           funcion.num_aplazamiento_pagos_ult_trim, funcion.notificaciones_baja_ult_trim, funcion.notificaciones_alta_ult_trim, 
+           funcion.accion_comercial_ult_trim,
+          tarjetas.tipo_tarjeta, tarjetas.debito_credito, tarjetas.num_tarjetas, tarjetas.num_movimientos, tarjetas.imp_movimientos,
+          tarjetas_ult_trim.tipo_tarjeta_ult_trim, tarjetas_ult_trim.debito_credito_ult_trim, 
+            tarjetas_ult_trim.num_tarjetas_ult_trim, tarjetas_ult_trim.num_movimientos_ult_trim, 
+            tarjetas_ult_trim.imp_movimientos_ult_trim,
+          prod.des_contrapartida
+        
+        from da_mariadrav.wallet_clientes_bolsa_cuanti bolsa
+        
+        left join 
+        
+        da_mariadrav.wallet_bolsa_segmcomp  segmcomp
+        on bolsa.cod_pers_trs=segmcomp.cod_pers_trs
+        
+        left join 
+        
+        (select cod_pers_trs,  max(case when num_tar_wallet >0 then 1 else 0 end) as ind_tar_wallet,
+                max(case when num_sticker >0 then 1 else 0 end) as ind_sticker,
+                max(case when num_habitual >0 then 1 else 0 end) as ind_habitual,
+                avg(num_tar_wallet) as num_tar_wallet,
+                avg(num_sticker) as num_sticker,
+                avg(num_habitual) as num_habitual,
+                debito_credito as ten_debito_credito
+         from  da_mariadrav.wallet_bolsa_tar_stick_num  
+         where partition_id != '20150430'
+         group by cod_pers_trs, debito_credito) tar_stick
+        on bolsa.cod_pers_trs=tar_stick.cod_pers_trs
+        
+        left join 
+        
+        (select cod_pers_trs, 
+                hour_soli_trn,
+                max(activacion_tarjetas) as activacion_tarjetas, 
+                max(bloqueo_tarjetas) as bloqueo_tarjetas, 
+                max(consulta_movim) as consulta_movim,
+                max(aplazamiento_pagos) as aplazamiento_pagos,
+                avg(imp_aplazamiento_pagos) as imp_aplazamiento_pagos,
+                avg(num_aplazamiento_pagos) as num_aplazamiento_pagos,
+                max(notificaciones_baja) as notificaciones_baja,
+                max(notificaciones_alta) as notificaciones_alta, 
+                max(accion_comercial) as accion_comercial,
+                max(case when substr(partition_id, 1, 6) in ('201503', '201502', '201501') then activacion_tarjetas else 0 end)
+                  as activacion_tarjetas_ult_trim,
+                max(case when substr(partition_id, 1, 6) in ('201503', '201502', '201501') then bloqueo_tarjetas else 0 end)
+                  as bloqueo_tarjetas_ult_trim,
+                max(case when substr(partition_id, 1, 6) in ('201503', '201502', '201501') then consulta_movim else 0 end) 
+                  as consulta_movim_ult_trim,
+                max(case when substr(partition_id, 1, 6) in ('201503', '201502', '201501') then aplazamiento_pagos else 0 end)
+                 as aplazamiento_pagos_ult_trim,
+                avg(case when substr(partition_id, 1, 6) in ('201503', '201502', '201501') then imp_aplazamiento_pagos else 0 end)
+                 as imp_aplazamiento_pagos_ult_trim,
+                avg(case when substr(partition_id, 1, 6) in ('201503', '201502', '201501') then num_aplazamiento_pagos else 0 end)
+                 as num_aplazamiento_pagos_ult_trim,
+                max(case when substr(partition_id, 1, 6) in ('201503', '201502', '201501') then notificaciones_baja else 0 end) 
+                 as notificaciones_baja_ult_trim,
+                max(case when substr(partition_id, 1, 6) in ('201503', '201502', '201501') then notificaciones_alta else 0 end)
+                 as notificaciones_alta_ult_trim,
+                max(case when substr(partition_id, 1, 6) in ('201503', '201502', '201501') then accion_comercial else 0 end) 
+                 as accion_comercial_ult_trim
+         from da_mariadrav.wallet_funcionalidades
+         where partition_id != '20150430'
+        group by cod_pers_trs, hour_soli_trn) funcion
+        on bolsa.cod_pers_trs=funcion.cod_pers_trs 
+        
+        left join 
+                
+        (select *
+         from (select cod_pers_trs, tipo_tarjeta, debito_credito, 
+               num_tarjetas, num_movimientos, imp_movimientos,
+               rank() over (PARTITION BY cod_pers_trs ORDER BY ind_tipo_tarjeta DESC) as rank
+               from (select cod_pers_trs, tipo_tarjeta, debito_credito, 
+                     avg(num_tarjetas) as num_tarjetas,
+                     avg(num_movimientos) as num_movimientos,
+                     avg(imp_movimientos) as imp_movimientos,
+                     case when tipo_tarjeta is not null then 1 else 0 end as ind_tipo_tarjeta
+                     FROM da_mariadrav.wallet_pago_tarjetas
+                     where partition_id != '20150430'
+                     group by cod_pers_trs, tipo_tarjeta, debito_credito 
+                     ) a
+                 ) r where rank=1
+            ) tarjetas
+         
+  on bolsa.cod_pers_trs=tarjetas.cod_pers_trs
+        
+             
+        left join 
+                
+        (select *
+         from (select cod_pers_trs, tipo_tarjeta as tipo_tarjeta_ult_trim, debito_credito as debito_credito_ult_trim, 
+               num_tarjetas as num_tarjetas_ult_trim, num_movimientos as num_movimientos_ult_trim, 
+               imp_movimientos as imp_movimientos_ult_trim,
+               rank() over (PARTITION BY cod_pers_trs ORDER BY ind_tipo_tarjeta DESC) as rank
+               from (select cod_pers_trs, tipo_tarjeta, debito_credito, 
+                     avg(num_tarjetas) as num_tarjetas,
+                     avg(num_movimientos) as num_movimientos,
+                     avg(imp_movimientos) as imp_movimientos,
+                     case when tipo_tarjeta is not null then 1 else 0 end as ind_tipo_tarjeta
+                     FROM da_mariadrav.wallet_pago_tarjetas
+                     where substr(partition_id, 1, 6) in ('201503', '201502', '201501') 
+                     group by cod_pers_trs, tipo_tarjeta, debito_credito 
+                     ) a
+                 ) r where rank=1
+            ) tarjetas_ult_trim
+         
+ on bolsa.cod_pers_trs=tarjetas_ult_trim.cod_pers_trs
+ 
+        left join 
+        
+        (select cod_pers_trs, des_contrapartida 
+         from da_mariadrav.productos_comb 
+        where des_contrapartida is not null) prod
+        on bolsa.cod_pers_trs=prod.cod_pers_trs")
+
+```
+
+
+<br/> **Finalmente se extraen los clientes que cumplen todas las condiciones sociodemográficas, teléfono informado, lista Robinson y LOPD para poder entrar en el bote de las encuestas**
+```{r CREAR_TABLA, eval=TRUE, echo=FALSE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_mariadrav.wallet_tablon_encuestas as
+        select * from da_mariadrav.wallet_tablon_analisis_investigacion_entrega
+        where xti_idefisco in ('1', '6', '7') 
+          and xti_sexo in ('M', 'V')
+          and cod_edad>=18 and cod_edad<=80
+          and xsn_empleado = ''
+          and concat(tfno_gest,tfno_par,tfno_mov) != '' 
+          and filtro_lopd = 1
+          and xsn_enviopub != 'N' 
+          and xsn_enviotmk != 'N'")
+```
+
+
+La distribución de los clientes una vez aplicados todos los filtros es la siguiente:
+<br/> Wallet Activo:**`r qhive("select count(distinct cod_pers_trs) as dist_pers from da_mariadrav.wallet_tablon_encuestas where categoria_usuario='Wallet Activo'")`**
+<br/> Wallet Inactivo:**`r qhive("select count(distinct cod_pers_trs) as dist_pers from da_mariadrav.wallet_tablon_encuestas where categoria_usuario='Wallet Inactivo'")`**
+<br/> BBVANet:**`r qhive("select count(distinct cod_pers_trs) as dist_pers from da_mariadrav.wallet_tablon_encuestas where categoria_usuario='BBVANet'")`**
+
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+#<br/> **Análisis información de teléfono informado, validado**
+# Móvil
+movil <- qhive("select categoria_usuario, inf_telefono, count(distinct cod_pers_trs) as dist_pers 
+      from da_mariadrav.wallet_tablon_encuestas
+      group by categoria_usuario, inf_telefono")
+
+# Get the levels for type in the required order
+movil = arrange(movil, inf_telefono, categoria_usuario)
+
+# Calculate the inf_telefono
+movil = ddply(movil, .(inf_telefono), transform, percent_dist_pers = dist_pers/sum(dist_pers) * 100)
+
+# Order
+movil = movil[order(movil$inf_telefono, movil$categoria_usuario),]
+
+#Graph
+graph_movil <- ggplot(movil, aes(x = factor(inf_telefono), y = percent_dist_pers, fill = categoria_usuario, label=dist_pers, ymax=max(percent_dist_pers))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("% clientes distintos") + ggtitle("info móvil x categoría usuario") + 
+  geom_text(aes(y = percent_dist_pers, label = dist_pers), position = "stack", size = 3.5)
+graph_movil
+
+```
+
+<br/> 
+
+#ANEXO#
+<br/> 
+
+***Tarjetas Habituales***
+<br/> *Dado que hay muchos tipos de tarjetas se seleccionar aquellas que son más comunes:*
+
+| COD_comprod | des_comprod                            |
+|:-----------:|:--------------------------------------:|
+|    2369     | TARJETA DESPUES BBVA                   |
+|    2265     | TARJETA AHORA BBVA                     |
+|    6709     | TARJETA DIEZ                           |
+|    2366     | TARJETA AHORA BLUE BBVA                |
+|    3037     | PACK-DUO BBVA                          |
+|    9994     | TARJETA ANTES BBVA                     |
+|    2497     | TARJETA A TU RITMO BBVA                |
+|    2154     | TARJETA BLUE BBVA                      |
+|    2306     | TARJETA VIRTUAL BBVA                   |
+|    7938     | TARJETA A TU RITMO COMPLEMENTARIA BBVA |
+|    9482     | TARJETA 3 MESES SIN                    |
+|    2494     | TARJETA DESPUES BLUE BBVA              |
+|    2496     | TARJETA DESPUES ORO BBVA               |
+|    4169     | TARJETA ANTES BLUE BBVA                |
+|    0561     | TARJETA NEGOCIOS DEBITO                |
+|    9841     | TARJETA NEGOCIOS CREDITO               |
+|    5990     | TARJETA BLUE BBVA MENSUAL              |
+|    6048     | TARJETA LIGA BBVA                      |
+|    2511     | TARJETA A TU RITMO BLUE BBVA           |
+|    5989     | TARJETA DIEZ MENSUAL                   |
+
+
+***FUENTES***
+
+*SINFO - NFC:*
+
+* Telefono validado - tfno_gest
+* email validado - email
+* Indicador de móvil validado - inf_movil
+* Indicador de email validado - inf_email
+* Edad - edad_edad
+* Género - sexo_sexo
+* Antigüedad BBVA
+* Nombre y Apellidos
+
+*clarity_attributes.Big_Big_table:*
+
+* Ciudad - cod_postal_ciudad_des_ciudadg
+* Segmento según Plan Uno -  segmento_plan_uno_cod_segmento_plan_uno
+
+*clarity_elements.metricas_segm_comport, da_pro.transacciones_por_canal*
+
+* Tipología usuario Banca Online (según alguna segmentación interna sobre nivel de uso de BO) -  segmento_comportamental <= 6
+* Franjas horarias de conexión
+
+*da_martalamela.wallet_antiguedad_usuarios*
+
+* Antigüedad en BBVA Wallet -  antiguedad_days
+
+*da_pro.productos_contratados*
+
+* Tenencia de tarjeta wallet - cod_comprod = 8425
+* Tenencia de sticker - cod_comprod = 3199
+* Nº medio de tarjetas activas-  distinct cod_idcontra para cod_comprod 3199, 8425
+* Tenencia otros productos financieros en BBVA (hipoteca, préstamos, depósitos, planes de pensiones, nóminas/pensiones domiciliadas, etc.)- des_ctgcom
+
+*da_pro.movimientos_tarjeta_detalle_corp*
+
+* Nº operaciones realizadas Tarjeta wallet e importes - count(all), suma importe
+* Modalidad de pago Tarjeta Wallet - join productos_contratados y ver cod_comprod 3199, 8425
+* NO SE ENCONTRÓ INFORMACION: Si pre-pago: importes medios recargados - ¿pago en comercio online? ¿todos los 3199?
+
+*Funcionalidades*
+
+*da_pro.transacciones_por_canal*
+
+* 1. activación de tarjetas - cod_trnfims 1231
+* 4. consulta de movimientos - cod_trnfims 0190 o TCTFT976 o 0559 (prepago)
+* 5. aplazamiento de pagos - cod_trnfims 1620 o TCTFTL66
+* 6. recepción de notificaciones - cod_trnfims 1681 (baja) o 1680 (alta)
+
+*da_pro.movimientos_tarjeta_detalle_corp*
+
+* 3. pago móvil, diferenciando si ha sido con o sin sticker -	cod_comprod 3199, 8425
+
+*sinfo_master.oportunidades_comerciales*
+
+* 7. uso de promociones: Sólo existe información de clientes que recibieron alguna oferta comercial wallet (cupones etc.) y no del éxito de ellas -	cod_acom wallet
+
+*da_pro.productos_contratados, da_pro.productos_contratados_detalle, da_pro.saldos_cuenta_persona_fisica*
+
+* Otros productos contratados
+

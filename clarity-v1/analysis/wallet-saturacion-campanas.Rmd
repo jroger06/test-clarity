@@ -1,0 +1,631 @@
+---
+title: "Saturación Campañas Wallet"
+output: html_document
+---
+
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- "[Wallet]: BBVA Wallet Saturación Campañas"
+
+keywords  <- 'wallet, digital, online, bbva.es, saturacion, campaigns, mailing, sms'  
+```
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(grid))
+suppressMessages(library(hexbin))
+suppressMessages(library(lattice))
+suppressMessages(library(reshape))
+suppressMessages(library(plyr))
+suppressMessages(library(stringr))
+suppressMessages(library(digest))
+suppressMessages(library(lattice))
+
+
+options(warn=-1, scipen=3, width=150)
+source('~/bda_clarity/tools/methods_connect.R') ;
+source('~/bda_clarity/tools/warehouse_basics.R') ;
+source('~/bda_clarity/tools/write.hive.R') ;
+```
+
+
+```{r identificar campañas, eval=TRUE, echo=TRUE, cache=TRUE}
+# ver el contenido de oportunidaes_comerciales
+opo <- qhive("select cod_acom, cod_camp, cod_persona, xsn_noclien, fec_resenv, fec_respz, cod_codciclo,
+              cod_canal, cod_respz, des_products, xsn_exito, fec_exito
+      from sinfo_master.oportunidad_comercial
+      where cod_acom in ( 'S717501001', 'S703203001', 'S713603001', 'S713602001', 'S736901001', 'S736901003',
+                          'S732702001', 'S741502001', 'S744802002', 'S744803002', 'S787304002', 'S787305001',
+                          'S787304001', 'S785703001', 'S818101001')
+      limit 10")
+opo
+
+# ver el contenido de acciones_comerciales
+acc <- qhive("select cod_acom, cod_camp, des_acom_x, fap_acom
+      from sinfo_master.acciones_comerciales
+      where cod_acom in ( 'S717501001', 'S703203001', 'S713603001', 'S713602001', 'S736901001', 'S736901003',
+                          'S732702001', 'S741502001', 'S744802002', 'S744803002', 'S787304002', 'S787305001',
+                          'S787304001', 'S785703001', 'S818101001')
+      limit 10")
+acc
+
+# finalmente se hace el cruce
+do.hive("create table IF NOT EXISTS da_mariadrav.sat_acc_opo as
+        select acc.cod_camp, acc.cod_acom, acc.cod_canal, acc.des_acom_x, acc.des_motivacl, 
+        opo.cod_persona, opo.xsn_noclien, opo.cod_codciclo, opo.cod_respz, opo.des_products, opo.xsn_exito, 
+        trim(substring(acc.des_acom_x, 1, instr(des_acom_x, '[')-1)) as campana,
+        fap_acom, fvt_acom, fec_fmedexto, fec_fmedextt, fec_medexto, fec_medextt, fec_resenv,
+        fec_respz, fec_exito,
+        case when year(fap_acom) =2999 then null else to_date(concat(year(fap_acom), '-', month(fap_acom), '-01')) end as fap_acom_anomes, 
+        case when year(fvt_acom) =2999 then null else to_date(concat(year(fvt_acom), '-', month(fvt_acom), '-01')) end as fvt_acom_anomes, 
+        case when year(fec_fmedexto) =2999 then null else to_date(concat(year(fec_fmedexto), '-', month(fec_fmedexto), '-01')) end as fec_fmedexto_anomes, 
+        case when year(fec_fmedextt) =2999 then null else to_date(concat(year(fec_fmedextt), '-', month(fec_fmedextt), '-01')) end as fec_fmedextt_anomes,
+        case when year(fec_medexto) =2999 then null else to_date(concat(year(fec_medexto), '-', month(fec_medexto), '-01')) end as fec_medexto_anomes,
+        case when year(fec_medextt) =2999 then null else to_date(concat(year(fec_medextt), '-', month(fec_medextt), '-01')) end as fec_medextt_anomes,
+        case when year(fec_resenv) =2999 then null else to_date(concat(year(fec_resenv), '-', month(fec_resenv), '-01')) end as fec_resenv_anomes, 
+        case when year(fec_respz) =2999 then null else to_date(concat(year(fec_respz), '-', month(fec_respz), '-01')) end as fec_respz_anomes, 
+        case when year(fec_exito) =2999 then null else to_date(concat(year(fec_exito), '-', month(fec_exito), '-01')) end as fec_exito_anomes
+        from sinfo_master.acciones_comerciales acc left join 
+             sinfo_master.oportunidad_comercial opo
+        on acc.cod_acom=opo.cod_acom
+        where acc.cod_acom in ('S717501001', 'S703203001', 'S713603001', 'S713602001', 'S736901001',
+                               'S736901003', 'S732702001', 'S741502001', 'S744802002', 'S744803002',
+                               'S787304002', 'S787305001', 'S787304001', 'S785703001', 'S818101001')")
+
+
+``` 
+
+<br/>
+
+### Análisis del contenido de variables: varias (1/3)
+<br/>
+
+```{r contenido sat_acc_opo, eval=TRUE, echo=FALSE, cache=TRUE}
+# Acción Comercial
+des_acom_x <- qhive("select des_acom_x, count(distinct cod_persona) as num_clientes
+                  from da_mariadrav.sat_acc_opo
+                  group by des_acom_x")
+
+graph_des_acom_x <- ggplot(des_acom_x, aes(x = des_acom_x, y = num_clientes, label=num_clientes, ymax=(max(num_clientes)+0.15*max(num_clientes)))) + 
+  geom_bar(stat = "identity", width = .7, fill='blue') + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10, angle=90), legend.title=element_blank()) + 
+  ylab("clientes distintos") + 
+  ggtitle('Acción Comercial') + 
+  geom_text(aes(y = num_clientes, label = num_clientes), position = "stack", size = 3.5, vjust=-2) +
+  scale_fill_brewer()
+graph_des_acom_x
+
+# Tipo de campaña
+campana <- qhive("select campana, count(distinct cod_persona) as num_clientes
+                  from da_mariadrav.sat_acc_opo
+                  group by campana")
+
+graph_campana <- ggplot(campana, aes(x = campana, y = num_clientes, label=num_clientes, ymax=(max(num_clientes)+0.1*max(num_clientes)))) + 
+  geom_bar(stat = "identity", width = .7, fill='blue') + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10, angle=90), legend.title=element_blank()) + 
+  ylab("clientes distintos") + 
+  ggtitle('Campaña') + 
+  geom_text(aes(y = num_clientes, label = num_clientes), position = "stack", size = 3.5, vjust=-2) +
+  scale_fill_brewer()
+graph_campana
+
+# Motivo Acción Comercial
+des_motivacl <- qhive("select des_motivacl, count(distinct cod_persona) as num_clientes
+                      from da_mariadrav.sat_acc_opo group by des_motivacl")
+
+graph_des_motivacl <- ggplot(des_motivacl, aes(x = des_motivacl, y = num_clientes, label=num_clientes, ymax=(max(num_clientes)+0.1*max(num_clientes)))) + 
+  geom_bar(stat = "identity", width = .7, fill='blue') + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10, angle=90), legend.title=element_blank()) + 
+  ylab("clientes distintos") + 
+  ggtitle('Motivo Acción Comercial') + 
+  geom_text(aes(y = num_clientes, label = num_clientes), position = "stack", size = 3.5, vjust=-2) +
+  scale_fill_brewer()
+graph_des_motivacl
+
+
+# indicador éxito campaña: no está informada
+xsn_exito <- qhive("select xsn_exito, count(distinct cod_persona) as num_clientes
+                    from da_mariadrav.sat_acc_opo 
+                   group by xsn_exito")
+
+graph_xsn_exito <- ggplot(xsn_exito, aes(x = xsn_exito, y = num_clientes, label=num_clientes, ymax=(max(num_clientes)+0.1*max(num_clientes)))) + 
+  geom_bar(stat = "identity", width = .7, fill='blue') + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("clientes distintos") + 
+  ggtitle('Éxito de Campaña') + 
+  geom_text(aes(y = num_clientes, label = num_clientes), position = "stack", size = 3.5, vjust=-2) +
+  scale_fill_brewer()
+  graph_xsn_exito
+
+
+# indicador cliente: no está informada
+xsn_noclien <- qhive("select xsn_noclien, count(distinct cod_persona) as num_clientes
+                    from da_mariadrav.sat_acc_opo 
+                   group by xsn_noclien")
+
+graph_xsn_noclien <- ggplot(xsn_noclien, aes(x = xsn_noclien, y = num_clientes, label=num_clientes, ymax=(max(num_clientes)+0.1*max(num_clientes)))) + 
+  geom_bar(stat = "identity", width = .7, fill='blue') + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("clientes distintos") + 
+  ggtitle('Indicador No Cliente') + 
+  geom_text(aes(y = num_clientes, label = num_clientes), position = "stack", size = 3.5, vjust=-2) +
+  scale_fill_brewer()
+  graph_xsn_noclien
+
+
+# Canal
+cod_canal <- qhive("select campana, cod_canal, count(distinct cod_persona) as num_clientes
+                   from da_mariadrav.sat_acc_opo 
+                   group by campana, cod_canal")
+
+cod_canal$des_canal <- ifelse(cod_canal$cod_canal=='0045', 'email', 
+                              ifelse(cod_canal$cod_canal=='0017', 'SMS movil', ''))
+
+cod_canal_per <- unique(ddply(cod_canal, .(des_canal), transform, num_clientes=sum(num_clientes))[,c("des_canal", "num_clientes")])
+
+cod_canal_per$percent_dist_pers <- cod_canal_per$num_clientes*100/sum(cod_canal_per$num_clientes)
+cod_canal_per$label_percent_dist_pers <- paste0(sprintf("%.0f", cod_canal_per$percent_dist_pers), "%")
+
+
+
+graph_cod_canal_per <- ggplot(cod_canal_per, aes(x = des_canal, y = percent_dist_pers, label=label_percent_dist_pers, ymax=(max(percent_dist_pers)+0.1*max(percent_dist_pers)))) + 
+  geom_bar(stat = "identity", width = .7, fill='blue') + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("clientes distintos") + 
+  ggtitle('Canal de Campaña') + 
+  geom_text(aes(y = percent_dist_pers, label = label_percent_dist_pers), position = "stack", size = 3.5, vjust=-2) +
+  scale_fill_brewer()
+graph_cod_canal_per
+
+
+arrange(cod_canal[, c("campana", "des_canal", "num_clientes")], desc(num_clientes))
+
+```
+<br/>
+
+### Análisis del contenido de variables: fechas (2/3)
+<br/>
+
+```{r contenido fechas, eval=TRUE, echo=FALSE, cache=TRUE}
+#fec_resenv
+fec_resenv <- qhive("select fec_resenv_anomes, COUNT(DISTINCT cod_persona) as count_dist_pers
+                    from da_mariadrav.sat_acc_opo 
+                    group by fec_resenv_anomes
+                    order by fec_resenv_anomes")
+
+ggplot(fec_resenv, aes(x=fec_resenv_anomes)) + 
+  geom_histogram( aes(y=count_dist_pers), stat="identity", binwidth=.5, colour="white", fill="blue") + 
+  ggtitle(expression(atop(paste('Histograma fec_resenv'), atop(italic(paste('Fecha de generación del público objetivo asociado a la acción comercial')), "")))) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + 
+  ylab("clientes distintos") 
+
+
+ 
+#fec_respz
+fec_respz <- qhive("select fec_respz_anomes, COUNT(DISTINCT cod_persona) as count_dist_pers
+                   from da_mariadrav.sat_acc_opo
+                   group by fec_respz_anomes
+                   order by fec_respz_anomes")
+
+ggplot(fec_respz, aes(x=fec_respz_anomes)) + 
+  geom_histogram( aes(y=count_dist_pers), stat="identity", colour="white", fill="blue") +
+  ggtitle(expression(atop(paste('Histograma fec_respz_anomes'), atop(italic(paste('Fecha Última Respuesta o Contacto enviado por el módulo gestor')), "")))) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + 
+  ylab("clientes distintos")
+
+
+# otras fechas
+fec_fmedexto <- qhive("select fec_fmedexto_anomes, COUNT(DISTINCT cod_persona) as count_dist_pers
+                      from da_mariadrav.sat_acc_opo 
+                      group by fec_fmedexto_anomes
+                      order by fec_fmedexto_anomes")
+
+ggplot(fec_fmedexto, aes(x=fec_fmedexto_anomes)) + 
+  geom_histogram( aes(y=count_dist_pers), stat="identity", binwidth=.5, colour="white", fill="blue") +
+  ggtitle(expression(atop(paste('Histograma fec_fmedexto'), atop(italic(paste('Fecha estimada para el Éxito medido por Producto Ofertado')), "")))) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + 
+  ylab("clientes distintos")
+
+
+fec_fmedextt <- qhive("select fec_fmedextt_anomes, COUNT(DISTINCT cod_persona) as count_dist_pers
+                      from da_mariadrav.sat_acc_opo
+                      group by fec_fmedextt_anomes
+                      order by fec_fmedextt_anomes")
+
+ggplot(fec_fmedextt, aes(x=fec_fmedextt_anomes)) + 
+  geom_histogram( aes(y=count_dist_pers), stat="identity", binwidth=.5, colour="white", fill="blue") +
+  ggtitle(expression(atop(paste('Histograma fec_fmedextt'), atop(italic(paste('Fecha estimada para el Éxito medido por Tipología')), "")))) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + 
+  ylab("clientes distintos")
+
+
+fec_medexto <- qhive("select fec_medexto_anomes,COUNT(DISTINCT cod_persona) as count_dist_pers
+                     from da_mariadrav.sat_acc_opo 
+                     group by fec_medexto_anomes
+                     order by fec_medexto_anomes")
+
+ggplot(fec_medexto, aes(x=fec_medexto_anomes)) + 
+  geom_histogram( aes(y=count_dist_pers), stat="identity", binwidth=.5, colour="white", fill="blue") +
+  ggtitle(expression(atop(paste('Histograma fec_medexto'), atop(italic(paste('Fecha de Éxito medido por Producto Ofertado')), "")))) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + 
+  ylab("clientes distintos")
+
+
+fec_medextt <- qhive("select fec_medextt_anomes, COUNT(DISTINCT cod_persona) as count_dist_pers
+                     from da_mariadrav.sat_acc_opo 
+                     group by fec_medextt_anomes
+                     order by fec_medextt_anomes")
+
+ggplot(fec_medextt , aes(x=fec_medextt_anomes)) + 
+  geom_histogram( aes(y=count_dist_pers), stat="identity", binwidth=.5, colour="white", fill="blue") +
+  ggtitle(expression(atop(paste('Histograma fec_medextt'), atop(italic(paste('Fecha del Éxito medido por Tipología')), "")))) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + 
+  ylab("clientes distintos")
+
+
+fec_exito <- qhive("select fec_exito_anomes, COUNT(DISTINCT cod_persona) as count_dist_pers
+                   from da_mariadrav.sat_acc_opo 
+                   group by fec_exito_anomes
+                   order by fec_exito_anomes")
+
+ggplot(fec_exito , aes(x=fec_exito_anomes)) + 
+  geom_histogram( aes(y=count_dist_pers), stat="identity", binwidth=.5, colour="white", fill="blue") +
+  ggtitle(expression(atop(paste('Histograma fec_exito'), atop(italic(paste('Fecha en la que al cliente se le ha marcado como éxito')), "")))) + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + 
+  ylab("clientes distintos")
+
+``` 
+
+<br/>
+
+### Análisis del contenido de variables: Relación de Acción comercial con Campaña en el tiempo (3/3)
+<br/>
+
+```{r relación campaña motivo tiempo, eval=TRUE, echo=FALSE, cache=TRUE}
+
+des_acom_x_campana <- qhive("select distinct trim(campana) as campana, 
+                            trim(des_acom_x) as des_acom_x, 
+                            fap_acom_anomes, fvt_acom_anomes
+                         from da_mariadrav.sat_acc_opo 
+                         order by fap_acom_anomes")
+
+des_acom_x_campana
+
+```
+
+<br/>
+
+###  Número de Impactos que se recibe por persona 
+
+<br/>
+
+```{r # de impactos por cliente, eval=TRUE, echo=FALSE, cache=TRUE}
+
+impactos_accion <- qhive("select num_impactos_acciones, count(distinct cod_persona) as num_clientes
+                          from 
+                              (select cod_persona, count(distinct cod_acom) as num_impactos_acciones
+                               from da_mariadrav.sat_acc_opo 
+                               group by cod_persona
+                               ) imp
+                          group by num_impactos_acciones")
+
+impactos_motivo <- qhive("select num_impactos_motivos, count(distinct cod_persona) as num_clientes
+                                from (select cod_persona,  
+                                      count(distinct trim(substring(des_acom_x, 1, instr(des_acom_x, '[')-1))) as num_impactos_motivos
+                                      from da_mariadrav.sat_acc_opo
+                                      group by cod_persona) a
+                                group by num_impactos_motivos
+                                order by num_impactos_motivos")
+```
+
+
+```{r gr de impactos por cliente, eval=TRUE, echo=FALSE, cache=TRUE}
+#Gráfico
+  # Calculate the percentages
+impactos_accion$percent_dist_pers = impactos_accion$num_clientes/sum(impactos_accion$num_clientes) * 100
+impactos_accion$label_percent_dist_pers = paste0(sprintf("%.0f", impactos_accion$percent_dist_pers), "%")
+
+  #Graph
+graph_impactos_accion <- ggplot(impactos_accion, aes(x = num_impactos_acciones, y = percent_dist_pers, label=label_percent_dist_pers, ymax=(max(percent_dist_pers)+0.1*max(percent_dist_pers)))) + 
+  geom_bar(stat = "identity", width = .7, fill='blue') + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("clientes distintos") + 
+  ggtitle(expression(atop(paste('Número de impactos por persona'), atop(italic(paste('impacto = acción comercial')), "")))) + 
+  geom_text(aes(y = percent_dist_pers, label = label_percent_dist_pers), position = "stack", size = 3.5, vjust=-2) +
+  scale_x_continuous(breaks=seq(1,max(impactos_accion$num_impactos_acciones),by = 1)) +
+  scale_fill_brewer()
+graph_impactos_accion
+
+
+#Gráfico
+  # Calculate the percentages
+impactos_motivo$percent_dist_pers = impactos_motivo$num_clientes/sum(impactos_motivo$num_clientes) * 100
+impactos_motivo$label_percent_dist_pers = paste0(sprintf("%.0f", impactos_motivo$percent_dist_pers), "%")
+
+  #Graph
+graph_impactos_motivo <- ggplot(impactos_motivo, aes(x = num_impactos_motivos, y = percent_dist_pers, label=label_percent_dist_pers, ymax=(max(percent_dist_pers)+0.1*max(percent_dist_pers)))) + 
+  geom_bar(stat = "identity", width = .7, fill='blue') + 
+  theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10), legend.title=element_blank()) + 
+  ylab("clientes distintos") + 
+  ggtitle(expression(atop(paste('Número de impactos por persona'), atop(italic(paste('impacto = motivo acción comercial')), "")))) + 
+  geom_text(aes(y = percent_dist_pers, label = label_percent_dist_pers), position = "stack", size = 3.5, vjust=-2) +
+  scale_x_continuous(breaks=seq(1,max(impactos_motivo$num_impactos_motivos),by = 1)) +
+  scale_fill_brewer()
+graph_impactos_motivo
+
+```
+
+
+<br/>
+
+### Definición del éxito 
+
+<br/>
+
+1. **Éxito = Descarga:**
+    + Como descarga se identifica la primera actividad en el servicio de Wallet (cod_serv_dv es 101 o 102 y cod_trnfims contiene 00000001). 
+    + El éxito se le asigna a la campaña con la fecha (fap_acom) más cercana y anterior a la descarga.  
+    + Si un cliente sigue recibiendo campañas teniendo ya la app a estas campañas se les marca exito 0 pero según el estudio a realizar deberían ser excluidas.
+
+<br/>
+
+* Casos con éxito_descarga:
+
+<br/>
+
+```{r pegar exito descarga, eval=FALSE, echo=FALSE, cache=TRUE}
+
+do.hive("create table if not exists da_mariadrav.sat_acc_opo_camp_subtxc as
+        select camp.*, to_date(txc.first_fec_soli_trn) as fec_descarga
+        from da_mariadrav.sat_acc_opo camp 
+        left join 
+            (select cod_pers_trs,
+             min(fec_soli_trn) as first_fec_soli_trn
+             from da_pro.transacciones_por_canal
+             where cast(cod_serv_dv as int) in (101,102)
+               and cod_pers_trs not like '%@%'
+               and cod_trnfims like '%00000001%'
+             group by cod_pers_trs) txc
+        on cast(trim(cod_persona) as int) = cast(trim(cod_pers_trs) as int)")
+
+do.hive("create table if not exists da_mariadrav.sat_acc_opo_txc as
+      select camp.*, 
+      fec_camp_exito,
+      case when fap_acom = fec_camp_exito then 1 else 0 end as exito_descarga,
+      case when fec_descarga < fap_acom then 1 else 0 end as campana_post_descarga
+      from da_mariadrav.sat_acc_opo_camp_subtxc camp
+      left join 
+            (select cod_persona,
+              max(fap_acom) as fec_camp_exito
+             from da_mariadrav.sat_acc_opo_camp_subtxc 
+             where fap_acom<=fec_descarga 
+             group by cod_persona 
+            ) camp_exito
+   on camp.cod_persona=camp_exito.cod_persona
+   order by cod_persona, fap_acom")
+
+```
+
+```{r ejemplo exito descarga, eval=TRUE, echo=FALSE, cache=TRUE}
+#ejemplo de las compinaciones
+qhive("select cod_persona, cod_acom, fap_acom, fec_descarga, exito_descarga
+      from da_mariadrav.sat_acc_opo_txc 
+      where cast(trim(cod_persona) as int) in (1000086, 10002360, 10000053, 10006906)
+      order by cod_persona, fap_acom")
+
+# 30mar2015, 06mar2015, 0, 0
+
+```
+
+<br/>
+
+* % de clientes y tasa de éxito por número de impactos recibidos. Éxito = Descarga:
+
+<br/>
+
+```{r exito descarga por num impactos, eval=TRUE, echo=FALSE, cache=TRUE}
+
+
+impactos_accion_exito <- qhive("select num_impactos_acciones, 
+                         count(distinct cod_persona) as num_clientes,
+                         sum(exito_descarga) as num_exitos
+                          from 
+                              (select cod_persona, count(distinct cod_acom) as num_impactos_acciones,
+                                case when max(exito_descarga)= 1 then 1 else 0 end as exito_descarga
+                               from da_mariadrav.sat_acc_opo_txc 
+                               group by cod_persona
+                               ) as imp
+                          group by num_impactos_acciones")
+
+
+#Gráfico
+  # Calculate the percentages
+      # % de clientes
+impactos_accion_exito$percent_dist_pers = impactos_accion_exito$num_clientes/sum(impactos_accion_exito$num_clientes) * 100
+impactos_accion_exito$label_percent_dist_pers = paste0(sprintf("%.0f", impactos_accion_exito$percent_dist_pers), "%")
+
+      # Tasa de éxito
+impactos_accion_exito$percent_num_exitos = impactos_accion_exito$num_exitos/impactos_accion_exito$num_clientes * 100
+impactos_accion_exito$label_percent_num_exitos = paste0(sprintf("%.0f", impactos_accion_exito$percent_num_exitos), "%")
+
+data1 <- impactos_accion_exito[, c("num_impactos_acciones", "percent_dist_pers")]
+data2 <- impactos_accion_exito[, c("num_impactos_acciones", "percent_num_exitos")]
+
+par(mar=c(5, 4, 2, 5) + 0.1)
+plot(data1, type='h', lwd=20, lend=1, las=1, xlab='Impactos', col='blue', ylab='% de personas',xlim=range(data1$num_impactos_acciones, data2$num_impactos_acciones))
+par(new=TRUE)
+plot(data2, axes=FALSE, type='o', pch=20, xlab='', col='red', ylab='', lwd=2,
+     xlim=range(data1$num_impactos_acciones, data2$num_impactos_acciones))
+axis(4, las=1)
+mtext('Tasa de éxito (%)', 4, 3.5)
+
+```
+
+
+<br/>
+
+2. **Éxito = Movimiento de compra o devolución con Wallet (pago móvil o sticker):**
+    + Como compra o devolución se identifica la primera actividad de una tarjeta con cod_comprod = 3199 (Wallet) o cod_comprod = 8425 (HCE). Como tipos de movimiento se tienen en cuenta cod_tip_movi like '%0005%' (compra) o cod_tip_movi like '%0006%' (devolución). 
+    + Se identifica la fecha de la primera operación que cumple los criterios anteriores. 
+    + El éxito se le asigna a la campaña con la fecha (fap_acom) más cercana y anterior a la primera compra o devolución.  
+    + Si un cliente sigue recibiendo campañas habiendo ya usado Wallet a estas campañas se les marca exito 0 pero según el estudio a realizar deberían ser excluidas.
+
+<br/>
+                   
+ 
+```{r pegar exito mvt, eval=FALSE, echo=FALSE, cache=TRUE}   
+
+do.hive("create table IF NOT EXISTS da_mariadrav.sat_intervinientes_corp as
+        select tablon.cod_persona,
+        cod_idcontra,
+        cod_pgccontr
+        from da_mariadrav.sat_acc_opo_txc tablon
+        left join
+        (select distinct cod_persctpn,
+          cod_idcontra,
+          cod_pgccontr
+          from da_pro.intervinientes_corp
+        ) contratos
+        on cast(trim(tablon.cod_persona) as int)=cast(trim(contratos.cod_persctpn) as int)")
+ 
+
+ do.hive("create table IF NOT EXISTS da_mariadrav.sat_datos_tarjetas_detalle_corp as
+        select dtdc.cod_idcontra,
+        interv.cod_persona,
+        dtdc.cod_comprod,
+        case when cast(cod_comprod as int)=3199 then 'Wallet'
+             when cast(cod_comprod as int)=8425 then 'HCE'
+        end as tipo_tarjeta,
+        interv.cod_pgccontr
+        from 
+         (
+          select distinct cod_idcontra, cod_comprod 
+          from da_pro.datos_tarjetas_detalle_corp
+          where cast(cod_comprod as int) in (3199,8425)
+            and cod_paisoalf like 'ES'
+            and cod_entalfa like '0182'
+          ) dtdc
+        left join
+        (
+         select distinct cod_idcontra,
+         cod_pgccontr,
+         cod_persona
+         from  da_mariadrav.sat_intervinientes_corp
+        ) interv
+        on cast(trim(dtdc.cod_idcontra) as int)=cast(trim(interv.cod_idcontra) as int)
+        where interv.cod_idcontra is not null")
+
+
+do.hive("create table if not exists da_mariadrav.sat_mvt_tarjetas as
+        select dtdc.*, mvt.des_movi, mvt.fec_primer_movim
+        from da_mariadrav.sat_datos_tarjetas_detalle_corp dtdc
+        left join 
+        (
+         select cod_idcontra,
+         case when cod_tip_movi like '%0005%' then 'Compra'
+              when cod_tip_movi like '%0006%' then 'Devolucion'
+         end as des_movi,
+         min(to_date(fec_movimien)) as fec_primer_movim
+         from da_pro.movimientos_tarjetas_detalle_corp 
+         where cod_tip_regi like '%D%' 
+           and (cod_tip_movi like '%0005%' or cod_tip_movi like '%0006%') 
+         group by cod_idcontra, cod_tip_movi
+        ) mvt
+        on cast(trim(dtdc.cod_idcontra) as int) = cast(trim(mvt.cod_idcontra) as int)")
+ 
+ 
+ do.hive("create table if not exists da_mariadrav.sat_acc_opo_submvt as
+         select txc.*, fec_primer_movim
+         from da_mariadrav.sat_acc_opo_txc txc
+         left join 
+         (
+          select cod_persona, max(fec_primer_movim) as fec_primer_movim
+          from da_mariadrav.sat_mvt_tarjetas 
+          group by cod_persona
+         ) mvt
+         on cast(trim(txc.cod_persona) as int) = cast(trim(mvt.cod_persona) as int)")
+
+
+do.hive("create table if not exists da_mariadrav.sat_acc_opo_txc_mvt as
+        select camp.*, 
+        fec_camp_exito_mvt,
+        case when fap_acom = fec_camp_exito_mvt then 1 else 0 end as exito_mvt,
+        case when fec_primer_movim < fap_acom then 1 else 0 end as campana_post_mvt
+        from da_mariadrav.sat_acc_opo_submvt camp
+        left join 
+        (
+         select cod_persona,
+         max(fap_acom) as fec_camp_exito_mvt
+         from da_mariadrav.sat_acc_opo_submvt 
+         where fap_acom<=fec_primer_movim 
+         group by cod_persona 
+        ) camp_exito
+        on camp.cod_persona=camp_exito.cod_persona")
+
+```
+
+
+<br/>
+
+* Casos con éxito_mvt:
+
+<br/>
+
+```{r ejemplos exito mvt, eval=TRUE, echo=FALSE, cache=TRUE}   
+qhive("select cod_persona, cod_acom, fap_acom, fec_descarga, fec_primer_movim, fec_camp_exito_mvt, exito_mvt
+      from da_mariadrav.sat_acc_opo_txc_mvt
+      where cast(trim(cod_persona) as int) in (10013305, 15778141)")
+
+```
+
+<br/>
+
+* % de clientes y tasa de éxito por número de impactos recibidos. Éxito = Primera Compra o Devolución:
+
+<br/>
+
+
+```{r exito mvt por num impactos, eval=TRUE, echo=FALSE, cache=TRUE}
+
+
+impactos_accion_exito_mvt <- qhive("select num_impactos_acciones, 
+                         count(distinct cod_persona) as num_clientes,
+                         sum(exito_mvt) as num_exitos
+                          from 
+                              (select cod_persona, count(distinct cod_acom) as num_impactos_acciones,
+                                case when max(exito_mvt)= 1 then 1 else 0 end as exito_mvt
+                               from da_mariadrav.sat_acc_opo_txc_mvt
+                               group by cod_persona
+                               ) as imp
+                          group by num_impactos_acciones")
+
+
+#Gráfico
+  # Calculate the percentages
+      # % de clientes
+impactos_accion_exito_mvt$percent_dist_pers = impactos_accion_exito_mvt$num_clientes/sum(impactos_accion_exito_mvt$num_clientes) * 100
+impactos_accion_exito_mvt$label_percent_dist_pers = paste0(sprintf("%.0f", impactos_accion_exito_mvt$percent_dist_pers), "%")
+
+      # Tasa de éxito
+impactos_accion_exito_mvt$percent_num_exitos = impactos_accion_exito_mvt$num_exitos/impactos_accion_exito_mvt$num_clientes * 100
+impactos_accion_exito_mvt$label_percent_num_exitos = paste0(sprintf("%.0f", impactos_accion_exito_mvt$percent_num_exitos), "%")
+
+data1 <- impactos_accion_exito_mvt[, c("num_impactos_acciones", "percent_dist_pers")]
+data2 <- impactos_accion_exito_mvt[, c("num_impactos_acciones", "percent_num_exitos")]
+
+par(mar=c(5, 4, 2, 5) + 0.1)
+plot(data1, type='h', lwd=20, lend=1, las=1, xlab='Impactos', col='blue', ylab='% de personas',xlim=range(data1$num_impactos_acciones, data2$num_impactos_acciones))
+par(new=TRUE)
+plot(data2, axes=FALSE, type='o', pch=20, xlab='', col='red', ylab='', lwd=2,
+     xlim=range(data1$num_impactos_acciones, data2$num_impactos_acciones))
+axis(4, las=1)
+mtext('Tasa de éxito', 4, 3.5)
+
+```
+ 

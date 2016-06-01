@@ -1,0 +1,97 @@
+Integridad sumidero
+========================================================
+
+_**In construction**_
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- "[Digital Sales]: How is the data source Sumidero could be beneficial to provide insights to the bank?"
+
+# Keywords. Text separated by commas. E.g. keywords <- 'customer health, recibos' 
+# Keywords can classify the attribute in categories such as 'valor, vinculación, digitalidad', describe used tables such as 'recibos, 
+# transacciones tarjetas, segmento plan uno' or include other relevant info. Search keywords in the portal to find commonly used terms
+# and create new keywords only if justified.
+
+keywords  <- 'sumidero, buzz, logs, trazas'  
+```
+
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(grid))
+suppressMessages(library(hexbin))
+suppressMessages(library(lattice))
+
+options(warn=-1, scipen=3, width=350)
+source('~/bda_clarity/tools/warehouse_basics.R')
+
+```
+
+** PREGUNTA:** ¿Sería posible usar el dato de Sumidero de forma consistente?
+
+Analizamos Diciembre para comprobar el volumen de datos (logs) agregado por horas
+
+```{r results='hide', message=FALSE, cache = TRUE, warning=FALSE, echo=FALSE}
+
+library('ggplot2')
+
+sub1 <- subq.where('substring(datetime,1,13) as variable','sumidero_master.weblogs','substring(datetime,1,13) BETWEEN "2014-12-01" AND "2015-01-01"','sub1')
+
+diciembre <- subq.group('variable, COUNT(variable) as cuenta_logs',sub1,groupby='variable', sqname='diciembre')
+Dec <- qhive(paste("select * from",diciembre))
+
+colnames(Dec) <- c("variable", "cuenta_logs")
+
+Dec$asDate <- strptime(Dec$variable, "%Y-%m-%dT%H")
+
+Dec$dia <- format(Dec$asDate,"%d")
+Dec$hora <- format(Dec$asDate,"%H")
+#Dec$minuto <- substr(Dec$variable,15,16)
+
+
+DecAgg <- aggregate(cuenta_logs~ hora + dia, data =Dec,sum)
+
+
+qplot(x=hora,y=cuenta_logs,data=na.omit(DecAgg),color=I('#132B43'), main= 'Sumidero_total_logs') +
+  geom_line()+
+  facet_wrap(~dia,ncol=8) 
+
+```
+
+Resultado: se observan logs dispares con una desviación fuera del intervalo de confianza.
+
+A continuación buscamos los datos en BUZZ para hacer el mismo resultado
+
+```{r results='hide', message=FALSE, cache = TRUE, warning=FALSE, echo=FALSE}
+
+sub1Buzz <- subq.where('substring(datetime,1,13) as variable','sumidero_master.weblogs','substring(datetime,1,13) BETWEEN "2014-12-01" AND "2015-01-01" AND LCASE(appname) LIKE "%buzz%"','sub1Buzz')
+
+diciembreBuzz <- subq.group('variable, COUNT(variable) as cuenta_logs',sub1Buzz,groupby='variable', sqname='diciembreBuzz')
+DecBuzz <- qhive(paste("select * from",diciembreBuzz))
+
+colnames(DecBuzz) <- c("variable", "cuenta_logs")
+
+DecBuzz$asDate <- strptime(DecBuzz$variable, "%Y-%m-%dT%H")
+
+DecBuzz$dia <- format(DecBuzz$asDate,"%d")
+DecBuzz$hora <- format(DecBuzz$asDate,"%H")
+#Dec$minuto <- substr(Dec$variable,15,16)
+
+
+DecBuzzAgg <- aggregate(cuenta_logs~ hora + dia, data =DecBuzz,sum)
+
+
+qplot(x=hora,y=cuenta_logs,data=na.omit(DecBuzzAgg),color=I('#20B2AA'), main= 'Sumidero_Buzz_logs') +
+  geom_line() +
+  facet_wrap(~dia,ncol=8)
+
+```
+
+Coming soon...
+
+

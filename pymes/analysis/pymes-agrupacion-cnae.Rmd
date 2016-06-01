@@ -1,0 +1,416 @@
+---
+title: "Exploracion preliminar de pymes, sectores y productos que contratan"
+author: "César de Pablo"
+date: "18/05/2015"
+output: html_document
+---
+
+
+```{r, echo=FALSE}
+# This is the first mandatory section.
+
+title     <- '[Pymes] Exploracion preliminar de pymes, sectores y productos que contratan'
+
+# Keywords. Text separated by commas. E.g. keywords <- 'customer health, recibos' 
+# Keywords can classify the attribute in categories such as 'valor, vinculación, digitalidad', describe used tables such as 'recibos, 
+# transacciones tarjetas, segmento plan uno' or include other relevant info. Search keywords in the portal to find commonly used terms
+# and create new keywords only if justified.
+
+keywords  <- 'pymes, sme, cnae, activity, products, productos '
+```
+
+
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))		# This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+source('~/bda_clarity/tools/warehouse_basics.R')
+```
+
+```{r import libraries, echo=FALSE, warning=FALSE, error=FALSE, message=FALSE}
+library(ggplot2)
+library(reshape)
+library(dplyr)
+```
+
+
+## Agrupación de empresas por sector y tipos de productos que contratan
+
+### Exploracion de datos
+
+#### ¿Dónde están los clientes empresariales?
+
+* La mayor parte de los clientes empresariales estan vinculados a BBVA (1082) aunque hay un número considerable asociado al resto de entidades.
+* Filtro usado para clientes empresariales: xti_persona = J (Tipo de persona = 'Jurídicas')
+
+
+```{r Clientes empresariales por entidad, echo = FALSE, fig.width= 10, fig.height=10}
+
+query_sme_by_entity <- "
+SELECT c.cod_entalfa code, e.des_nomabr name, COUNT(*) num_clients
+FROM da_pro.clientes_corp c JOIN da_catalogos.entidad e 
+ON c.cod_entalfa = e.cod_entalfa 
+WHERE c.xti_persona = 'J'
+AND c.partition_id = '20150228' AND e.partition_id = '20150228'
+GROUP BY code, name  
+ORDER BY num_clients DESC
+"
+
+sme_by_entity <- qimpala(query_sme_by_entity)
+
+plot.sme_by_entity <- qplot(data=sme_by_entity,
+      x=reorder(name, num_clients), y=num_clients, 
+      stat="identity", geom="bar",
+      log = "y",
+      ylab="Log(Number of clients)", main="Clients per entity") + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+plot.sme_by_entity + coord_flip()
+
+```
+
+#### ¿En qué sectores están ubicados?
+
+* La distribución de los clientes por sectores CNAE es muy desigual ´- la escala *y* es logarítmica- 
+* Filtro para sectores: xti_persona = J (Tipo de persona = 'Jurídicas')
+
+CNAE: [Codigo Nacional de Actividades Económicas](http://www.ine.es/jaxi/menu.do?type=pcaxis&path=/t40/clasrev&file=inebase)
+```{r Clientes empresariales por CNAE, echo=FALSE, fig.width= 10, fig.height=6}
+
+query_sme_by_cnae <- "
+SELECT clientes.cod_cnaecto, catalogo.cod_cnactsup, catalogo.des_cnacteco, count(*) num_clients
+FROM da_pro.clientes_corp clientes JOIN da_catalogos.cnae catalogo
+ON clientes.cod_cnaecto = catalogo.cod_cnacteco 
+AND clientes.xti_persona = 'J'
+AND clientes.partition_id = '20150228' AND catalogo.partition_id = '20150228'
+GROUP BY clientes.cod_cnaecto, catalogo.cod_cnactsup, catalogo.des_cnacteco
+ORDER BY num_clients DESC
+" 
+sme_by_cnae <- qimpala(query_sme_by_cnae)
+ 
+plot.sme_by_cnae <- qplot(data=sme_by_cnae,
+      x=reorder(cod_cnaecto,- num_clients) , y=num_clients, 
+      stat="identity", geom="bar",
+      xlab="Codigo CNAE",
+      ylab="Log(Number of clients)", main="Clients per cnae sector") 
+
+plot.sme_by_cnae + scale_y_log10(breaks=c(10,100,1000,10000)) + theme(axis.text.x = element_blank())
+
+
+```
+
+Así que mostramos los 50 sectores CNAE más frecuentes con mayor número de clientes: 
+
+```{r Sectores CNAE con más clientes, echo=FALSE, fig.width= 10, fig.height=12}
+qplot(data=head(sme_by_cnae, 50),
+      x=reorder(paste(des_cnacteco, cod_cnaecto, sep=" - "), num_clients) , y=num_clients, 
+      stat="identity", geom="bar",
+      xlab="Descripcion CNAE",
+      ylab="Number of clients", main="Clients per cnae sector") + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) + coord_flip()
+
+```
+
+### ¿Y en qué supersectores CNAE?
+
+* La codificacion CNAE es jerárquica, exploramos la distribución de clientes agrupando por un nivel superior
+* El efecto es simiar similar si agrupamos los codigos CNAE por su codigo superior (cod_cnactsup)
+
+```{r Clientes empresariales por CNAE agrupado, echo=FALSE, fig.width= 10, fig.height=6}
+query_sme_by_cnae_sup <- "
+SELECT catalogo.cod_cnactsup, count(*) num_clients
+FROM da_pro.clientes_corp clientes JOIN da_catalogos.cnae catalogo
+ON clientes.cod_cnaecto = catalogo.cod_cnacteco 
+AND clientes.xti_persona = 'J'
+AND clientes.partition_id = '20150228' AND catalogo.partition_id = '20150228'
+GROUP BY catalogo.cod_cnactsup
+ORDER BY num_clients DESC
+" 
+sme_by_cnae_sup <- qimpala(query_sme_by_cnae_sup)
+
+# plot.sme_by_cnae_sup <-  qplot(data=sme_by_cnae,
+#       x=reorder(cod_cnactsup,num_clients), y=num_clients, 
+#       stat="identity",
+#       geom="bar",
+#       xlab= "CNAE supersector",
+#       ylab="Log(Number of clients)", 
+#       main="Clients per cnae supersector") 
+# 
+# plot.sme_by_cnae_sup + scale_y_log10() + theme(axis.text.x = element_blank())
+
+```
+
+
+```{r Sectores CNAE agrupado con más clientes, echo=FALSE, fig.width= 10, fig.height=6}
+
+qplot(data=head(sme_by_cnae_sup, n=30),
+      x=reorder(cod_cnactsup,num_clients), y=num_clients, 
+      stat="identity",
+      geom="bar",
+      ylab="Log(Number of clients)", main="Clients per cnae supersector") + theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 0.5)) + coord_flip()
+
+
+```
+
+### Agrupando por codigo de actividad
+
+* o incluso, si agrupamos por codigos de actividad
+
+```{r, echo=FALSE, fig.width= 10, fig.height=6 }
+query_sme_by_cnae_actividad <- "
+SELECT catalogo.cod_actvida, count(*) num_clients
+FROM da_pro.clientes_corp clientes JOIN da_catalogos.cnae catalogo
+ON clientes.cod_cnaecto = catalogo.cod_cnacteco 
+AND clientes.xti_persona = 'J'
+AND clientes.partition_id = '20150228' AND catalogo.partition_id = '20150228'
+GROUP BY catalogo.cod_actvida
+ORDER BY num_clients DESC
+" 
+sme_by_cnae_actividad <- qimpala(query_sme_by_cnae_actividad)
+
+plot.sme_by_cnae_actividad <- qplot(data=sme_by_cnae_actividad,
+      x=reorder(cod_actvida, num_clients) , y=num_clients, 
+      stat="identity",
+      geom="bar",
+      xlab="CNAE activity code",
+      ylab="Log(Number of clients)", main="Clients per CNAE actvity code") 
+
+plot.sme_by_cnae_actividad + coord_flip() + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+```
+
+### ¿Qué tipo de empresas son clientes?
+
+ * Los segmentos que nos interesan son los más numerosos 
+  * Micropymes (36)
+  * Pequeñas empresas (35)
+  * Empresas (34)
+ * Hay un porcentaje de clientes que no están categorizados: 
+  * N/A son más de 660.000 clientes 
+  * Resto (63) tiene alrededor de 115.000 
+
+```{r Clientes por segmento global, cache=TRUE, echo=FALSE, fig.width= 10, fig.height=6}
+
+sme_by_segmento_global <- "
+SELECT s.cod_segmsubo, count(*) num_clients
+FROM da_pro.clientes_corp c JOIN da_pro.segmento_global s
+ON c.cod_entalfa = s.cod_entalfa AND c.cod_paisoalf = s.cod_paisoalf 
+AND c.cod_persctpn = s.cod_persctpn AND c.fec_cierre = s.fec_cierre
+WHERE c.xti_persona = 'J'
+AND c.partition_id = '20150228' AND s.partition_id = '20150228' 
+GROUP BY s.cod_segmsubo
+ORDER BY num_clients DESC
+"
+
+sme_by_segmento_global <- qhive(sme_by_segmento_global)
+
+qplot(data=sme_by_segmento_global,
+      x=reorder(cod_segmsubo, +num_clients), y=num_clients, 
+      stat="identity",
+      geom="bar",
+      ylab="Log(Number of clients)", main="Clients per global segmentation") + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) + coord_flip()
+
+
+```
+
+
+## Agrupación de los clientes por sector y tipo de producto contratado 
+
+Creamos una tabla agregando los valores por sector CNAE y tipo de contrato (contrapartida). El objetivo es determinar si los sectores se pueden perfilar respecto al tipo de productos de los que hacen uso.  
+
+¿Podemos identificar grupos de actividad que tienen necesidades de producto similares?
+ 
+```{r creacion de la tabla agregada por sector y producto contratado, echo=FALSE}
+
+# CREATE TABLE da_cdepablo.agregado_contratos_tipo_cnae
+#    ROW FORMAT SERDE "org.apache.hadoop.hive.serde2.columnar.ColumnarSerDe"
+#    STORED AS RCFile
+#    AS
+# SELECT c.cod_cnaecto, ca.des_cnacteco,  cp.cod_contrapartida, cp.des_contrapartida, count(*) num_contratos_tipo
+# FROM da_pro.clientes_corp c JOIN da_pro.intervinientes_corp i  
+# ON c.cod_entalfa = i.cod_entalfa AND c.cod_paisoalf = i.cod_paisoalf 
+# AND c.cod_persctpn = i.cod_persctpn AND c.fec_cierre = i.fec_cierre
+# JOIN da_catalogos.contrapartida cp
+# ON i.cod_pgccontr = cp.cod_contrapartida
+# JOIN da_catalogos.cnae ca
+# ON c.cod_cnaecto = ca.cod_cnacteco
+# WHERE c.xti_persona = 'J'
+# AND c.partition_id = '20150228' AND i.partition_id = '20150228' AND cp.partition_id = '20150228' AND ca.partition_id = '20150228'
+# GROUP BY c.cod_cnaecto, ca.des_cnacteco, cp.cod_contrapartida, cp.des_contrapartida
+# ORDER BY c.cod_cnaecto, num_contratos_tipo DESC
+
+```
+
+### Matriz de incidencia de productos por sector 
+Para cada sector se marca los productos que contratatos por alguna empresa de cada sector CNAE.  
+  * Muchos productos son comunes a todos los sectores (lineas horizontales)
+  * Apreciamos bastante estructura en la distribucion de productos, por lo que puede ser viable encontrar grupos de actividades que tienden a consumir los mismos tipos de productos
+  
+```{r análisis de los datos por contrapartida, echo=FALSE, fig.width= 15, fig.height=15}
+
+query_sme_by_cnae_contract <- "
+SELECT *
+FROM da_cdepablo.agregado_contratos_tipo_cnae
+"
+
+sme_by_cnae_contract <- qimpala(query_sme_by_cnae_contract)
+
+ggplot(sme_by_cnae_contract, aes(y=cod_contrapartida, x=cod_cnaecto, fill="num_contratos_tipo")) + 
+  geom_tile() + 
+  xlab("CNAE") + 
+  ylab("Contrapartida")
+
+
+```
+
+#### Productos consumidos por todos los sectores
+
+La gráfica anterior parece indicar que hay una serie de productos que se consumen en casi todos los sectores mientras que otros son más específicos. Exploramos cuales son los productos que se consumen a lo largo de diferentes sectores. 
+
+
+```{r productos comunes, echo=FALSE, fig.width= 10, fig.height=10}
+query_common_contracts_by_cnae <- "
+SELECT cod_contrapartida, des_contrapartida, COUNT(*) num_sectores
+FROM da_cdepablo.agregado_contratos_tipo_cnae 
+GROUP BY cod_contrapartida, des_contrapartida
+ORDER BY num_sectores DESC
+"
+common_contracts_by_cnae <- qimpala(query_common_contracts_by_cnae)
+
+plot.common_contracts_by_cnae <- qplot(data=head(common_contracts_by_cnae,50),
+      x=reorder(paste(des_contrapartida, cod_contrapartida, sep=" - "), num_sectores), y=num_sectores,
+      stat="identity",
+      geom="bar",
+      xlab="Contrapartidas", 
+      ylab="Número de sectores", main="Productos más consumidos por sector") + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+plot.common_contracts_by_cnae + coord_flip()
+
+```
+
+_Inciso_ - Supongo, que hay conceptos que tienen más de un código ya que los resultados son diferentes cuando ploteamos los codigos y las descripciones (en estas últimas se agrega)
+
+```{r duda - codigos duplicados para el mismo concepto, echo=FALSE, fig.width= 15, fig.height=10}
+
+qplot(data=common_contracts_by_cnae,
+      x=reorder(des_contrapartida, num_sectores), y=num_sectores,
+      stat="identity",
+      geom="bar",
+      ylab="Número de sectores", main="Productos más consumidos por sector") + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) + coord_flip()
+
+```
+
+_Inciso_ - aprentemente muchos de las contrapartidas relacionadas con Comercio Exterior empiezas por "02XX"
+
+```{r lista de contrapartidas de comex , echo=FALSE}
+
+comex <- common_contracts_by_cnae[grep("02..",common_contracts_by_cnae$cod_contrapartida, perl=TRUE),]
+#head(comex, n=25)
+
+dplyr::tbl_df(comex)
+
+```
+
+
+### Agrupación de sectores por el tipo de productos que consumen - análisis preliminar
+
+Primer experimento para agrupar los diferentes sectores por el tipo de producto que consumen. En una primera aproximación usamos un número predefinido de clusters (k = 7): 
+
+Cada una de las franjas verticales despues de clusterizar identifica sectores con consumo de productos comunes. 
+
+
+```{r clustering de datos, echo=FALSE, fig.width=15, fig.height=15, message=FALSE}
+# Pivotamos los tipos de contrapartida conmo características (filas)
+
+k <- 7   # Número de clusters
+cf <- 20 # Filtra productos con menos ocurrencias que cf en ese sector
+
+filtered <- sme_by_cnae_contract[sme_by_cnae_contract$num_contratos_tipo > cf, ]
+
+pivot_sme_by_cnae_contract <- cast(filtered[c("des_cnacteco", "des_contrapartida", "num_contratos_tipo")], des_cnacteco ~ des_contrapartida)
+
+
+# Usamos inicialmente kmeans con 5 grupos
+clusters_sme_by_cnae_contract <- kmeans(pivot_sme_by_cnae_contract, k)
+
+# Convertimos los indices del cluster en un data_frame
+clusters_sme_by_cnae_contract_df <- stack(clusters_sme_by_cnae_contract$cluster)
+names(clusters_sme_by_cnae_contract_df) <- c('cluster', 'des_cnacteco')
+clustered <- merge(filtered, clusters_sme_by_cnae_contract_df, by="des_cnacteco")
+
+# Primer intento de visualizar los clusters - Creamos unab columna concatenando el número de cluster y la etiqueta con el objetivo de forzar la ordenación 
+attach(clustered)
+sorted <- clustered[order(cluster),]
+sorted$clustercnae <- paste(sorted$cluster, sorted$des_cnacteco, sep="_")
+ggplot(sorted, aes(y=cod_contrapartida, x=clustercnae, fill="num_contratos_tipo")) + 
+  geom_tile() +
+  xlab("CNAE") + 
+  ylab("Contrapartida")
+
+# labels <- subset(clusters_sme_by_cnae_contract_df,(cluster == 2),select=c('cluster','des_cnacteco'))
+
+```
+
+#### Matriz de incidencia de productos plataforma por sector
+
+Realiza semejante al anterior pero usando solo los productos plataforma (cod_pro_plat), en lugar de las contrapartidas  
+
+```{r análisis de los datos por producto plataforma, echo=FALSE, fig.width= 15, fig.height=15}
+
+query_sme_by_cnae_pplatform <- "
+SELECT *
+FROM da_cdepablo.agregado_contratos_plataforma_cnae
+"
+sme_by_cnae_pplatform <- qimpala(query_sme_by_cnae_pplatform)
+
+ggplot(sme_by_cnae_pplatform, aes(x=cod_cnaecto, y=cod_pro_plat, fill="num_contratos_tipo")) + 
+  geom_tile() +
+  xlab("CNAE") + 
+  ylab("Producto plataforma")
+
+
+```
+
+#### Agrupacion de sectores por el tipo de productos plataforma que consumen - análisis preliminar
+
+Agrupamos los diferentes sectores por el tipo de producto plataforma que consumen. En una primera aproximación usamos un número predefinido de clusters (k = 7): 
+
+Cada una de las franjas verticales despues de clusterizar identifica sectores con consumo de productos comunes
+
+```{r clustering por producto plataforma, echo=FALSE, fig.width= 15, fig.height=15}
+
+k <- 5
+cf <- 10
+
+filtered <- sme_by_cnae_pplatform[sme_by_cnae_pplatform$num_contratos_tipo > cf, ]
+
+pivot_sme_by_cnae_pplatform <- cast(filtered[c("des_cnacteco", "cod_pro_plat", "num_contratos_tipo")], des_cnacteco ~ cod_pro_plat)
+
+clusters_sme_by_cnae_pplatform <- kmeans(pivot_sme_by_cnae_pplatform, k)
+
+clusters_sme_by_cnae_pplatform_df <- stack(clusters_sme_by_cnae_pplatform$cluster)
+names(clusters_sme_by_cnae_pplatform_df) <- c('cluster', 'des_cnacteco')
+
+clustered <- merge(filtered, clusters_sme_by_cnae_pplatform_df, by="des_cnacteco")
+attach(clustered)
+sorted <- clustered[order(cluster),]
+sorted$clustercnae <- paste(sorted$cluster, sorted$des_cnacteco, sep="_")
+
+ggplot(sorted, aes(y=cod_pro_plat, x=clustercnae, fill="num_contratos_tipo")) + 
+  geom_tile() +
+  xlab("CNAE") + 
+  ylab("Producto Plataforma")
+
+```
+
+## Conclusiones 
+
+ * Centrar futuros esfuerzos en el estudio de las empresas con valor en el segmento global 35 (Pymes) y 36 (micropymes).
+ * Ampliar el estudio a las diferentes entidades - no solo BBVA (0182)
+ * Estudiar de forma más exhaustiva la relacion con productos contratados y en particular con la clasificación de productos comerciales
+ * La exploración inicial de los clusters por codigo de actividad CNAE puede resultar interesante para segmentar tanto los sectores y las empresas por las características de los productos que contratan. Es necesaria una exploracion adicional. 
+ 
+

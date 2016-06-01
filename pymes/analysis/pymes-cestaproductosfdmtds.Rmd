@@ -1,0 +1,343 @@
+---
+title: "Construcción de la cesta de productos para PYMES"
+author: "Agudo González, Pedro José - Martín Álvarez, Begoña - Medina Gallego, Carlos"
+editor: "César de Pablo Sánchez"
+date: "16/4/2015"
+output: html_document
+---
+========================================================
+_Migrado desde el Rmd del curso_
+
+
+```{r, echo=FALSE}
+# This is the first mandatory section.
+title     <- '[Pymes] Construcción de la cesta de productos para PYMES'
+keywords  <- 'pymes, sme'
+```
+
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+suppressMessages(library(DBI))		# This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+source('~/bda_clarity/tools/warehouse_basics.R')
+```
+
+```{r Import libraries}
+library(plyr)
+library(reshape2)
+library(ggplot2)
+```
+
+
+
+```{r Cargamos de nuevo el inventario, echo=FALSE, cache=TRUE}
+
+q.inventario <- "SELECT * FROM da_pymes.inventario_filtrado"
+
+df.inv <- qhive(q.inventario)
+
+```
+
+
+<h2>Productos contratados por cliente</h2>
+Por otra parte para las pymes del banco disponemos de información de productos como son:
+<ul>
+<li>Tenencia de producto contratado</li>
+<li>Importe de producto contratado</li>
+<li>Nº contratos en cada producto</li>
+</ul>
+
+A partir de aquí, nos planteamos diferentes situaciones para abordar el objetivo:
+<ol>
+<li>Crear varios grupos de clientes a partir de la actividad empresarial y ver en cada grupo su cesta de productos. En este caso vemos el problema de que existen sectores de actividad con clientes suficientes para hacer el análisis y otros que habría que agrupar. En el caso de agrupar sectores de actividad la distribución de cestas podría tener una gran variabilidad de unos clientes a otros.</li>
+<li>Crear varios grupos a partir de la tenencia de productos y después analizar el perfil de cliente dentro de cada grupo. En este caso los no clientes no nos darían información de productos.</li>
+<li>Generar 3 grupos de clientes, vinculados, no vinculados y no clientes. Con el grupo de vinculados se generan dos modelos para cada producto, uno para estimar la probabilidad de producto de cliente vinculado, con información de características de empresa e información de tenencia de productos y otro para estimar la probabilidad de producto de clientes no vinculados y no clientes, de los que tendremos información características de empresa.</li>
+</ol>
+
+<b>Elegimos la tercera opción quedando el modelo para la recomendación de productos de la siguiente forma:</b>
+
+<ol>
+<li>Obtenemos 3 grupos: <b>Vinculados, No vinculados y No clientes</b>. Se define un grado de vinculación con el banco en función del cirbe y el tamaño de la empresa.</li>
+<li>Definimos los <b>productos que recomendar</b>, en principio con la agrupación más agregada, en las siguientes fases del proyecto se podría afinar la recomendación del producto desagregando los productos a recomendar.</li>
+<li>Generamos 2 modelos de Regresión Logística para cada producto:
+<ol>
+<li><b>Modelo Inicial:</b> Modelo con target binaria, donde el target es 1 si tiene contratado el producto y 0 si no lo tiene, utilizaremos diferentes algoritmos como regresión logística, árboles de decisión y elegiremos el modelo que mejor se ajuste. Como variables explicativas del modelo metemos las características de la empresa. Este modelo lo entrenamos y lo testeamos con los vinculados y lo extrapolamos a los no vinculados y no clientes.</li>  
+<li><b>Modelo Extendido:</b> Modelo con target binaria, donde el target 1 si tiene contratado el producto y 0 si no lo tiene, utilizaremos diferentes algoritmos como regresión logística, árboles de decisión y elegiremos el modelo que mejor se ajuste. Como variables explicativas del modelo metemos las características de la empresa y las tenencias de productos definidos para el recomendador. Este modelo nos vale para clientes vinculados.</li>
+</ol>
+</li>
+</ol>
+<p>En el caso de que la tasa de evento sea baja, podemos o sobremuestrear o analizar el perfil de clientes contratados para poder eliminar más ceros a través de algún filtro.</p>
+<p>Al final para cada cliente/No cliente se obtiene una probabilidad diferente para cada producto, ordenados por probabilidad de mayor a menor obtenemos los productos más propensos a contratar por el cliente. Decidiremos un corte para dar sólo los más propensos en la recomendación y obtener su <b>"cesta de productos"</b>.</p>
+
+<p>Con el conocimiento de negocio se puede añadir un multiplicador que aumente o disminuya la probabilidad de los productos en función del <b>"interés"</b> desde el punto de vista de negocio, es decir en función de lo que el producto aporte al banco (margen). Se puede generar una medida de rentabilidad de cada producto (sino llegamos propuesta para mejorar modelo). Presentar las dos probabilidades finales al gestor para que desde un punto de vista comercial seleccione la que vea más fácil de gestionar.</p>
+<p>Con la probabilidad final para cada cliente y la rentabilidad por cliente BEA, ordenamos a los clientes para obtener un colectivo de clientes más propensos.</p>
+<p>Una vez que tengamos catalogados a los clientes, por vinculación y por "cesta de productos"", con estas variables y el resto de características de la empresa podemos generar un segmento que defina si es una <b>"empresa de valor"</b>, distinguiendo si es una pyme rentable, vinculada y gestionada.</p>
+
+
+```{r getProductPerClient, echo=FALSE, cache=TRUE}
+timeInicio <- Sys.time()
+#Esta consulta va a obtener para cada combinación cliente-producto existente, el número de contratos activos, la descripción del producto y la cuota cirbe del cliente.
+qprods <- paste(
+  "select ",
+     "inv.COD_PERSONA cod_persona, ",
+     "inv.cuota_cirbe_dispuesto_directo cirbe, ",
+     "inv.cod_cnae   codCNAE, ",
+     "inv.des_cnae_1 desCNAE1, ",
+     "inv.des_cnae_2 desCNAE2, ",
+     "prod.cod_producto cod_producto, ",
+     "prod.des_contra_01 des_prod, ",
+     "prod.des_contra_02 tip_prod, ",
+     "count(1) num_contratos ",
+  "from ",
+     "  da_pymes.inventario_filtrado inv",
+     ", da_pro.intervinientes_corp inc",
+     ", da_pro.saldos_cuenta_persona_fisica sdo",
+     ", da_pymes.agrupacion_contrapartidas prod",
+  "where ",
+     "     inv.cod_persona = cast(inc.cod_persctpn as int) ",
+     #" AND inv.cuota_cirbe_dispuesto_directo in (", paste(shQuote(unique(df.inv.vinc$cuota_cirbe_dispuesto_directo), type="cmd"), collapse=", "), ")",
+     " AND inc.partition_id = '20150228' ",
+     " AND sdo.partition_id = '20150228' ",
+     " AND inc.COD_IDCONTRA = sdo.COD_IDCONTRA ",
+     " AND sdo.cod_situdw = 'A' ",
+     " AND prod.cod_contra = cast(SUBSTR(sdo.COD_MASCCNTR,9,4) as int)", 
+  "group by ",
+     "  inv.COD_PERSONA",
+     ", inv.cuota_cirbe_dispuesto_directo",
+     ", inv.cod_cnae",
+     ", inv.des_cnae_1",
+     ", inv.des_cnae_2",
+     ", prod.cod_producto",
+     ", prod.des_contra_01",
+     ", prod.des_contra_02",
+  ""
+)
+#qprods
+df.cliprods <- qhive(qprods)
+#save(df.cliprods, file="df.cliprods.Rda")
+#write.table(df.cliprods, "df.cliprods.csv", sep="|", row.names=FALSE)
+#df.cliprods <- as.data.frame(read.table("df.cliprods.csv", sep="|",header=TRUE))
+#Sys.time()-timeInicio
+#Time difference of 7.163398 mins
+```
+
+
+Analizamos la variable de actividad empresarial para agrupar actividades similares y disminuir el número de categorías.
+
+```{r plotMatrizCliProds, echo=FALSE}
+
+minVinculacion <- 'e'
+
+#En df.cliprods.group vamos a analizar números de contratos en total
+#count(df.cliprods,"des_prod")
+
+df.cliprods.group <- ddply(df.cliprods,.(des_prod, tip_prod, cirbe, codcnae, descnae1, descnae2),summarize,num_contratos=sum(num_contratos))
+#head(df.cliprods.group)
+df.cliprods.group4plot <- subset(df.cliprods.group,cirbe>minVinculacion)
+df.cliprods.group4plot$cirbe <- as.factor(df.cliprods.group4plot$cirbe)
+##   des_prod tip_prod      cirbe ...             descnae1 ...             descnae2  num_contratos
+## 1  cartera   activo e. 50%-75% ...                      ...                                  28
+## 2  cartera   activo e. 50%-75% ... Acabado de edificios ... Acabado de edificios              9
+## 3  cartera   activo e. 50%-75% ...  Acabado de textiles ...  Acabado de textiles             11
+## 4  cartera   activo e. 50%-75% ... anexas al transporte ... anexas al transporte              9
+## 5  cartera   activo e. 50%-75% ...navegables interiores ...navegables interiores              8
+## 6  cartera   activo e. 50%-75% ... transporte terrestre ... transporte terrestre              2
+cliprod.plot <- ggplot(df.cliprods.group4plot, aes(x=reorder(des_prod, num_contratos), y=num_contratos, fill=df.cliprods.group4plot$cirbe))
+cliprod.plot <- cliprod.plot + geom_bar(stat="identity") #stat=identity hace que me cuente la suma de elementos en el histograma, no el conteo.
+#cliprod.plot <- cliprod.plot + scale_y_continuous(limits=c(0,125000)) #escala manual para que se vean bien las etiquetas.
+cliprod.plot <- cliprod.plot + coord_flip() #Histograma en horizontal
+#cliprod.plot <- cliprod.plot + geom_text(aes(label=num_contratos),vjust=0,hjust=-0.2, color='#094FA4', size=3) #Muestra la cifra asociada a cada barra.
+cliprod.plot <- cliprod.plot + ggtitle("Número de contratos por producto para clientes altamente vinculados")
+cliprod.plot <- cliprod.plot + ylab("Número de contratos")
+cliprod.plot <- cliprod.plot + xlab("")
+cliprod.plot <- cliprod.plot + theme(axis.text.x = element_text(size = 10, vjust = 0.5, hjust=0.5, color='#094FA4')) #Estilo de etiquetas de texto del eje x
+cliprod.plot <- cliprod.plot + theme(axis.text.y = element_text(size = 12, angle=0, color='#094FA4'))
+#cliprod.plot <- cliprod.plot + scale_fill_manual(values=c("#F6891E", "#86C82D"), name="")
+cliprod.plot <- cliprod.plot + scale_fill_manual(values=c("#88D1F2", "#009EE5", "#094FA4"), name="Grado de vinculación")
+#cliprod.plot <- cliprod.plot + scale_fill_manual(name="CNAE")
+cliprod.plot
+```
+
+El siguiente paso es crear agrupaciones de clientes en base a contrataciones de productos similares.
+```{r trataMatrizCliProds, echo=FALSE, cache=TRUE}
+timeInicio <- Sys.time()
+#En la consulta anterior hemos obtenido el número de contratos activos para cada cliente y producto.
+#En este paso, pivotamos esa matriz para dejar un solo registro por cliente, de modo que en cada línea podemos ver la cesta de productos de cada cliente.
+productos <- unique(df.cliprods$cod_producto)
+#[1] "cod_persona"   "cirbe"         "codcnae"       "descnae1"      "descnae2"      "cod_producto"  "des_prod"     
+#[8] "tip_prod"      "num_contratos"
+
+#Agrupamos por tipo de producto activo/pasivo
+df.cliprods1<-dcast(df.cliprods[,-c(3:7)], ... ~ tip_prod,value.var="num_contratos", fun.aggregate=sum, fill=0)
+#Agrupamos por código de producto
+df.cliprods2<-dcast(df.cliprods[,-c(2:5,7:8)], ... ~ cod_producto,value.var="num_contratos",fill=0)
+#Recopilamos y mezclamos los totales.
+df.cliprods.mat <- merge(df.cliprods1, df.cliprods2, by="cod_persona")
+
+#Sacamos la booleana de tenencia de productos.
+cols.codprod <- colnames(df.cliprods.mat)[colnames(df.cliprods.mat) %in% productos]
+bcols.codprod <- paste("b",cols.codprod, sep="")
+df.cliprods.mat[,bcols.codprod]  <- df.cliprods.mat[,cols.codprod] > 0
+#head(df.cliprods.mat)
+##   cod_persona      cirbe activo pasivo P002 P014 ... P035 bP002 bP014 ...bP035
+## 1          43    g. 100%      4      0    0    2 ...    2 FALSE  TRUE ... TRUE
+## 2         894    g. 100%      9      0    0    3 ...    1 FALSE  TRUE ... TRUE
+## 3        1363    g. 100%     11      0    2    0 ...    0  TRUE FALSE ...FALSE
+## 4        1616 e. 50%-75%      1      0    0    0 ...    1 FALSE FALSE ... TRUE
+## 5        2240 e. 50%-75%      5      0    0    2 ...    1 FALSE  TRUE ... TRUE
+## 6        2370 e. 50%-75%      6      0    2    3 ...    1  TRUE  TRUE ... TRUE
+#Sys.time()-timeInicio
+#Time difference of 3.983639 secs
+```
+
+```{r agrupacionesProds, echo=FALSE, cache=FALSE}
+#Vamos a ver cuáles son las cestas de productos más típicas.
+#Primero, añadimos una nueva columna llamada freq que indique cuántas veces se repite cada cesta.
+cestas <- count(df.cliprods.mat,bcols.codprod)
+cestas <- cestas[order(-cestas$freq),]
+#Añadimos un poco de información. Cuántos productos componen la cesta.
+cestas$diversidad <- cbind(rowSums(cestas[,bcols.codprod]))
+#Preparamos un texto indicando de qué productos se componen las cestas más vendidas. Para ello, verticalizamos el dataframe y nos quedamos sólo con las filas para las cuales un producto sea TRUE:
+
+cestas$cestaId <- rownames(cestas)
+##     cestaId bP001 bP002 bP003 ... bP025  freq diversidad
+## 704     272  TRUE FALSE  TRUE ... FALSE 10661          2
+## 717     284  TRUE FALSE  TRUE ... FALSE  2495          3
+## 247     122  TRUE FALSE FALSE ...  TRUE  1502          2
+## 598     177  TRUE FALSE FALSE ... FALSE  1232          2
+## 347     131  TRUE FALSE FALSE ... FALSE   901          2
+## 236     121  TRUE FALSE FALSE ... FALSE   898          1
+
+cestas.melted <- melt(cestas[,c(bcols.codprod, "cestaId")], measure.vars=bcols.codprod, id.vars="cestaId", variable.name = "cod_producto", value.name = "existe")
+cestas.melted$cod_producto <- substring(cestas.melted$cod_producto,2)
+cestas.melted <- cestas.melted[cestas.melted$existe,]
+cestas.melted <- cestas.melted[order(cestas.melted$cestaId),]
+##      cod_producto cestaId            des_prod tip_prod
+## 6570         P0004       1           hipotecas   activo
+## 4908         P0007      10          confirming   activo
+## 2049         P0001     100           depositos   pasivo
+## 2612         P0003     100           hipotecas   activo
+## 5358         P0005     100     tarjeta credito   activo
+## 6179         P0009     100 fondos de inversion   pasivo
+productos <- unique(df.cliprods[,c("cod_producto","des_prod","tip_prod")])
+cestas.melted <- merge(cestas.melted[,c(2,1)],productos)
+des.cestas <- aggregate(cestas.melted$des_prod,by=list("cestaId" = cestas.melted$cestaId),FUN=paste, collapse=" & ")
+colnames(des.cestas)[2] <- "des_cesta"
+cestas<-merge(cestas,des.cestas)
+##     cestaId b0020 b0062 b0083 ... b0974  freq diversidad                                   des_cesta
+## 704     272  TRUE FALSE  TRUE ... FALSE 10661          2                   cuenta debito & hipotecas
+## 717     284  TRUE FALSE  TRUE ... FALSE  2495          3 cuenta debito & hipotecas & tarjeta credito
+## 247     122  TRUE FALSE FALSE ...  TRUE  1502          2                   cuenta debito & hipotecas
+## 598     177  TRUE FALSE FALSE ... FALSE  1232          2                     cuenta debito & leasing
+## 347     131  TRUE FALSE FALSE ... FALSE   901          2             cuenta debito & tarjeta credito
+## 236     121  TRUE FALSE FALSE ... FALSE   898          1                               cuenta debito 
+
+cestas.plot <- ggplot(head(cestas[order(-cestas$freq),]), aes(x=reorder(des_cesta,freq),y=freq))
+cestas.plot <- cestas.plot + geom_bar(stat="identity",fill="#094FA4",width=.5) #stat=identity hace que me cuente la suma de elementos en el histograma, no el conteo.
+cestas.plot <- cestas.plot + scale_y_continuous(limits=c(0,150000)) #escala manual para que se vean bien las etiquetas.
+cestas.plot <- cestas.plot + coord_flip() #Histograma en horizontal
+cestas.plot <- cestas.plot + geom_text(aes(label=freq),vjust=0,hjust=-0.2, color='#094FA4', size=3) #Muestra la cifra asociada a cada barra.
+cestas.plot <- cestas.plot + ggtitle("Cestas más contratadas")
+cestas.plot <- cestas.plot + ylab("Número de clientes con esta cesta")
+cestas.plot <- cestas.plot + xlab("")
+cestas.plot <- cestas.plot + theme(axis.text.x = element_text(size = 8, vjust = 0.5, hjust=0.5, color='#094FA4')) #Estilo de etiquetas de texto del eje x
+cestas.plot <- cestas.plot + theme(axis.text.y = element_text(size = 10, angle=0, color='#094FA4'))
+cestas.plot
+```
+
+
+```{r addCestaToClientsBase, echo=FALSE, cache=FALSE}
+#Ahora hay que decir para cada cliente qué cesta le corresponde.
+df.cliprodscesta <- merge(df.cliprods.mat, cestas)
+corder <- c("cod_persona","cirbe",cols.codprod,bcols.codprod,"activo","pasivo","diversidad","cestaId","des_cesta")
+df.cliprodscesta <- df.cliprodscesta[,corder]
+##     cod_persona      cirbe 0300 ... 0974 b0300 ... b0974 activo pasivo diversidad cestaId                                         des_cesta
+## 143     2685525 f. 75%-99%    0 ...    2 FALSE ...  TRUE      5      1          3       9 tarjeta credito & fondos de inversion & hipotecas
+## 148       85283    g. 100%    0 ...    0 FALSE ... FALSE      4      0          3      11         confirming & confirming & tarjeta credito
+## 319     2746115    g. 100%    0 ...    2 FALSE ...  TRUE      6      0          3      16             leasing & tarjeta credito & hipotecas
+## 320      148005    g. 100%    0 ...    0 FALSE ... FALSE      2      1          3      17   leasing & tarjeta credito & fondos de inversion
+## 321      132849    g. 100%    0 ...    0 FALSE ... FALSE      4      1          3      17   leasing & tarjeta credito & fondos de inversion
+## 350       85010 f. 75%-99%    2 ...    3  TRUE ...  TRUE      6      0          3      24             cartera & tarjeta credito & hipotecas
+
+#Añadimos el código de cesta al inventario de clientes vinculados
+df.inv <- merge(df.inv, df.cliprodscesta[,c("cod_persona","cestaId",cols.codprod,bcols.codprod)])
+df.inv.vinc <- subset(df.inv,cuota_cirbe_dispuesto_directo>minVinculacion)
+
+cotaCesta <- 500
+```
+
+<h3>Situación actual de clientes y productos</h3>
+<p>La idea ahora es analizar, para clientes con una <b>vinculación mayor del 50%</b> con el banco, las cestas de productos contratadas. De ese modo, podremos establecer agrupaciones de clientes en función de sus preferencias. Una vez tengamos estas agrupaciones, la idea es lanzar un método de clustering para conocer qué características comunes tienen los clientes que contratan los mismos productos.</p>
+<p>Con dicho grado de vinculación, de los clientes ya filtrados, tenemos <b>`r format(nrow(df.inv.vinc),decimal.mark=",",big.mark=".")`</b> clientes.</p>
+
+
+Existen un total de <b>`r max(cestas$cestaId)` cestas diferentes</b>, de las cuales, <b>`r nrow(cestas[cestas$freq>cotaCesta,])`</b> las comparten más de 500 clientes.
+
+El siguiente mapa de calor representa el porcentaje de clientes de cada sector que poseen cada producto:
+
+
+
+```{r Save temporary results, echo=FALSE, eval=FALSE}
+
+#write.table(df.inv, "df.invConCesta.csv", sep="|", row.names=FALSE)
+#df.inv <- as.data.frame(read.table("df.invConCesta.csv", sep="|",header=TRUE))
+#write.table(df.inv.vinc, "df.inv.vincConCesta.csv", sep="|", row.names=FALSE)
+#df.inv.vinc <- as.data.frame(read.table("df.inv.vincConCesta.csv", sep="|",header=TRUE))
+
+save(df.inv, file="df.inv.concesta.Rda")
+load("df.inv.concesta.Rda")
+
+save(df.inv.vinc, file="df.inv.vinc.concesta.Rda")
+load("df.inv.vinc.concesta.Rda")
+
+
+```
+
+
+```{r heatmap, echo=FALSE, cache=TRUE, fig.width=15, fig.height=10}
+df.heatmap <- melt(df.inv[,c("des_cnae_1",bcols.codprod)], measure.vars=bcols.codprod, id.vars="des_cnae_1", variable.name = "cod_producto", value.name = "existe")
+df.clientesXcnae = count(df.inv,"des_cnae_1")
+df.heatmap  <- ddply(df.heatmap,colnames(df.heatmap),summarize,num_tenencias=sum(existe))
+df.heatmap <- merge(df.heatmap,df.clientesXcnae)
+df.heatmap$rescalated  <- df.heatmap$num_tenencias/df.heatmap$freq
+df.heatmap$cod_producto <- substring(df.heatmap$cod_producto,2)
+df.heatmap <- merge(df.heatmap,productos[,c(1:2)],by="cod_producto")
+df.heatmap <- subset(df.heatmap, des_cnae_1 != "" & existe)
+#df.heatmap[df.heatmap$cod_producto=="P021" & df.heatmap$des_cnae_1== "Transporte y almacenamiento",]
+#df.heatmap <- subset(df.heatmap,!(cod_producto %in% c("P014","P035")))
+
+
+heatmap <- ggplot(df.heatmap, aes(des_prod,substring(des_cnae_1,1,60))) 
+heatmap <- heatmap + geom_tile(aes(fill = as.numeric(rescalated)), colour = "white")
+heatmap <- heatmap + scale_fill_gradient(low = "#ffffff", high = "#C8175E", name="")
+heatmap <- heatmap + theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust=1))
+heatmap <- heatmap + geom_text(aes(label=round(as.numeric(rescalated)*100,2)),vjust=0.5,hjust=0.5, color='#094FA4', size=3) #Muestra la cifra asociada a cada barra.
+heatmap <- heatmap + ylab("CNAE") + xlab("") + ggtitle("Ratio tenencias por producto y sector (todos clientes)")
+heatmap <- heatmap + theme(panel.background = element_blank())
+heatmap
+
+#Lo mismo, pero solo para los vinculados
+df.heatmap <- melt(df.inv.vinc[,c("des_cnae_1",bcols.codprod)], measure.vars=bcols.codprod, id.vars="des_cnae_1", variable.name = "cod_producto", value.name = "existe")
+df.clientesXcnae = count(df.inv.vinc,"des_cnae_1")
+df.heatmap  <- ddply(df.heatmap,colnames(df.heatmap),summarize,num_tenencias=sum(existe))
+df.heatmap <- merge(df.heatmap,df.clientesXcnae)
+df.heatmap$rescalated  <- df.heatmap$num_tenencias/df.heatmap$freq
+df.heatmap$cod_producto <- substring(df.heatmap$cod_producto,2)
+df.heatmap <- merge(df.heatmap,productos[,c(1:2)],by="cod_producto")
+df.heatmap <- subset(df.heatmap, des_cnae_1 != "" & existe)
+#df.heatmap[df.heatmap$cod_producto=="P021" & df.heatmap$des_cnae_1== "Transporte y almacenamiento",]
+#df.heatmap <- subset(df.heatmap,!(cod_producto %in% c("P014","P035")))
+
+
+heatmap <- ggplot(df.heatmap, aes(des_prod,substring(des_cnae_1,1,60))) 
+heatmap <- heatmap + geom_tile(aes(fill = as.numeric(rescalated)), colour = "white")
+heatmap <- heatmap + scale_fill_gradient(low = "#ffffff", high = "#C8175E", name="")
+heatmap <- heatmap + theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust=1))
+heatmap <- heatmap + geom_text(aes(label=round(as.numeric(rescalated)*100,2)),vjust=0.5,hjust=0.5, color='#094FA4', size=3) #Muestra la cifra asociada a cada barra.
+heatmap <- heatmap + ylab("CNAE") + xlab("") + ggtitle("Ratio tenencias por producto y sector (alta vinculación)")
+heatmap <- heatmap + theme(panel.background = element_blank())
+heatmap
+```
+

@@ -1,0 +1,792 @@
+---
+title: 'Pymes: Modelo de Valor para Clientes estimado a partir de balances'
+author: "BBVA D&A - Customer Solutions - César de Pablo"
+date: "13/01/2016"
+output: html_document
+---
+========================================================
+
+
+```{r, echo=FALSE}
+# This is the first mandatory section.
+
+title     <- '[Pymes] Modelo de Valor para Clientes a partir de datos de balance'
+keywords  <- 'pymes, sme, value models, valor, balances, P&L'
+```
+
+
+```{r load libraries, echo=FALSE, warning=FALSE, message=FALSE}
+
+library(DBI)
+library(rJava)
+options(warn=-1, width = 250)
+source('~/bda_clarity/tools/warehouse_basics.R')
+source('~/bda_clarity/tools/multiplot.R') ;
+
+source('~/bda_clarity/script_incubator/non_clarity_logic/PymesAnalytics/Pymes_TablonUtils.R')
+
+
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+
+library(knitr)
+knitr::opts_chunk$set(cache=FALSE, tidy=TRUE, eval=TRUE, echo=FALSE, fig.width = 12, fig.height = 8 )
+
+```
+
+## Objetivo
+
+El objetivo de este análisis es explorar diferentes parámetros relacionadas con el valor de la empresas clientes. 
+
+Valor se ha definido en el proyecto como el margen que dejaría un cliente si fuéramos su único banco. 
+
+
+   1. El valor se va a representar como una variable ordinal (1 a 5 estrellas). En primer lugar se explora cual sería el valor adecuado para cada uno de los cortes con el fin de representar o validar diferentes formas de plantear el problema (regresion vs regresion ordinal vs clasificación). Como referencia se usa el margen anual que los clientes dejan en el banco.    
+
+   2. Se exploran diferentes variables de margen e importe dispuesto (banco y sistema financiero) proporcionadas por CIRBE así como la cuota CIRBE (dipsuesto banco/dispuesto sistema) para centrar una propuesta de modelo de valor. 
+   
+      
+
+Para el margen se han utilizado los datos a fecha de Diciembre de 2014.
+Para los balances se han utilizado los que corresponden con Diciembre de 2014. Para las empresas de las que no se dispone balance de 2014, se usa la de 2013. 
+Para el cálculo de los incrementos/decrementos de cuentas se usa el año anterior. 
+
+
+Se ha realizado un análisis exploratorio de los datos y como se comporta el modelo de valor para no clientes en el análisis *Pymes_Valor_Cliente.Rmd*
+
+### Estrategia para el modelo de valor de clientes 
+     
+     1. Clientes I,R,B y Nocl    => Modelo de valor no clientes
+     2. Clientes con cuota CIRBE => Modelo basado en CIRBE
+     3. Clientes sin CIRBE
+
+         3.1 Transaccional con endeudamiento financiero => Modelo basado en CIRBE
+         3.2 Transaccional sin endeudamiento financiero => probar a) Modelo basado en CIRBE  b) MOdelo basado en % Trans 
+         3.3 Transaccional sin EEFF => probar a) Modelo basado en CIRBE  b) MOdelo basado en % Trans 
+
+
+### 1. Carga de datos
+ 
+ - Seleccionamos el tablon de datos con todas las características (*tablon_features*)
+ - Para modelar nos quedamos con el subconjunto de los que tienen datos de balance
+
+```{r Carga de datos, cache=FALSE}
+
+
+df.tablon_valor_balance <- load_tablon_clientes()
+ 
+
+```
+
+
+### 2. Exploracion de los clientes
+
+```{r}
+num_clientes <- nrow(df.tablon_valor_balance)
+
+```
+
+Partimos de los clientes que tienen informacion de balances y tambien de margen. Tenemos `r nrow(df.tablon_valor_balance)`
+
+```{r}
+
+summary(df.tablon_valor_balance$margen_a)
+#    Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
+#-85030.0     31.1    238.5   1834.0   1627.0 600900.0 
+
+# Filtramos a un dataset más manejable 
+df.valor <- df.tablon_valor_balance %>%
+            dplyr::select(c(codigo, nif, margen_a, cod_segmsubo, cuota_cirbe, cirbe_sistema, starts_with("cuenta_") ))
+
+
+```
+
+
+## ¿Cual es la distribucion del margen? 
+
+Vamos a ver cual es la distribucion del margen entre los clientes seleccionados. 
+
+```{r}
+
+summary(df.valor$margen_a)
+#    Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
+# -85030.0     31.1    238.5   1834.0   1627.0 600900.0 
+
+```
+
+Lo primero que nos llama la atención es que hay clientes con un margen negativo o cero. Visualizamos la proporción de clientes de cada tipo: 
+
+```{r Volumen de los clientes por el margen del signo}
+
+sign_margen <- factor(sign(df.valor$margen_a)) 
+summary(sign_margen)
+
+
+```
+
+
+## ¿Cuales serían los puntos de corte adecuados para el modelo de valor?
+
+La representacion gráfica del modelo de valor se va a realizar usando una escala ordinal (e.g 5 estrellas) 
+
+Queremos averiguar cuales serían los puntos de corte que podrían usarse y en particular si ajsutar un modelo categorico ordinal podría dar mejores resultados.  
+
+Exploramos la distribucion de los clientes que presentan un margen positivo. 
+
+```{r Plot margen de clientes}
+
+df.valor %>%
+  filter(margen_a > 0 ) %>%
+#  sample_frac( sample.size, replace = FALSE ) %>%
+  ggplot() + 
+  geom_bar(aes(x=margen_a)) + 
+  scale_x_log10() +
+  ggtitle("Distribucion para los clientes con margen positivo")
+
+
+```
+
+Exploramos los clientes que presentan un margen negativo. En este caso la distribución es algo más anoómala. 
+
+
+```{r}
+
+df.valor %>%
+  filter(margen_a < 0 ) %>%
+#  sample_frac( sample.size, replace = FALSE ) %>%
+  ggplot() + 
+  geom_bar(aes(x=-margen_a)) + 
+  scale_x_log10("Distribucion para los clientes con margen negativo")
+
+
+```
+
+
+```{r Tiles para los clientes con margen positivo}
+
+n.tiles = 4
+
+df.valor_positivo <- df.valor %>%
+  filter(margen_a > 0) %>%
+  mutate(log_margen_a = log10(margen_a + 1), 
+         tile_margen_a = ntile(log_margen_a, n.tiles))
+
+df.valor_tiles <- df.valor %>%
+  filter(margen_a > 0) %>%
+  select(nif, margen_a) %>%
+  mutate(tile_margen_a = ntile(log10(margen_a + 1), n.tiles)) 
+
+df.tiles <- df.valor_tiles %>%
+  dplyr::group_by(tile_margen_a) %>%
+  dplyr::summarise(
+    min = min(margen_a),
+    max = max(margen_a),
+    avg = mean(margen_a),
+    median = median(margen_a),
+    sd = sd(margen_a))
+
+
+df.tiles
+
+#Source: local data frame [4 x 6]
+#
+#  tile_margen_a     min       max        avg   median         sd
+#1             1    0.01     94.61   43.00073   40.300   25.13733
+#2             2   94.61    492.30  242.88818  218.420  112.46010
+#3             3  492.34   2249.87 1174.47318 1079.120  498.45199
+#4             4 2249.89 600912.02 7550.98733 4955.135 8862.32963
+
+```
+
+0 : margen <= 0 
+1 : 0 < margen < 100 
+2 : 100 < margen < 500 
+3 : 500 < margen < 2500
+4 : margen > 2500
+
+```{r}
+
+df.valor_tiles %>% 
+  ggplot() + 
+  geom_boxplot(aes(y=margen_a, x = factor(tile_margen_a))) +
+  scale_y_log10()
+
+
+df.valor_tiles %>% 
+  ggplot() + 
+  geom_bar(aes(x=margen_a, fill = factor(tile_margen_a)), binwidth = 0.05) +
+  scale_x_log10()
+
+
+```
+
+## ¿Cual es la distribucion del valor entre los clientes más vinculados? ¿Sirven los mismos cortes?
+
+
+```{r Plot cirbe histogram}
+
+qplot(df.tablon_valor_balance$cuota_cirbe)
+
+```
+
+La distribucion de la CIRBE entre los clientes del banco tiene varios puntos anómalos: 
+  - CIRBE = 0 = seguramente se trata de los clientes de los que no tenemos 6000 euros en activo, por tanto no tenemos CIRBE 
+  - CIRBE = 1 = inusualmente alta. Puesto que los vamos a usar para entrenar tal vez sea interesante validar el modelo tb. sin los que tienen CIRBE exactamente igual a 
+  
+  
+Seleccionamos los clientes con una cuota cirbe alta para ver la distribucion de los margenes.
+
+  
+```{r}
+
+n.cuota = 10 # Numero de tramos en la variable cuota
+
+# Filtramos a un dataset más manejable 
+df.cirbe_valor <- df.tablon_valor_balance %>%
+                  filter(!is.na(cuota_cirbe)) %>%
+                  select(c(codigo, nif, margen_a, cod_segmsubo, cirbe_sistema, cuota_cirbe)) %>%
+                  mutate(
+                    cuota_cirbe_q = round(n.cuota * cuota_cirbe)
+                    )
+                  
+
+head(df.cirbe_valor)
+
+qplot(df.cirbe_valor$cuota_cirbe_q)
+
+nrow(df.cirbe_valor)
+
+
+```
+
+
+Nos quedamos con la mitad de los clientes al filtrar por CIRBE informada!!
+
+Vemos valores medios de su valor:
+
+```{r}
+
+summary(df.valor$margen_a)
+summary(df.cirbe_valor$margen_a)
+
+sign_margen <- factor(sign(df.cirbe_valor$margen_a)) 
+summary(sign_margen)
+
+df.cirbe_valor %>%
+  ggplot(aes(x=factor(sign(margen_a)))) + 
+  geom_bar() + 
+  geom_text(aes(y = (..count..),
+                label = scales::percent((..count..)/sum(..count..))), 
+                 stat="bin",
+                 colour="darkblue", vjust=-1) +
+  ggtitle("Proporcion de clientes por signo del margen") 
+
+
+
+```
+
+Parece que si tenemos la CIRBE informada en general tenemos más valor. Hasta el doble? 
+Parece que los porcentajes de empresas con márgen negativo y cero son bastante menores. 
+
+
+```{r}
+
+plot.valor <- df.valor %>%
+  filter(margen_a > 0 ) %>%
+#  sample_frac( sample.size, replace = FALSE ) %>%
+  ggplot() + 
+  geom_bar(aes(x=margen_a)) + 
+  scale_x_log10() +
+  ggtitle("Distribucion para los clientes con margen positivo")
+
+plot.valor_cirbe<- df.cirbe_valor %>%
+  filter(margen_a > 0 ) %>%
+#  sample_frac( sample.size, replace = FALSE ) %>%
+  ggplot() + 
+  geom_bar(aes(x=margen_a)) + 
+  scale_x_log10() +
+  ggtitle("Distribucion para los clientes con CIRBE y con margen positivo")
+
+
+plot.valor_na_cirbe <-  
+  df.tablon_valor_balance %>%
+  filter(is.na(cuota_cirbe)) %>%
+  filter(margen_a > 0 ) %>%  
+  select(c(codigo, nif, margen_a, cirbe_sistema, cuota_cirbe)) %>% 
+  ggplot() + 
+  geom_bar(aes(x=margen_a)) + 
+  scale_x_log10() +
+  ggtitle("Distribucion para los clientes sin CIRBE informada y con margen positivo")
+
+
+multiplot(plot.valor, plot.valor_cirbe, plot.valor_na_cirbe)
+
+
+```
+
+Vemos la distribucion de valores para las empresas con margen negativo - para completar la vision. 
+
+
+```{r}
+
+
+plot.no_valor <- df.valor %>%
+  filter(margen_a <= 0 ) %>%
+  ggplot() + 
+  geom_bar(aes(x=-margen_a)) + 
+  scale_x_log10() +
+  ggtitle("Distribucion para los clientes con margen negativo")
+
+
+plot.no_valor_cirbe<- df.cirbe_valor %>%
+  filter(margen_a < 0 ) %>% 
+  ggplot() + 
+  geom_bar(aes(x=-margen_a)) + 
+  scale_x_log10() +
+  ggtitle("Distribucion para los clientes con CIRBE y con margen positivo")
+
+
+plot.no_valor_na_cirbe <- 
+  df.tablon_valor_balance %>%
+  filter(is.na(cuota_cirbe)) %>%
+  filter(margen_a < 0 ) %>%  
+  select(c(codigo, nif, margen_a, cirbe_sistema, cuota_cirbe)) %>%
+  ggplot() + 
+  geom_bar(aes(x=-margen_a)) + 
+  scale_x_log10() +
+  ggtitle("Distribucion para los clientes sin CIRBE informada y con margen positivo")
+
+
+multiplot(plot.no_valor, plot.no_valor_cirbe, plot.no_valor_na_cirbe)
+
+
+```
+
+[TODO] Poner esto en la misma escala
+
+
+```{r}
+
+df.cirbe_valor_tiles <- df.cirbe_valor %>%
+  filter(margen_a > 0) %>%
+  select(nif, margen_a, cuota_cirbe, cod_segmsubo, cuota_cirbe_q, cirbe_sistema ) %>%
+  mutate(tile_margen_a = ntile(log10(margen_a + 1), n.tiles)) 
+
+df.cirbe_tiles <- df.cirbe_valor_tiles %>%
+  dplyr::group_by(tile_margen_a) %>%
+  dplyr::summarise(
+    min = min(margen_a),
+    max = max(margen_a),
+    avg = mean(margen_a),
+    median = median(margen_a),
+    sd = sd(margen_a))
+
+df.cirbe_tiles
+
+# Source: local data frame [4 x 6]
+# 
+#   tile_margen_a     min       max        avg   median          sd
+# 1             1    0.01    356.88   153.5710  139.025    98.10031
+# 2             2  356.97   1330.64   774.0226  739.795   280.67676
+# 3             3 1330.83   3788.20  2342.6900 2237.890   695.92152
+# 4             4 3788.22 600912.02 10053.5041 7088.160 10051.21329
+
+
+# Source: local data frame [5 x 6]
+# 
+#   tile_margen_a     min       max        avg   median          sd
+# 1             1    0.01    253.64   116.2380  110.530    69.51901
+# 2             2  253.68    840.28   507.4151  486.240   169.42731
+# 3             3  840.31   2020.28  1363.5521 1330.735   338.72247
+# 4             4 2020.34   4743.40  3160.0300 3051.030   773.61102
+# 5             5 4743.51 600912.02 11507.2720 8376.460 10756.10617
+ 
+
+
+```
+
+
+
+```{r}
+
+df.cirbe_valor_tiles_vinculados <- df.cirbe_valor %>%
+  filter(margen_a > 0) %>%
+  filter(margen_a < 100000) %>%  
+  filter(cuota_cirbe_q >= 7 ) %>%  
+  filter(cuota_cirbe_q < 10 ) %>%
+  select(nif, margen_a, cuota_cirbe, cod_segmsubo, cuota_cirbe_q, cirbe_sistema ) %>%
+  mutate(tile_margen_a = ntile(log10(margen_a + 1), n.tiles)) 
+
+nrow(df.cirbe_valor_tiles_vinculados)
+
+
+df.cirbe_tiles_vinculados <- df.cirbe_valor_tiles_vinculados %>%
+  dplyr::group_by(tile_margen_a) %>%
+  dplyr::summarise(
+    min = min(margen_a),
+    max = max(margen_a),
+    avg = mean(margen_a),
+    median = median(margen_a),
+    sd = sd(margen_a))
+
+df.cirbe_tiles_vinculados
+ 
+```
+
+
+
+
+0 : margen <= 0 
+1 : 0 < margen < 100 / 350 / 1600
+2 : 100 < margen < 500 /1350 / 4000 
+3 : 500 < margen < 2500 / 3750 / 8000  
+4 : margen > 2500 / 3750 / 8000 
+
+```{r}
+
+plot.tiles_all <- df.valor_tiles %>% 
+  ggplot() + 
+  geom_bar(aes(x=margen_a, fill = factor(tile_margen_a)), binwidth = 0.05) +
+  scale_x_log10()
+
+
+plot.tiles_cirbe <- df.cirbe_valor_tiles %>% 
+  ggplot() + 
+  geom_bar(aes(x=margen_a, fill = factor(tile_margen_a)), binwidth = 0.05) +
+  scale_x_log10()
+
+multiplot(plot.tiles_all, plot.tiles_cirbe)
+
+```
+
+
+## ¿Cual es la distribucion del margen en funcion del segmento ? - para los vinculados
+
+
+
+```{r}
+# 
+df.segmento_35 <- df.cirbe_valor %>%
+  filter(margen_a > 0) %>%
+  filter(margen_a < 100000) %>%
+  filter(cod_segmsubo == "35") %>%
+  filter(cuota_cirbe_q >= 7 ) %>%  
+#  filter(cuota_cirbe_q < 10 ) %>%
+  select(nif, margen_a, cuota_cirbe, cod_segmsubo, cuota_cirbe_q, cirbe_sistema ) %>%
+  mutate(tile_margen_a = ntile(log10(margen_a + 1), n.tiles)) 
+
+nrow(df.segmento_35)
+
+
+df.segmento_35_tiles <- df.segmento_35 %>%
+  dplyr::group_by(tile_margen_a) %>%
+  dplyr::summarise(
+    min = min(margen_a),
+    max = max(margen_a),
+    avg = mean(margen_a),
+    median = median(margen_a),
+    sd = sd(margen_a))
+
+df.segmento_35_tiles
+
+
+
+```
+
+
+
+```{r}
+
+
+df.segmento_36 <- df.cirbe_valor %>%
+  filter(margen_a > 0) %>%
+  filter(margen_a < 100000) %>%
+  filter(cod_segmsubo == "36") %>%
+  filter(cuota_cirbe_q >= 7 ) %>%  
+#  filter(cuota_cirbe_q < 10 ) %>%
+  select(nif, margen_a, cuota_cirbe, cod_segmsubo, cuota_cirbe_q, cirbe_sistema ) %>%
+  mutate(tile_margen_a = ntile(log10(margen_a + 1), n.tiles)) 
+
+nrow(df.segmento_36)
+
+
+df.segmento_36_tiles <- df.segmento_36 %>%
+  dplyr::group_by(tile_margen_a) %>%
+  dplyr::summarise(
+    min = min(margen_a),
+    max = max(margen_a),
+    avg = mean(margen_a),
+    median = median(margen_a),
+    sd = sd(margen_a))
+
+df.segmento_36_tiles
+
+# Source: local data frame [4 x 6]
+# 
+#   tile_margen_a     min      max       avg   median         sd
+# 1             1    0.01   266.38  123.1250  117.190   74.80672
+# 2             2  266.40   788.10  495.7313  481.305  149.75422
+# 3             3  788.10  2019.68 1301.3513 1248.910  351.76482
+# 4             4 2019.76 96806.39 5104.4436 3673.965 4470.89728
+
+
+```
+
+
+
+
+
+
+## ¿Cuál es la distribucion del margen en función de la cuota CIRBE? 
+
+Evaluamos la primera idea para obtener el valor a partir de CIRBE: 
+  
+  $Valor = margen / Cuota_{CIRBE}$  
+  
+```{r}
+
+df.cirbe_valor_tiles %>%
+  sample_n(10000) %>%
+  ggplot(aes(x=factor(cuota_cirbe_q), y=margen_a)) +
+  geom_boxplot(size = .75) +
+  geom_jitter(alpha = .5) +
+  scale_y_log10() +
+  xlab("Cuota CIRBE") +
+  ylab("log(margen)") 
+
+
+```
+
+
+
+```{r}
+
+summary(df.cirbe_valor_tiles$margen_a)
+
+
+plot.margen_vs_cuota <- 
+  df.cirbe_valor_tiles %>%
+  filter(cuota_cirbe >= 0.1 & cuota_cirbe <= 0.9 ) %>%  
+  ggplot(aes(x=cuota_cirbe, y=margen_a )) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(method = "lm", color = "green") +
+  geom_smooth() +
+  coord_cartesian(xlim = c(0.1, 0.9), ylim = c(10^3,10^7)) +
+  geom_hline(y=2000, color = "red") +
+  scale_y_log10() +
+  xlab("Cuota CIRBE") +
+  ylab("log(margen)") 
+
+plot.margen_vs_cuota_v2 <- 
+  df.cirbe_valor_tiles %>%
+  filter(cuota_cirbe >= 0.1 & cuota_cirbe <= 0.9 ) %>%  
+  ggplot(aes(x=cuota_cirbe, y=margen_a )) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(method = "lm", color = "green") +
+  geom_smooth() +
+  coord_cartesian(xlim = c(0.1, 0.9), ylim = c(10^3,10^5)) +
+  geom_hline(y=2000, color = "red") +
+  scale_y_log10() +
+  xlab("Cuota CIRBE") +
+  ylab("log(margen)") +
+  ggtitle("margen vs cuota (zoom)")
+
+
+plot.valor_vs_cuota <- 
+  df.cirbe_valor_tiles %>%
+  filter(cuota_cirbe >= 0.1 & cuota_cirbe <= 0.9 ) %>%  
+  ggplot(aes(x=cuota_cirbe, y=margen_a/pmax(cuota_cirbe) )) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(method = "lm", color = "green") +
+  geom_smooth() +
+  coord_cartesian(xlim = c(0.1, 0.9), ylim = c(10^3,10^7)) +
+  geom_hline(y=2000, color = "red") +
+  scale_y_log10() +
+  xlab("Cuota CIRBE") +
+  ylab("log(margen/cuota)") 
+
+
+plot.dispuesto_vs_cuota <-
+  df.cirbe_valor_tiles %>%
+  filter(cuota_cirbe >= 0.1 & cuota_cirbe <= 0.9 ) %>%
+  ggplot(aes(x=cuota_cirbe, y=cirbe_sistema) ) +  
+  geom_point(alpha = 0.1) + 
+  geom_smooth(method = "lm", color = "green") +
+  geom_smooth() +
+  coord_cartesian(xlim = c(0.1, 0.9), ylim = c(10^3,10^7)) +
+  geom_hline(y=2000, color = "red") +
+  scale_y_log10() +
+  xlab("Cuota CIRBE") +
+  ylab("CIRBE dispuesta directa") 
+
+
+multiplot(plot.margen_vs_cuota, plot.margen_vs_cuota_v2, plot.valor_vs_cuota, plot.dispuesto_vs_cuota, cols = 2)
+
+
+```
+
+- El modelo no parece adecuado, sobreestima el valor de los clientes poco vinculados. Lo que se esperaría es que la media del valor fuese más o menos constante en función de la cuota. 
+- El valor del importe dispuesto directo disminuye con la cuota CIRBE!! O al menos parece que los clientes menos vinculados tieben mayor importe en el sistema. 
+
+## ¿Cuál es la relacion entre el importe dispuesto en el sistema bacario y el margen? ¿Y el valor?
+
+
+```{r}
+
+
+plot.margen_vs_dispuesto <-
+  df.cirbe_valor_tiles %>%
+  filter(cuota_cirbe >= 0.1 & cuota_cirbe <= 0.9 ) %>%
+  ggplot(aes(x=cirbe_sistema, y=margen_a) ) +  
+  geom_point(alpha = 0.1) +
+  scale_x_log10() +
+  scale_y_log10() +
+  coord_cartesian(xlim=c(100,10^7), ylim=c(100,10^7) ) +
+  geom_smooth(method = "lm", color = "green") +
+  geom_abline(slope = 1) +
+  xlab("CIRBE dispuesto directa") +
+  ylab("margen") 
+
+
+plot.valor_vs_dispuesto <-
+  df.cirbe_valor_tiles %>%
+  filter(cuota_cirbe >= 0.1 & cuota_cirbe <= 0.9 ) %>%
+  ggplot(aes(x=cirbe_sistema, y=margen_a/pmax(cuota_cirbe)) ) +  
+  geom_point(alpha = 0.1) +
+  scale_x_log10() +
+  scale_y_log10() +
+  coord_cartesian(xlim=c(100,10^7), ylim=c(100,10^7) ) +
+  geom_smooth(method = "lm", color = "green") +
+  geom_abline(slope = 1) +
+  xlab("CIRBE dispuesto directa") +
+  ylab("valor") 
+
+
+multiplot(plot.margen_vs_dispuesto, plot.valor_vs_dispuesto, cols = 2)
+
+```
+
+- Como podíamos esperar en ambos casos aumenta   
+- Hay varias anomalías que hacen que sería necesario filtrar para ajustar mejor los modelos lineales, en particular las empresas con un margen más bajo y los valores anómalos de CIRBE. 
+
+### ¿Y como varían las estimaciones en función de la cuota? 
+
+Ajustamos un modelo lineal para cada grupo por separado. 
+
+```{r}
+
+
+df.cirbe_valor_tiles %>%
+  filter(cuota_cirbe >= 0.1 & cuota_cirbe <= 0.9 ) %>%
+  ggplot(aes(x=cirbe_sistema, y=margen_a, fill = factor(cuota_cirbe_q)) ) +  
+  #  geom_point(alpha = 0.1) +
+  scale_x_log10() +
+  scale_y_log10() +
+  coord_cartesian(xlim=c(100,10^7), ylim=c(100,10^5) ) +
+  geom_smooth(method = "lm") +
+  #  geom_abline(slope = 1) +
+  xlab("CIRBE dispuesto directa") +
+  ylab("margen") 
+
+
+
+```
+
+
+## ¿Cómo varía la rentabilidad en funcion de la cuota? 
+
+Asumiendo que nos quedásemos con el 100% de negocio del cliente, y que eso es lo que representa lo dispuesto directo en CIRBE, otro de los modelos sencillo sería ajustar la rentabilidad de cada cliente, en este caso quedaría:
+  
+  $Valor = Rentabilidad * Importe dispuesto CIRBE$
+  
+  Vemos en particular como se comporta esta "rentabilidad" en función de la cuota CIRBE. Aproximamos la rentabilidad como 
+
+$Rentabilidad = \frac{Margen}{Importe dispuesto en BBVA} $
+
+```{r}
+
+df.cirbe_valor_tiles %>%
+  filter(cuota_cirbe >= 0.1 & cuota_cirbe <= 0.9 ) %>%
+  filter(cirbe_sistema > 6000 ) %>%
+  ggplot(aes(x=cirbe_sistema, y=margen_a/(cuota_cirbe*cirbe_sistema), color = factor(cuota_cirbe_q), fill = factor(cuota_cirbe_q)) ) +  
+  geom_smooth(se = FALSE, level = 0.75) +
+  coord_cartesian(ylim = c(0,0.25)) +
+  xlim(5 * 10^4, 10^6) +
+  xlab("CIRBE dispuesto directa") +
+  ylab("Margen/dispuesto banco") +
+  ggtitle("\"ROA\" medio en funcion de cuota y dispuesto en el sistema")
+
+
+```
+
+- La rentabilidad (%) aproximada varía en función de la cuota CIRBE, siendo más alta para los menos vinculados
+- A medida que aumenta la cuota converge
+- Para valores de dispuest relativamente pequeños (<50.000) los valores son anormalmente altos
+- [TODO] Valores anómalos
+
+
+Mostramos la misma idea, pero en este caso con la distribucion de los datos sobreimpuesta y tambien los intervalos de confianza. 
+
+```{r, fig.width=20, fig.height=20}
+
+df.cirbe_valor_tiles %>%
+  filter(cuota_cirbe >= 0.1 & cuota_cirbe <= 0.9 ) %>%
+  filter(cirbe_sistema > 6000 ) %>%
+  ggplot(aes(x=cirbe_sistema, y=margen_a/(cuota_cirbe*cirbe_sistema), fill = factor(cuota_cirbe_q)) ) +  
+  geom_point(alpha = 0.1) +
+  geom_smooth() +
+  xlim(5 * 10^4, 10^6) +
+  coord_cartesian(ylim = c(0,0.25)) +
+  facet_wrap(~ cuota_cirbe_q ) +
+  xlab("CIRBE dispuesto directa") +
+  ylab("\"ROA\" medio") 
+
+```
+
+
+## Distribuciones para los deciles de cuota
+
+```{r}
+
+sample_size = 10000 
+
+df.cirbe_valor_tiles %>%
+  sample_n(sample_size) %>%
+  ggplot(aes(x=factor(cuota_cirbe_q), y=margen_a)) +
+  geom_boxplot(size = .75) +
+  geom_jitter(alpha = .1) +
+  scale_y_log10() +
+  coord_cartesian(ylim = c(100,10^5))
+
+df.cirbe_valor_tiles %>%
+  sample_n(sample_size) %>%
+  ggplot(aes(x=factor(cuota_cirbe_q), y=cirbe_sistema)) +
+  geom_boxplot(size = .75) +
+  geom_jitter(alpha = .1) +
+  scale_y_log10() +
+  coord_cartesian(ylim = c(100,10^8))
+
+df.cirbe_valor_tiles %>%
+  sample_n(sample_size) %>%
+  ggplot(aes(x=factor(cuota_cirbe_q), y=margen_a/(cuota_cirbe*cirbe_sistema))) +
+  geom_boxplot(size = .75) +
+  geom_jitter(alpha = .1) +
+  coord_cartesian(ylim = c(0,1)) +
+  ggtitle(" \"ROA\" medio por decil de cuota")
+
+
+```
+
+
+
+
+
+## 5. Conclusiones
+
+
+#### Posibles mejoras 
+
+
+
+

@@ -1,0 +1,666 @@
+---
+output:
+  html_document:
+    self_contained: no
+    theme: cerulean
+---
+
+---
+title: "[Pymes]: Accion Comercial Diciembre - No Clientes - 2015"
+author: "BBVA D&A - Cutomer Analytics - César de Pablo, María Hernández"
+date: "01/12/2015"
+output: html_document
+---
+
+```{r setup, echo = FALSE, eval=TRUE}
+# This is the first mandatory section.
+
+title     <- '[Pymes]: Accion Comercial - No Clientes - Diciembre 2015'
+keywords  <- 'pymes, sme, accion comercial, campaign'  
+
+```
+
+```{r, echo=FALSE, eval=TRUE,results='hide'}
+library(knitr)
+#knitr::opts_chunk$set(cache=FALSE, tidy=TRUE, eval=TRUE, echo=TRUE )
+```
+
+```{r librerias_y_funciones, echo=FALSE, message=FALSE, warning=FALSE, eval=TRUE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(reshape))
+suppressMessages(library(plyr))
+library(dplyr)
+
+options(warn=-1, scipen=3, width=200)
+source('~/bda_clarity/tools/warehouse_basics.R') ;
+source('~/bda_clarity/tools/write.hive.R') ;
+
+#.jinit()
+
+```
+
+```{r dependencies, echo = FALSE, results='hide'}
+
+clarity.use_table(DEPENDENCY_OTHER_TABLES, 'da_pymes.colectivo_201512', '*', sqname = 'colectivo')
+clarity.use_table(DEPENDENCY_OTHER_TABLES, 'da_pymes.ncldatos', '*', sqname = 'confirming')
+
+```
+
+### 1. Motivación de negocio
+
+Segmento PYMES va a realizar una **campaña entre NO CLIENTES** y quiere identificar clientes de valor y propension a diferentes productos. Las campañas para no clientes se realizan actualmente con una periodicidad cuatrimestral. En la actualidad se está trabajando en el paso a una gestión comercial, de manera continua de los clientes. 
+
+En el ámbito de este proyecto se pretenden definir fuentes de datos y modelos que permitan identificar potenciales clientes de valor y adaptar la oferta comercial que ofrecen los gestores en oficina a partir de un conocimiento más detallado. 
+
+
+Estos son los modelos disponibles a fecha 15 de Diciembre de 2015 que se han utilizado:
+
+  - **Modelo de valor** : Estimación del margen en el banco de los clientes a partir de los datos de balance.
+     
+      
+  - **Modelos de propension a tenencia de productos** : usando datos de empleados, CNAE, balances, generalizando a partir de nuestros clientes
+
+      - [**Leasing**](Pymes_TrainLeasingModel_v2.Rmd) (financiacion a largo).            
+      - [**Cartera**](Pymes_TrainCarteraModel_v2.Rmd) (financiacion a corto).
+      
+  - [**Métricas de facturación en TPV de tarjetas BBVA**](Pymes_MetricasTPV.Rmd) - a partir de dato de transacciones en tarjeta: TxC y Clarity.
+  
+  - **Datos de tenencia de producto**
+  
+    - **Confirming proveedor** - a partir de la tabla NCLDATOS de SINFO
+    - **Importacion/Exportacion** - ya venían del fichero de riesgos - ¿¿SABI??
+
+#### Campañas realizadas: 
+
+  - **Septiembre 2015**: modelo de tenencia de leasing y cartera, cesta de productos por CNAE
+  - **Enero 2016**: modelo de valor, modelo de tenencia de leasing y cartera, métricas de facturacion en TPV, datos de tenencia de confirming proveedor
+  
+
+### 2. Objetivo
+
+Etiquetar el colectivo de clientes potenciales para la campaña de Diciembre de 2015 con los modelos seleccionados
+
+### 3. Fuentes de datos
+
+[TODO]
+
+  - [Carga de datos desde SINFO](Pymes_Carga_CuentaBalance.Rmd)
+  - [Tablon de características comunes, no clientes y clientes](PymesTablonNoClientes.Rmd)
+  - [Estadísticas de cruce](Pymes_Estadísticas_de_Cruce.Rmd)
+  - [BOE/BORME Events](Pymes_BOE_events.Rmd)
+  - [Risk360](Pymes_Explore_TPV_Risk360.Rmd)
+
+
+### 4. Análisis preliminares
+
+#### Carga de los datos de partida 
+
+```{r Carga de colectivo}
+
+q.colectivo <- "SELECT * FROM da_pymes.colectivo_201512"
+df.colectivo <- qhive(q.colectivo)
+anyDuplicated(df.colectivo$cif)
+n.colectivo <- nrow(df.colectivo)
+
+```
+
+#### **¿Cuántas empresas del colectivo seleccionado por riesgos vamos a poder generar score de valor o propension?**
+
+Por el momento necesitamos datos básicos de balance. 
+
+```{r Cruce del colectivo con los datos}
+
+q.stats_cruce_colectivo <- "
+SELECT SUM(IF(cuenta_10000 IS NULL,0,1)) n_balances,
+SUM(IF(ntx_2014 IS NULL,0,1)) n_tpv,
+SUM(IF(score IS NULL,0,1)) n_risk360,
+SUM(IF(cuenta_10000 IS NULL AND ntx_2014 IS NULL,0,1)) n_balances_or_tpv,
+SUM(IF(cuenta_10000 IS NULL AND score IS NULL,0,1)) n_balances_or_risk360,
+SUM(IF(ntx_2014 IS NULL AND score IS NULL,0,1)) n_tpv_or_risk360,
+SUM(1) n_colectivo
+FROM da_pymes.colectivo_201512 c LEFT JOIN da_pymes.tablon_features b
+ON c.cif = b.nif
+"
+df.stats_colectivo <- qimpala(q.stats_cruce_colectivo)
+
+df.stats_colectivo
+
+#df.stats_colectivo$n_balances/df.stats_colectivo$n_colectivo
+#df.stats_colectivo$n_tpv/df.stats_colectivo$n_colectivo
+#df.stats_colectivo$n_risk360/df.stats_colectivo$n_colectivo
+
+```
+
+
+ - Número de CIF en el colectivo :  `r n.colectivo`
+ - Porcentaje de empresas con balance: `r df.stats_colectivo$n_balances/df.stats_colectivo$n_colectivo`
+ - Porcentaje de empresas con info de tpv: `r df.stats_colectivo$n_tpv/df.stats_colectivo$n_colectivo`
+ - Porcentaje de empresas con info de tpv (Risk360): `r df.stats_colectivo$n_risk360/df.stats_colectivo$n_colectivo` 
+
+### 5. Etiquetado de los datos
+
+
+#### 5.1. Cruce con tabla de características
+```{r Cruce con tablones de features}
+
+q.ratios_eeff <- "SELECT * FROM da_pymes.tablon_features"
+df.ratios_eeff <- qhive(q.ratios_eeff)
+
+# Nota: Hay 75 registros duplicados por NIF en el tablon de features
+anyDuplicated(df.ratios_eeff$nif)
+
+df.ratios_eeff <- df.ratios_eeff[!duplicated(df.ratios_eeff$nif),]
+anyDuplicated(df.ratios_eeff$nif)
+
+df.potenciales_eeff <- df.colectivo %>% 
+                        select(cif) %>%
+                        inner_join(df.ratios_eeff, by = c("cif" = "nif"))
+
+
+anyDuplicated(df.potenciales_eeff$nif)
+anyDuplicated(df.potenciales_eeff$cif)
+nrow(df.potenciales_eeff)
+
+df.etiquetables <- df.potenciales_eeff
+
+# df.etiquetables <- df.potenciales_eeff [!(df.potenciales_eeff$cod_cnae_1 == 'T' | df.potenciales_eeff$cod_cnae_1 == 'U'),]
+
+
+```
+
+
+#### 5.2. Etiquetado con modelo de propension de Cartera
+```{r}
+library(caret)
+library(gbm)
+
+modelo_cartera_path <- "/DYA/xe48636/PymesAnalytics/deploy/cnae.cartera.gbm.286609.Rda"
+model.cartera <- readRDS(modelo_cartera_path)
+
+probs.cartera <- predict(model.cartera, 
+                         newdata = df.etiquetables, 
+                         type = "prob", 
+                         na.action = na.pass)[, 'Yes']
+
+
+```
+
+```{r Imprime estadisticas}
+
+summary(probs.cartera)
+hist(probs.cartera, breaks = 20, col = "blue")
+concartera <- df.etiquetables[probs.cartera > 0.5, ]
+nrow(concartera)
+
+
+quantile(probs.cartera,prob = seq(0, 1, length = 11),include.lowest = TRUE, na.rm = TRUE )
+
+
+```
+
+#### 5.3 Etiquetado con modelo de propension de Leasing
+```{r}
+
+modelo_leasing_path <- "/DYA/xe48636/PymesAnalytics/deploy/cnae.leasing.gbm.286609.Rda"
+model.leasing <- readRDS(modelo_leasing_path)
+
+
+probs.leasing <- predict(model.leasing, 
+                         newdata = df.etiquetables, 
+                         type = "prob", 
+                         na.action = na.pass)[, 'Yes']
+
+```
+
+
+```{r }
+
+summary(probs.leasing)
+hist(probs.leasing, breaks = 20, col = "blue")
+conleasing <- df.etiquetables[probs.leasing > 0.5, ]
+nrow(conleasing)
+
+quantile(probs.leasing,prob = seq(0, 1, length = 11),include.lowest = TRUE)
+
+
+```
+
+
+
+#### 5.4 Etiquetado con el modelo de valor
+
+```{r Aplica modelos de prediccion de valor}
+
+library(caret)
+library(kernlab)
+
+modelo_valor_lm_incfact_path = "/DYA/xe48636/PymesAnalytics/deploy/valor.lm.incfact.Rda"
+modelo_valor_lm_decfact_path = "/DYA/xe48636/PymesAnalytics/deploy/valor.lm.decfact.Rda"
+modelo_valor_resto_path <- "/DYA/xe48636/PymesAnalytics/deploy/valor.models.0.3.Rda"
+
+
+model.valor_lm_incfact   <- readRDS(modelo_valor_lm_incfact_path)
+model.valor_lm_decfact   <- readRDS(modelo_valor_lm_decfact_path)
+model.valor_resto        <- readRDS(modelo_valor_resto_path) 
+#model.valor              <- model.valor_resto['SVM Linear']
+#model.valor              <- model.valor_resto['Gradient Boosting Machines']
+#model.valor              <- model.valor_resto['Linear Reg']
+model.valor              <- model.valor_resto['SVM Radial']
+
+
+
+df.etiquetables <- df.etiquetables %>%
+#         sample_frac(0.1) %>%
+#         select(cuenta_41500, cuenta_41700, cuenta_40100, var_40100) %>%
+          mutate(
+            gastos_financieros = ifelse(is.na(cuenta_41500), 0, -1 * cuenta_41500), 
+            balance_divisa = ifelse(is.na(cuenta_41700),0, -1 * cuenta_41700), 
+            balance_facturacion = ifelse(is.na(cuenta_40100),0,cuenta_40100)
+            )
+
+
+df.valor <- data.frame(
+  cif = df.etiquetables$cif,
+  var_40100 = df.etiquetables$var_40100, 
+  cuenta_41500 = df.etiquetables$cuenta_41500, 
+  cuenta_40100 = df.etiquetables$cuenta_40100)
+
+df.valor$incfact <- predict.lm(model.valor_lm_incfact, df.etiquetables, na.action = na.pass)
+df.valor$incfact <- ifelse(is.na(df.valor$cuenta_41500),NA,df.valor$incfact) 
+
+df.valor$decfact <- predict.lm(model.valor_lm_decfact, df.etiquetables, na.action = na.pass)          
+df.valor$decfact <- ifelse(is.na(df.valor$cuenta_41500),NA,df.valor$decfact)
+
+df.valor$ind_var <- as.factor(ifelse(df.valor$var_40100 > 0, 1, 0))
+
+ggplot(df.valor, aes(x = decfact, y = incfact, colour = ind_var )) +
+  geom_point(alpha = 0.01) +
+  geom_abline(intercept = 0, slope = 1) +
+  scale_x_log10() +
+  scale_y_log10() + 
+  facet_grid(. ~ ind_var)
+
+  
+df.valor %>%
+  filter(!is.na(cuenta_41500)) %>%
+  ggplot(aes(x = - ( cuenta_41500 - 1 ), y = incfact, colour = ind_var )) +
+  geom_point(alpha = 0.01) +
+#  geom_abline(intercept = 0, slope = 1) +
+  scale_x_log10() +
+  scale_y_log10() + 
+  facet_grid(. ~ ind_var)
+
+
+  df.valor %>%
+  filter(!is.na(cuenta_41500)) %>%
+  ggplot(aes(x = - ( cuenta_41500 - 1 ), y = decfact, colour = ind_var )) +
+  geom_point(alpha = 0.01) +
+#  geom_abline(intercept = 0, slope = 1) +
+  scale_x_log10() +
+  scale_y_log10() + 
+  facet_grid(. ~ ind_var)
+
+
+# q.tablon_features <- "
+# SELECT * FROM da_pymes.tablon_features WHERE cuenta_10000 IS NOT NULL 
+# "
+# 
+# df.tablon_features <- qhive(q.tablon_features)
+# df.transformed <- df.tablon_features
+
+df.transformed <- df.etiquetables
+
+names.numeric <-  grep("^cuenta_", names(df.transformed))
+df.transformed[is.na(df.transformed)]<-0
+df.transformed[,names.numeric] <- log10(df.transformed[,names.numeric] + 1)
+
+df.valor$valor_ngf_log <- predict(model.valor, df.transformed, na.action = na.pass)[[1]]
+df.valor$valor_ngf <- 10 ^ (df.valor$valor_ngf_log)  # Lo pone en la misma escala que los modelos lineales
+
+df.valor$adjusted <- ifelse(df.valor$var_40100 > 0, df.valor$incfact, df.valor$decfact) 
+df.valor$score_valor <- ifelse(is.na(df.valor$cuenta_41500) | is.na(df.valor$var_40100) ,df.valor$valor_ngf, df.valor$adjusted)
+df.valor$ind_model <- ifelse(is.na(df.valor$cuenta_41500) | is.na(df.valor$var_40100), "ngf", ifelse(df.valor$var_40100 > 0, "inc", "dec") ) 
+
+
+
+```
+
+
+```{r, fig.width=10}
+
+df.valor %>%
+  filter(!is.na(cuenta_41500)) %>%
+  ggplot(aes(x = - ( cuenta_41500 - 1 ), y = adjusted, colour = ind_var )) +
+  geom_point(alpha = 0.01) +
+  scale_x_log10() +
+  scale_y_log10() 
+
+df.valor %>%
+  ggplot(aes(x = cuenta_40100, y = adjusted, colour = ind_var )) +
+  geom_point(alpha = 0.01) +
+  scale_x_log10() +
+  scale_y_log10() 
+
+df.valor %>%
+  ggplot(aes(x = cuenta_40100, y = valor_ngf, colour = ind_model )) +
+  geom_point(alpha = 0.1) +
+  scale_x_log10() +
+  scale_y_log10() +
+  facet_grid(. ~ ind_model)
+
+df.valor %>%
+  ggplot(aes(x = cuenta_40100, y = score_valor, colour = ind_model )) +
+  geom_point(alpha = 0.01) +
+  scale_x_log10() +
+  scale_y_log10() 
+
+```
+
+
+#### 5.5 Etiquetado con los ratios de facturacion por tpv 
+
+```{r Parametros }
+
+corte = 1000
+k = 10
+coef.intercept = 1075.480
+coef.slope = 1.207
+
+
+```
+
+```{r TPV score}
+
+df.tpvs <- df.etiquetables %>% 
+         select(cif, ntx_2014, ntx_2015, fact_2014, fact_2015)  %>%
+         filter(ntx_2014 > 0)
+
+df.tpvs$ind_tpv  <- (df.tpvs$ntx_2014 > 0 | df.tpvs$ntx_2015 > 0) 
+
+df.tpvs$var_ntx  <- (df.tpvs$ntx_2015 - df.tpvs$ntx_2014)/df.tpvs$ntx_2014
+df.tpvs$var_fact <- (df.tpvs$fact_2015 - df.tpvs$fact_2014)/df.tpvs$fact_2014
+df.tpvs$fact_inc <- (((df.tpvs$fact_2015 - coef.intercept) / df.tpvs$fact_2014) - 1) / (coef.slope - 1 )   
+
+df.tpvs$score_tpv = ifelse(df.tpvs$fact_inc > 0, log10(df.tpvs$fact_2015 + 1) + log2(df.tpvs$fact_inc + 1), 0)
+summary(df.tpvs$score_tpv)
+
+
+```
+
+
+#### 5.6 Etiquetado con los datos de confirming 
+```{r}
+
+q.confirming = "
+SELECT DISTINCT cod_idefisca
+FROM da_pymes.ncldatos
+WHERE procedencia LIKE '09%'
+"
+
+df.confirming <- qimpala(q.confirming)
+df.confirming$confirming <- TRUE
+
+anyDuplicated(df.confirming$cif)
+
+```
+
+#### 5.7 Etiquetado con los datos de COMEX - importacion/exportacion
+```{r}
+
+```
+
+
+#### 5.8. Junta todas nuestras predicciones
+
+```{r}
+
+df.etiquetados <- data.frame(cif = df.etiquetables$cif)
+#df.etiquetados$prob_cartera <- probs.cartera
+#df.etiquetados$prob_leasing <- probs.leasing
+
+deciles <- function(x) {
+  result <-  cut(x, 
+                 quantile(x,prob = seq(0, 1, length = 11),include.lowest = TRUE),
+                 labels = FALSE)
+  return(result)
+}
+
+df.etiquetados$propension_cartera <- deciles(probs.cartera)
+df.etiquetados$propension_leasing <- deciles(probs.leasing)
+
+
+df.etiquetados <- df.etiquetados %>% 
+  left_join(df.valor, by ="cif") %>% 
+  left_join(df.tpvs, by ="cif") %>%
+  left_join(df.confirming, by = c( "cif" = "cod_idefisca") ) %>%
+  dplyr::rename( fact_2015_tpv = fact_2015, var_fact_tpv = var_fact ) %>%
+  mutate(rank_valor = min_rank(-score_valor), rank_tpv = min_rank(-score_tpv)) %>%
+  select(cif, propension_cartera, propension_leasing, 
+         ind_model, score_valor,  rank_valor, 
+         ind_tpv, fact_2015_tpv, var_fact_tpv, score_tpv, rank_tpv, 
+         confirming)
+
+df.etiquetados$ind_tpv[is.na(df.etiquetados$ind_tpv)] <- FALSE
+df.etiquetados$confirming[is.na(df.etiquetados$confirming)] <- FALSE
+
+nrow(df.etiquetados)
+
+```
+
+
+#### 5.9 Mezcla y serializa el resultado final
+
+```{r}
+
+df.result <- df.colectivo %>%
+  select(cif) %>%
+  left_join(df.etiquetados, by = "cif")
+
+#df.result <- df.etiquetados
+
+anyDuplicated(df.result$cif)
+nrow(df.result)
+
+```
+
+
+```{r Write results to a file, echo=FALSE, eval=FALSE}
+
+etiquetados_path <- "/DYA/xe48636/PymesAnalytics/results/etiquetados_201512.csv"
+
+write.table(df.result, etiquetados_path, sep = ",")
+
+```
+
+
+```{r Write results to a table in Hive, eval=FALSE}
+
+write.hive(df.result, "da_pymes.colectivo_etiquetado_201512")
+#write.hive(df.result, "da_pymes.colectivo_etiquetado_201512_corrected")
+
+```
+
+### 6. Conclusiones
+
+  Se genera el colectivo etiquetado: 
+
+
+```{r Lectura del balance, eval=TRUE, echo=FALSE}
+
+q.etiquetados = "SELECT * FROM da_pymes.colectivo_etiquetado_201512"
+df.etiquetados <- qimpala(q.etiquetados)
+
+```
+
+#### Estadísticas del colectivo
+  
+```{r Matrices de contingencia del colectivo, eval=TRUE}
+library(vcd)
+
+t_leasing = 8 
+t_cartera = 10
+t_alto_valor = 18000
+
+```
+    
+```{r Conteo de frecuencias, eval=TRUE}
+
+table.stats_etiquetados <- df.etiquetados %>%
+  transmute(
+    leasing = (propension_leasing) >= t_leasing,
+    cartera = (propension_cartera) >= t_cartera,
+    valor = !is.na(score_valor),
+    alto_valor = rank_valor < t_alto_valor,
+    ind_model = ind_model, 
+    ind_tpv = ind_tpv == 1, 
+    confirming = confirming == 1) %>%
+  table(exclude = NA )
+
+prop.table(margin.table(table.stats_etiquetados,1))
+prop.table(margin.table(table.stats_etiquetados,2))
+prop.table(margin.table(table.stats_etiquetados,4))
+prop.table(margin.table(table.stats_etiquetados,5))
+prop.table(margin.table(table.stats_etiquetados,6))
+prop.table(margin.table(table.stats_etiquetados,7))
+
+```
+
+#### Matriz de contingencia: Alto Valor vs Propension a productos
+
+```{r Matriz de contingencia: Valor vs Propension, eval=TRUE, fig.width=10}
+
+df.etiquetados %>%
+  transmute(
+    leasing = (propension_leasing) >= t_leasing,
+    cartera = (propension_cartera) >= t_cartera,
+    alto_valor = rank_valor < t_alto_valor) %>% 
+  table() %>%
+  mosaic(shade = TRUE, 
+         legend = TRUE, 
+         main = "Matriz Contingencia: Valor vs Propension") 
+
+```
+
+ * Aquellos con propension a leasing y cartera tienen tambien mayor valor - como se esperaba
+ 
+
+#### Matriz de contingencia: Alto Valor vs Otros productos (Confirming y TPV)
+
+```{r Matriz de valor por tenencia, eval=TRUE, fig.width=10}
+
+df.etiquetados %>%
+  transmute(
+    confirming = confirming == 1, 
+    ind_tpv = ind_tpv == 1, 
+    alto_valor = rank_valor < t_alto_valor) %>% 
+  table() %>%
+  mosaic(shade = TRUE, legend = TRUE) 
+
+
+```
+
+ - Asociacion bastante más moderada para los que tienen TPV y confirming. 
+
+#### Matriz de contingencia: Alto Valor vs Modelo que se ha utilizado en scoring
+
+*Objetivo*: Determinar la preponderancia de los tres submodelos de valor a la hora de elegir clientes
+ 
+ 
+Hay tres modelos: 
+   - **inc** : Modelo lineal para los que tienen *gastos financieros* e *incrementan facturacion*
+   - **dec** : Modelo lineal para los que tienen *gastos financieros* y *decrementan facturacion* 
+   - **ngf** : Modelo no lineal genérico para los que no informan gastos financieros. 
+
+```{r Matriz de valor por modelo, eval=TRUE, fig.width=10}
+
+df.etiquetados %>%
+  transmute(
+    ind_model = ind_model, 
+    alto_valor = rank_valor < t_alto_valor) %>% 
+  table() %>%
+  mosaic(shade = TRUE, legend = TRUE) 
+
+```
+
+*Conclusion*:  En general, son los modelos lineales (inc, dec) los que seleccionan más clientes, y por lo tanto los más asociados 
+
+#### Tabla con la matriz de contingencia
+
+```{r Frecuencias de los de más alto valor, eval=TRUE}
+
+ df.etiquetados %>%
+  transmute(
+    leasing = (propension_leasing) >= 8,
+    cartera = (propension_cartera) >= 10,
+    valor = !is.na(score_valor),
+    alto_valor = rank_valor < 10000,
+    ind_model = ind_model, 
+    ind_tpv = ind_tpv == 1, 
+    confirming = confirming == 1) %>%
+  filter(alto_valor == TRUE) %>%
+  ftable(exclude = NA ) 
+
+```
+
+
+<hr/>
+
+
+### Anexo: Censo de análisis 
+
+Estos son los modelos disponibles a fecha 15 de Diciembre de 2015:
+
+  - *Modelo de valor* : Estimación del margen en el banco de los clientes a partir de los datos de balance.
+     - [1.](Pymes_TablonClientes.Rmd) Se estima el margen para aquellos que tenemos datos de balances con las principales variables predictoras: gastos financieros
+     - [2.](Pymes_Valor_modeloBalances.Rmd) Se estima el margen con el resto de datos del balance, CNAE, empleados y los valores calculados en 1
+     - [3.] Se emsamblan los modelos anteriores para dar una prediccion única. 
+     
+      
+  - *Modelos de tenencia de productos* : usando datos de empleados, CNAE, balances, generalizando a partir de nuestros clientes
+
+      - [*Leasing*](Pymes_TrainLeasingModel_v2.Rmd) (financiacion a largo).
+      
+            - Versiones antiguas [*](Pymes_TrainLeasingModel.Rmd), [FMDTS](Pymes_ModeloTenenciaLeasing_FDMTDS.Rmd)
+            
+      - [*Cartera*](Pymes_TrainCarteraModel_v2.Rmd) (financiacion a corto) [Pymes_ModeloPropensionCartera_FDMTDS.Rmd]
+      
+  - [*Métricas de facturación en TPV de tarjetas BBVA*](Pymes_MetricasTPV.Rmd) - a partir de dato de transacciones en tarjeta: TxC y Clarity.  
+  - *Datos de tenencia de producto*
+  
+    - *Confirming proveedor* - a partir de la tabla NCLDATOS de SINFO
+
+  - [*Cesta de productos típicos por CNAE*](Pymes_Clustering_CNAE.Rmd)  (Pymes_Agrupacion_CNAE.Rmd)
+
+
+En desarrollo: 
+  - [*Modelo de propension a tenencia de productos: COMEX*](Pymes_Explore_Comex_Full.Rmd)
+     
+     - (Pymes_Explore_Comex_Contracts.Rmd)
+     - (Pymes_Explore_Comex_Accounts.Rmd)
+     - (Pymes_Explore_Comex.Rmd) 
+     
+  - *Modelo de Next Best Product* - [experimentos con reglas de asociacion](Pymes_Recomendacion_Reglas_Asociacion.Rmd)
+
+Otros analisis:
+
+  - [Modelo de valor basado en facturacion TPV](Pymes_Valor_modeloTPVs.Rmd) - Intento de estimar el margen a partir de la facturacion en TPV de tarjetas BBVA. Por el momento, la correlacion es baja y no se ha usado. 
+  - [Estadísticas y análisis sobre Plan Alfa](Pymes_PLan_Alfa_Product_Analysis.Rmd)
+  - [Comparación entre modelos de valor](Pymes_Compare_Value_Models.Rmd) 
+  - [Filtros para la seleccion de pymes](Pymes_FiltradoPymesGrupoFMDTS.Rmd) y [similar para BEC](Pymes_FiltradoBEC.Rmd)
+  - [Exploracion de correlacion entre CIRBE y gastos financieros](Pymes_Explore_CIRBE.Rmd)
+
+
+
+Pendientes de subir
+
+  - [Estudio de características para modelos](Pymes_LeasingModel_FeatureStudy.Rmd)
+  - Pymes_Explore_Pymes_Contracts.Rmd
+  - Pymes_Expore_Contracts.Rmd
+  - Pymes_Comparacion_Valor_Segmento_58.Rmd 
+
+
+

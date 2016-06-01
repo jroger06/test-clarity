@@ -1,0 +1,1506 @@
+---
+output:
+  html_document:
+    self_contained: no
+---
+
+Digital On-Boarding 
+-------------------
+
+
+_**5th report iteration**_
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- "[Digital On-boarding] : What kind of products does attract Premium clients with digital registrations? Differences in channel usage. Mobile app and Wallet usage."
+
+# Keywords. Text separated by commas. E.g. keywords <- 'customer health, recibos' 
+# Keywords can classify the attribute in categories such as 'valor, vinculación, digitalidad', describe used tables such as 'recibos, 
+# transacciones tarjetas, segmento plan uno' or include other relevant info. Search keywords in the portal to find commonly used terms
+# and create new keywords only if justified.
+
+keywords  <- 'digitalidad, digitalization, contratacion tarjetas, contracting cards, contratacion cuenta corriente, contracting current account, bbva.es, nuevo cliente, new client, alta cliente, client registration, adquisición cliente, client acquisition, oficina, office, sociodemo, channel usage, uso de canales, mobile app, wallet'  
+```
+
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))  	# This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+source('~/bda_clarity/tools/warehouse_basics.R')
+```
+
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(grid))
+suppressMessages(library(hexbin))
+suppressMessages(library(lattice))
+suppressMessages(library(knitr))
+suppressMessages(library(googleVis))
+suppressMessages(library(data.table))
+suppressMessages(library(plyr))
+op <- options(gvis.plot.tag="chart")
+`%ni%` <- Negate(`%in%`)
+options(warn=-1, scipen=3, width=450)
+source('~/bda_clarity/tools/warehouse_basics.R')
+
+```
+
+``` {r echo=FALSE}
+
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  require(grid)
+  
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+  
+  numPlots = length(plots)
+  
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                     ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+  
+  if (numPlots==1) {
+    print(plots[[1]])
+    
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+      
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+} ; 
+
+
+
+
+chname <- function(df)
+{
+  rex <- '^[[:alnum:]_]+\\.([[:alnum:]_]+)$'
+  nam <- colnames(df)
+  ix  <- which(grepl(rex, nam))
+  
+  nam[ix] <- gsub(rex, '\\1', nam[ix])
+  
+  colnames(df) <- nam
+  
+  df
+};
+
+```
+### PREMIUM CLIENTS AND THEIR PREFERENCES
+                    
+Preguntas a responder: ¿Qué tipo de productos atrae a clientes de valor que se dan de alta en la Net? ¿Qué tipo de productos tienen clientes de valor que se dan de alta en oficina? Si quitamos del análisis clientes de valor, ¿cómo cambiaría la distribución de productos?
+
+Se analizan dos bolsas de clientes (con altas en oficina y con altas digitales) de tamaño de 2011 clientes.
+
+```{r echo=FALSE, cache=TRUE, eval=FALSE}
+
+do.hive(" CREATE TABLE IF NOT EXISTS elenak.altas_oficina_2014_valor AS
+         
+           SELECT aa.cod_persona ,   
+                  bb.cod_segmsubo
+         
+           FROM ( SELECT * FROM elenak.altas_oficina_2014) aa 
+         
+           LEFT OUTER JOIN da_pro.segmento_global bb  ON aa.cod_persona = CAST(bb.cod_persctpn AS INT)
+
+           WHERE CAST(cod_entalfa AS INT) = 182 AND cod_paisoalf LIKE 'ES' AND CAST(cod_segmsubo as INT) in (43)
+           GROUP BY aa.cod_persona ,   
+                    bb.cod_segmsubo       "); 
+
+
+do.hive(" CREATE TABLE IF NOT EXISTS elenak.altas_digitales_2014_valor AS
+         
+           SELECT aa.cod_persona ,   
+                  bb.cod_segmsubo
+         
+           FROM ( SELECT * FROM elenak.altas_digitales_2014) aa 
+         
+           LEFT OUTER JOIN da_pro.segmento_global bb  ON  aa.cod_persona = CAST(bb.cod_persctpn AS INT)
+
+           WHERE CAST(cod_entalfa AS INT) = 182 AND cod_paisoalf LIKE 'ES' AND CAST(cod_segmsubo as INT) in (43)
+           GROUP BY aa.cod_persona ,   
+                    bb.cod_segmsubo       "); 
+
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elenak.altas_digitales_2014_contracts_valor AS
+         
+           SELECT aa.cod_persona ,   
+                  aa.cod_segmsubo ,   
+
+                  bb.fec_cierre,
+                  bb.cod_idcontra 
+         
+           FROM ( SELECT * FROM elenak.altas_digitales_2014_valor) aa 
+         
+           LEFT OUTER JOIN da_pro.intervinientes_corp bb  ON  aa.cod_persona = CAST(bb.cod_persctpn AS INT)
+         
+           WHERE CAST(bb.cod_entalfa AS INT) = 182 AND trim(cod_ctippe) = 'TIT' AND CAST(cod_ordentit AS INT) = 1 
+                 AND partition_id = '20141231'
+                 
+           GROUP BY aa.cod_persona , 
+                    aa.cod_segmsubo ,   
+
+                  bb.fec_cierre, 
+                  bb.cod_idcontra       "); 
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elenak.altas_oficina_2014_contracts_valor AS
+         
+           SELECT aa.cod_persona ,   
+                  aa.cod_segmsubo ,   
+
+                  bb.fec_cierre,
+                  bb.cod_idcontra 
+         
+           FROM ( SELECT * FROM elenak.altas_oficina_2014_valor) aa 
+         
+           LEFT OUTER JOIN da_pro.intervinientes_corp bb  ON  aa.cod_persona = CAST(bb.cod_persctpn AS INT)
+         
+           WHERE CAST(bb.cod_entalfa AS INT) = 182 AND trim(cod_ctippe) = 'TIT' AND CAST(cod_ordentit AS INT) = 1 
+                 AND partition_id = '20141231'
+                 
+           GROUP BY aa.cod_persona , 
+                    aa.cod_segmsubo ,   
+
+                  bb.fec_cierre, 
+                  bb.cod_idcontra       "); 
+
+  do.hive(" CREATE TABLE IF NOT EXISTS elenak.altas_oficina_2014_products_valor AS         
+            SELECT aa.cod_persona,   
+                   aa.cod_segmsubo,
+                   aa.fec_cierre,
+                   aa.cod_idcontra,   
+ 
+                   bb.cod_situdw, 
+                   bb.imp_salpupo  saldo_cierre_mes,
+                   bb.imp_salmmcpo  saldo_medio_ultim_mes,
+                   bb.imp_salsmcpo saldo_medio_ult_6_mes,
+                   bb.cod_masccntr, 
+ 
+            CASE WHEN substr(bb.cod_masccntr,9,4) in ('0300', '0869', '0870') THEN 'CARTERA'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0431', '0432', '0930') THEN 'VALORES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0289', '0936', '0937') THEN 'GARANTIAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0810', '0815') THEN 'FONDOS DE INVERSION'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0625', '0628', '0675', '0680') THEN 'TARJETAS PARTNER' 
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0617', '0685') THEN 'TARJETAS DEBITO/CREDITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '992' THEN 'AVALES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0620', '0621', '0622') THEN 'BUSINESS TO BUSINESS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0241' THEN 'COMERCIO EXTERIOR'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0404' THEN 'IMPUESTOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0471' THEN 'COLABORADORES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0515', '0516', '0517') THEN 'CONFIRMING'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0001', '0002', '0004', '0005', '0006', '0007', '0008', '0009', '0020', '0021', '0029', '0030', '0201') THEN 'CUENTA DEBITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0403' THEN 'SEGURIDAD SOCIAL'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0010', '0011', '0210') THEN 'CUENTA CREDITO' 
+                 WHEN substr(bb.cod_masccntr,9,4) = '0071' THEN 'CUENTAS DIVERSAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0412', '0428') THEN 'RECIBOS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0511', '0512') THEN 'FACTORING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0435' THEN 'ENVIO DE REMESAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0500', '0501') THEN 'LEASING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0900' THEN 'ACTIVOS EN MORA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0439' THEN 'CONTRATO MARCO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0968' THEN 'PAGARES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0033', '0035', '0037', '0040', '0041', '0213') THEN 'DEPOSITOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0427' THEN 'NOMINA/PENSION'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0505' THEN 'RENTING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0525' THEN 'SISTEMAS TELEMATICOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0438' THEN 'CUENTAS CLARAS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0460' THEN 'TESORERIA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0618' THEN 'TPV'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0435' THEN 'ENVIO DE REMESAS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0615' THEN 'TARJETA CREDITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0616' THEN 'TARJETA DEBITO'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0062', '0070', '0072', '0111', '0247', '0249', '0250', '0441') THEN 'PRESTAMOS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0083', '0155', '0895', '0963', '0974') THEN 'HIPOTECA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0800' THEN 'PLANES DE PENSIONES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0061', '0310', '0312', '0315', '0320', '0561', '0840', '0845', '0850', '0880', '0960', '0961') THEN 'SEGUROS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0905' THEN 'PROCESOS JUDICIALES'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0402' THEN 'PAGOS CERTIFICADOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0469' THEN 'PROMOCIONES COMERCIALES'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0868' THEN 'ASESORAMIENTO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0158' THEN 'STOCKPYME'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0860' THEN 'AHORROS' ELSE 'OTROS' END AS product_family
+
+            FROM  elenak.altas_oficina_2014_contracts_valor aa
+            JOIN  da_pro.saldos_cuenta_persona_fisica bb ON aa.cod_idcontra = bb.cod_idcontra          
+            WHERE TRIM(bb.cod_situdw) = 'A'  AND CAST(bb.cod_entalfa AS INT) = 182 AND TO_DATE(aa.fec_cierre) = TO_DATE(bb.fec_cierre)
+          
+            GROUP BY aa.cod_persona,        
+                     aa.cod_segmsubo,
+                     aa.fec_cierre,
+                     aa.cod_idcontra,  
+ 
+                     bb.cod_situdw, 
+                     bb.imp_salpupo,
+                     bb.imp_salmmcpo,
+                     bb.imp_salsmcpo,
+                     bb.cod_masccntr, 
+ 
+            CASE WHEN substr(bb.cod_masccntr,9,4) in ('0300', '0869', '0870') THEN 'CARTERA'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0431', '0432', '0930') THEN 'VALORES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0289', '0936', '0937') THEN 'GARANTIAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0810', '0815') THEN 'FONDOS DE INVERSION'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0625', '0628', '0675', '0680') THEN 'TARJETAS PARTNER' 
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0617', '0685') THEN 'TARJETAS DEBITO/CREDITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '992' THEN 'AVALES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0620', '0621', '0622') THEN 'BUSINESS TO BUSINESS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0241' THEN 'COMERCIO EXTERIOR'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0404' THEN 'IMPUESTOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0471' THEN 'COLABORADORES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0515', '0516', '0517') THEN 'CONFIRMING'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0001', '0002', '0004', '0005', '0006', '0007', '0008', '0009', '0020', '0021', '0029', '0030', '0201') THEN 'CUENTA DEBITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0403' THEN 'SEGURIDAD SOCIAL'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0010', '0011', '0210') THEN 'CUENTA CREDITO' 
+                 WHEN substr(bb.cod_masccntr,9,4) = '0071' THEN 'CUENTAS DIVERSAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0412', '0428') THEN 'RECIBOS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0511', '0512') THEN 'FACTORING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0435' THEN 'ENVIO DE REMESAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0500', '0501') THEN 'LEASING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0900' THEN 'ACTIVOS EN MORA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0439' THEN 'CONTRATO MARCO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0968' THEN 'PAGARES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0033', '0035', '0037', '0040', '0041', '0213') THEN 'DEPOSITOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0427' THEN 'NOMINA/PENSION'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0505' THEN 'RENTING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0525' THEN 'SISTEMAS TELEMATICOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0438' THEN 'CUENTAS CLARAS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0460' THEN 'TESORERIA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0618' THEN 'TPV'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0435' THEN 'ENVIO DE REMESAS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0615' THEN 'TARJETA CREDITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0616' THEN 'TARJETA DEBITO'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0062', '0070', '0072', '0111', '0247', '0249', '0250', '0441') THEN 'PRESTAMOS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0083', '0155', '0895', '0963', '0974') THEN 'HIPOTECA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0800' THEN 'PLANES DE PENSIONES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0061', '0310', '0312', '0315', '0320', '0561', '0840', '0845', '0850', '0880', '0960', '0961') THEN 'SEGUROS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0905' THEN 'PROCESOS JUDICIALES'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0402' THEN 'PAGOS CERTIFICADOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0469' THEN 'PROMOCIONES COMERCIALES'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0868' THEN 'ASESORAMIENTO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0158' THEN 'STOCKPYME'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0860' THEN 'AHORROS' ELSE 'OTROS' END
+          ")
+
+   do.hive(" CREATE TABLE IF NOT EXISTS elenak.altas_digitales_2014_products_valor AS         
+            SELECT aa.cod_persona,   
+                   aa.cod_segmsubo,
+                   aa.fec_cierre,
+                   aa.cod_idcontra,   
+ 
+                   bb.cod_situdw, 
+                   bb.imp_salpupo  saldo_cierre_mes,
+                   bb.imp_salmmcpo  saldo_medio_ultim_mes,
+                   bb.imp_salsmcpo saldo_medio_ult_6_mes,
+                   bb.cod_masccntr, 
+ 
+            CASE WHEN substr(bb.cod_masccntr,9,4) in ('0300', '0869', '0870') THEN 'CARTERA'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0431', '0432', '0930') THEN 'VALORES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0289', '0936', '0937') THEN 'GARANTIAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0810', '0815') THEN 'FONDOS DE INVERSION'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0625', '0628', '0675', '0680') THEN 'TARJETAS PARTNER' 
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0617', '0685') THEN 'TARJETAS DEBITO/CREDITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '992' THEN 'AVALES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0620', '0621', '0622') THEN 'BUSINESS TO BUSINESS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0241' THEN 'COMERCIO EXTERIOR'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0404' THEN 'IMPUESTOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0471' THEN 'COLABORADORES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0515', '0516', '0517') THEN 'CONFIRMING'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0001', '0002', '0004', '0005', '0006', '0007', '0008', '0009', '0020', '0021', '0029', '0030', '0201') THEN 'CUENTA DEBITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0403' THEN 'SEGURIDAD SOCIAL'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0010', '0011', '0210') THEN 'CUENTA CREDITO' 
+                 WHEN substr(bb.cod_masccntr,9,4) = '0071' THEN 'CUENTAS DIVERSAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0412', '0428') THEN 'RECIBOS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0511', '0512') THEN 'FACTORING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0435' THEN 'ENVIO DE REMESAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0500', '0501') THEN 'LEASING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0900' THEN 'ACTIVOS EN MORA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0439' THEN 'CONTRATO MARCO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0968' THEN 'PAGARES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0033', '0035', '0037', '0040', '0041', '0213') THEN 'DEPOSITOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0427' THEN 'NOMINA/PENSION'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0505' THEN 'RENTING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0525' THEN 'SISTEMAS TELEMATICOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0438' THEN 'CUENTAS CLARAS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0460' THEN 'TESORERIA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0618' THEN 'TPV'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0435' THEN 'ENVIO DE REMESAS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0615' THEN 'TARJETA CREDITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0616' THEN 'TARJETA DEBITO'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0062', '0070', '0072', '0111', '0247', '0249', '0250', '0441') THEN 'PRESTAMOS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0083', '0155', '0895', '0963', '0974') THEN 'HIPOTECA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0800' THEN 'PLANES DE PENSIONES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0061', '0310', '0312', '0315', '0320', '0561', '0840', '0845', '0850', '0880', '0960', '0961') THEN 'SEGUROS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0905' THEN 'PROCESOS JUDICIALES'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0402' THEN 'PAGOS CERTIFICADOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0469' THEN 'PROMOCIONES COMERCIALES'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0868' THEN 'ASESORAMIENTO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0158' THEN 'STOCKPYME'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0860' THEN 'AHORROS' ELSE 'OTROS' END AS product_family
+
+            FROM  elenak.altas_digitales_2014_contracts_valor aa
+            JOIN  da_pro.saldos_cuenta_persona_fisica bb ON aa.cod_idcontra = bb.cod_idcontra          
+            WHERE TRIM(bb.cod_situdw) = 'A'  AND CAST(bb.cod_entalfa AS INT) = 182 AND TO_DATE(aa.fec_cierre) = TO_DATE(bb.fec_cierre)
+          
+            GROUP BY aa.cod_persona,        
+                     aa.cod_segmsubo,
+                     aa.fec_cierre,
+                     aa.cod_idcontra,  
+ 
+                     bb.cod_situdw, 
+                     bb.imp_salpupo,
+                     bb.imp_salmmcpo,
+                     bb.imp_salsmcpo,
+                     bb.cod_masccntr, 
+ 
+            CASE WHEN substr(bb.cod_masccntr,9,4) in ('0300', '0869', '0870') THEN 'CARTERA'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0431', '0432', '0930') THEN 'VALORES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0289', '0936', '0937') THEN 'GARANTIAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0810', '0815') THEN 'FONDOS DE INVERSION'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0625', '0628', '0675', '0680') THEN 'TARJETAS PARTNER' 
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0617', '0685') THEN 'TARJETAS DEBITO/CREDITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '992' THEN 'AVALES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0620', '0621', '0622') THEN 'BUSINESS TO BUSINESS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0241' THEN 'COMERCIO EXTERIOR'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0404' THEN 'IMPUESTOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0471' THEN 'COLABORADORES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0515', '0516', '0517') THEN 'CONFIRMING'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0001', '0002', '0004', '0005', '0006', '0007', '0008', '0009', '0020', '0021', '0029', '0030', '0201') THEN 'CUENTA DEBITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0403' THEN 'SEGURIDAD SOCIAL'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0010', '0011', '0210') THEN 'CUENTA CREDITO' 
+                 WHEN substr(bb.cod_masccntr,9,4) = '0071' THEN 'CUENTAS DIVERSAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0412', '0428') THEN 'RECIBOS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0511', '0512') THEN 'FACTORING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0435' THEN 'ENVIO DE REMESAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0500', '0501') THEN 'LEASING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0900' THEN 'ACTIVOS EN MORA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0439' THEN 'CONTRATO MARCO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0968' THEN 'PAGARES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0033', '0035', '0037', '0040', '0041', '0213') THEN 'DEPOSITOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0427' THEN 'NOMINA/PENSION'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0505' THEN 'RENTING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0525' THEN 'SISTEMAS TELEMATICOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0438' THEN 'CUENTAS CLARAS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0460' THEN 'TESORERIA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0618' THEN 'TPV'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0435' THEN 'ENVIO DE REMESAS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0615' THEN 'TARJETA CREDITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0616' THEN 'TARJETA DEBITO'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0062', '0070', '0072', '0111', '0247', '0249', '0250', '0441') THEN 'PRESTAMOS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0083', '0155', '0895', '0963', '0974') THEN 'HIPOTECA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0800' THEN 'PLANES DE PENSIONES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0061', '0310', '0312', '0315', '0320', '0561', '0840', '0845', '0850', '0880', '0960', '0961') THEN 'SEGUROS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0905' THEN 'PROCESOS JUDICIALES'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0402' THEN 'PAGOS CERTIFICADOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0469' THEN 'PROMOCIONES COMERCIALES'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0868' THEN 'ASESORAMIENTO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0158' THEN 'STOCKPYME'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0860' THEN 'AHORROS' ELSE 'OTROS' END
+          ")
+```
+
+De 2011 clientes con altas en oficina se han quedado **`r qhive("SELECT COUNT(distinct cod_persona) FROM elenak.altas_oficina_2014_products_valor")`** clientes de valor y de clientes con altas digitales **`r qhive("SELECT COUNT(distinct cod_persona) FROM elenak.altas_digitales_2014_products_valor")`** clientes de valor.
+
+Se demuestra la distribución de productos de clientes de valor con altas en los dos canales en base al número de contratos activos a finales del año 2014. Debido al hecho de que entre clientes con altas digitales el número de clientes de valor es notablemente menor, se ha normalizado la distribución. En la gráfica de la izquierda se demuestra la distribución de productos por persona.
+
+``` {r echo=FALSE, cache=TRUE, fig.width=12, fig.height=6} 
+
+ product <- chname(qhive(" select * 
+                          from elenak.altas_oficina_2014_products_valor                            
+                          WHERE (saldo_cierre_mes + saldo_medio_ultim_mes + saldo_medio_ult_6_mes) != 0 
+                          "))
+
+ num_pers_oficina <- qhive(" select count(distinct cod_persona) from elenak.altas_oficina_2014_products_valor ")
+ 
+ num_pers_oficina <- num_pers_oficina$EXPR_0
+ 
+ num_pers_net <- qhive(" select count(distinct cod_persona) from elenak.altas_digitales_2014_products_valor ")
+
+ num_pers_net <- num_pers_net$EXPR_0
+
+ re <- aggregate(product$cod_idcontra, by=list(product$product_family), FUN=length)
+
+ colnames(re) <- c("product_group", "num_active_contracts");
+
+ re1 <- re
+
+ re1$reg_type<-rep("oficina",nrow(re1))
+
+ re1$num_active_contracts_por_pers <- re1$num_active_contracts/num_pers_oficina
+
+ product_d <- chname(qhive(" select * 
+                          from elenak.altas_digitales_2014_products_valor                            
+                          WHERE (saldo_cierre_mes + saldo_medio_ultim_mes + saldo_medio_ult_6_mes) != 0 
+                          "))
+
+ fe <- aggregate(product_d$cod_idcontra, by=list(product_d$product_family), FUN=length)
+
+ colnames(fe) <- c("product_group", "num_active_contracts");
+
+ fe1 <- fe
+
+ fe1$reg_type<-rep("bbva.es",nrow(fe1))
+
+ fe1$num_active_contracts_por_pers <- fe1$num_active_contracts/num_pers_net
+
+ ae <- rbind(re1,fe1)
+
+ gg1 <- ggplot(ae, aes(x=reg_type, y=num_active_contracts_por_pers, fill=product_group)) + geom_bar(width= 0.6, stat="identity") ;
+
+#  re <- aggregate(product$cod_idcontra, by=list(product$product_family), FUN=length)
+# 
+#  re2 <- aggregate(product$cod_idcontra, by=list(product$product_family,product$cod_persona), FUN=length)
+#  names(re2)<-c("Producto","cod_persona","num")
+# 
+#  
+#  re1<-re
+#  re1$reg_type<-rep("oficina",nrow(re1))
+# 
+#  re2 <- aggregate(re2$cod_persona, by=list(re2$Producto), FUN=length)
+#  names(re2)<-c("Producto","num")
+#  names(re1)<-c("Producto","num","reg_type")
+# 
+#  re1 <-merge(re1,re2,by='Producto')
+# 
+# 
+#  re1$ratio <- re1$num.x/re1$num.y
+#  
+#  product_d <- chname(qhive(" select * 
+#                           from elenak.altas_digitales_2014_products_valor                            
+#                           WHERE (saldo_cierre_mes + saldo_medio_ultim_mes + saldo_medio_ult_6_mes) != 0 
+#                           "))
+#  
+#  fe <- aggregate(product_d$cod_idcontra, by=list(product_d$product_family), FUN=length)
+# 
+#  fe2 <- aggregate(product_d$cod_idcontra, by=list(product_d$product_family,product_d$cod_persona), FUN=length)
+#  names(fe2)<-c("Producto","cod_persona","num")
+# 
+#  fe1<-fe
+#  fe1$reg_type<-rep("bbva.es",nrow(fe1))
+# 
+#  fe2 <- aggregate(fe2$cod_persona, by=list(fe2$Producto), FUN=length)
+#  names(fe2)<-c("Producto","num")
+#  names(fe1)<-c("Producto","num","reg_type")
+# 
+#  fe1 <-merge(fe1,fe2,by='Producto')
+# 
+#  fe1$ratio <- fe1$num.x/fe1$num.y
+# 
+# 
+#  ae1 <- ggplot(ae, aes(x=reg_type,y=ratio, fill=Producto)) + geom_bar(width= 0.6, stat="identity") + ylab("ratio_contr_activoc_por_cliente");
+
+ library(plyr)
+
+ ce <- ddply(ae, "reg_type", transform, percent_num_active_contracts = num_active_contracts / sum(num_active_contracts) * 100);
+
+ ae2 <- ggplot(ce, aes(x=reg_type, y=percent_num_active_contracts, fill=product_group)) + geom_bar(width= 0.6, stat="identity") ;
+        
+ multiplot(gg1, ae2, cols=2);
+
+```
+
+En la gráfica de la derecha podemos ver que la distribución de productos en términos porcentuales difiere entre clientes con altas digitales y clientes con altas en oficina. Los clientes de valor de oficina tienen más Depositos, Fondos de inversión, Hipoteca y Seguros. Los de bbva.es tienen más contratos de Cuenta débito y Planes de pensiones. 
+
+En la siguiente gráfica se demuestra la distribución de productos de clientes de valor con altas en los dos canales en base al importe total en euros de contratos activos a finales del año 2014.
+
+``` {r echo=FALSE, cache=TRUE, fig.width=12, fig.height=6} 
+
+ de <- aggregate(product$saldo_medio_ultim_mes, by=list(product$product_family), FUN=sum)  
+ 
+ colnames(de) <- c("product_group", "average_balance_EUR");
+
+ de1 <- de
+
+ de1$reg_type<-rep("oficina",nrow(de1))
+
+ de1$average_balance_EUR_por_pers <- de1$average_balance_EUR/num_pers_oficina
+
+#kk1 <- ggplot(de1, aes(x=reg_type, y=average_balance_EUR_por_pers, fill=product_group)) + geom_bar(width= 0.6, stat="identity");
+ 
+ he <- aggregate(product_d$saldo_medio_ultim_mes, by=list(product_d$product_family), FUN=sum)
+
+ colnames(he) <- c("product_group", "average_balance_EUR");
+
+ he1 <- he
+
+ he1$reg_type <- rep("bbva.es",nrow(he1))
+
+ he1$average_balance_EUR_por_pers <- he1$average_balance_EUR/num_pers_oficina
+
+ ke <- rbind(de1,he1)
+
+ ke1 <- ggplot(ke, aes(x=reg_type, y=average_balance_EUR_por_pers, fill=product_group)) + geom_bar(width= 0.6, stat="identity");
+
+ library(plyr)
+
+ pe <- ddply(ke, "reg_type", transform, percent_average_balance_EUR = average_balance_EUR / sum(average_balance_EUR) * 100);
+
+ pe <- ddply(pe, c("reg_type"), transform, label_y = cumsum(percent_average_balance_EUR));
+
+ ke2 <- ggplot(pe, aes(x=reg_type, y=percent_average_balance_EUR, fill=product_group)) + geom_bar(width= 0.6, stat="identity") ;
+        
+ multiplot(ke1, ke2, cols=2);
+
+```
+
+Se puede ver que el porcentaje del importe total en Planes de pensiones es mayor en el caso de clientes con altas digitales que en el de altas en oficina. Los clientes con altas en oficina tienen mayor porcentaje de importe de Depositos. Luego van Cuentas débito, Fondos de inversión y Garantías. 
+
+Ahora vamos a **quitar los clientes de valor** de nuestras dos bolsas iniciales.
+
+```{r echo=FALSE, cache=TRUE, eval=FALSE}
+
+do.hive(" CREATE TABLE IF NOT EXISTS elenak.altas_oficina_2014_no_valor_1 AS
+         
+           SELECT aa.cod_persona ,   
+                  bb.cod_segmsubo
+         
+           FROM ( SELECT * FROM elenak.altas_oficina_2014) aa 
+         
+           LEFT OUTER JOIN da_pro.segmento_global bb  ON aa.cod_persona = CAST(bb.cod_persctpn AS INT)
+
+           WHERE CAST(cod_entalfa AS INT) = 182 AND cod_paisoalf LIKE 'ES' AND CAST(cod_segmsubo as INT) in (55, 56, 61)
+           GROUP BY aa.cod_persona ,   
+                    bb.cod_segmsubo       "); 
+
+
+do.hive(" CREATE TABLE IF NOT EXISTS elenak.altas_oficina_2014_no_valor_2 AS
+         
+          SELECT DISTINCT cod_persona
+        
+          FROM elenak.altas_oficina_2014_no_valor_1"); 
+
+
+do.hive(" CREATE TABLE IF NOT EXISTS elenak.altas_digitales_2014_no_valor_1 AS
+         
+           SELECT aa.cod_persona ,   
+                  bb.cod_segmsubo
+         
+           FROM ( SELECT * FROM elenak.altas_digitales_2014) aa 
+         
+           LEFT OUTER JOIN da_pro.segmento_global bb  ON  aa.cod_persona = CAST(bb.cod_persctpn AS INT)
+
+           WHERE CAST(cod_entalfa AS INT) = 182 AND cod_paisoalf LIKE 'ES' AND CAST(cod_segmsubo as INT) in (55, 56, 61)
+           GROUP BY aa.cod_persona ,   
+                    bb.cod_segmsubo       "); 
+
+
+do.hive(" CREATE TABLE IF NOT EXISTS elenak.altas_digitales_2014_no_valor_2 AS
+         
+          SELECT DISTINCT cod_persona
+        
+          FROM elenak.altas_digitales_2014_no_valor_1"); 
+
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elenak.altas_digitales_2014_contracts_no_valor AS
+         
+           SELECT aa.cod_persona ,    
+                  bb.fec_cierre,
+                  bb.cod_idcontra 
+         
+           FROM ( SELECT * FROM elenak.altas_digitales_2014_no_valor_2) aa 
+         
+           LEFT OUTER JOIN da_pro.intervinientes_corp bb  ON  aa.cod_persona = CAST(bb.cod_persctpn AS INT)
+         
+           WHERE CAST(bb.cod_entalfa AS INT) = 182 AND trim(cod_ctippe) = 'TIT' AND CAST(cod_ordentit AS INT) = 1 
+                 AND partition_id = '20141231'
+                 
+           GROUP BY aa.cod_persona ,   
+                    bb.fec_cierre, 
+                    bb.cod_idcontra       "); 
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elenak.altas_oficina_2014_contracts_no_valor AS
+         
+           SELECT aa.cod_persona ,   
+                  bb.fec_cierre,
+                  bb.cod_idcontra 
+         
+           FROM ( SELECT * FROM elenak.altas_oficina_2014_no_valor_2) aa 
+         
+           LEFT OUTER JOIN da_pro.intervinientes_corp bb  ON  aa.cod_persona = CAST(bb.cod_persctpn AS INT)
+         
+           WHERE CAST(bb.cod_entalfa AS INT) = 182 AND trim(cod_ctippe) = 'TIT' AND CAST(cod_ordentit AS INT) = 1 
+                 AND partition_id = '20141231'
+                 
+           GROUP BY aa.cod_persona , 
+                    bb.fec_cierre, 
+                    bb.cod_idcontra       "); 
+
+  do.hive(" CREATE TABLE IF NOT EXISTS elenak.altas_oficina_2014_products_no_valor AS         
+            SELECT aa.cod_persona,   
+                   aa.fec_cierre,
+                   aa.cod_idcontra,   
+ 
+                   bb.cod_situdw, 
+                   bb.imp_salpupo  saldo_cierre_mes,
+                   bb.imp_salmmcpo  saldo_medio_ultim_mes,
+                   bb.imp_salsmcpo saldo_medio_ult_6_mes,
+                   bb.cod_masccntr, 
+ 
+            CASE WHEN substr(bb.cod_masccntr,9,4) in ('0300', '0869', '0870') THEN 'CARTERA'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0431', '0432', '0930') THEN 'VALORES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0289', '0936', '0937') THEN 'GARANTIAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0810', '0815') THEN 'FONDOS DE INVERSION'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0625', '0628', '0675', '0680') THEN 'TARJETAS PARTNER' 
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0617', '0685') THEN 'TARJETAS DEBITO/CREDITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '992' THEN 'AVALES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0620', '0621', '0622') THEN 'BUSINESS TO BUSINESS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0241' THEN 'COMERCIO EXTERIOR'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0404' THEN 'IMPUESTOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0471' THEN 'COLABORADORES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0515', '0516', '0517') THEN 'CONFIRMING'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0001', '0002', '0004', '0005', '0006', '0007', '0008', '0009', '0020', '0021', '0029', '0030', '0201') THEN 'CUENTA DEBITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0403' THEN 'SEGURIDAD SOCIAL'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0010', '0011', '0210') THEN 'CUENTA CREDITO' 
+                 WHEN substr(bb.cod_masccntr,9,4) = '0071' THEN 'CUENTAS DIVERSAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0412', '0428') THEN 'RECIBOS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0511', '0512') THEN 'FACTORING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0435' THEN 'ENVIO DE REMESAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0500', '0501') THEN 'LEASING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0900' THEN 'ACTIVOS EN MORA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0439' THEN 'CONTRATO MARCO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0968' THEN 'PAGARES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0033', '0035', '0037', '0040', '0041', '0213') THEN 'DEPOSITOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0427' THEN 'NOMINA/PENSION'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0505' THEN 'RENTING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0525' THEN 'SISTEMAS TELEMATICOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0438' THEN 'CUENTAS CLARAS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0460' THEN 'TESORERIA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0618' THEN 'TPV'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0435' THEN 'ENVIO DE REMESAS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0615' THEN 'TARJETA CREDITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0616' THEN 'TARJETA DEBITO'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0062', '0070', '0072', '0111', '0247', '0249', '0250', '0441') THEN 'PRESTAMOS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0083', '0155', '0895', '0963', '0974') THEN 'HIPOTECA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0800' THEN 'PLANES DE PENSIONES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0061', '0310', '0312', '0315', '0320', '0561', '0840', '0845', '0850', '0880', '0960', '0961') THEN 'SEGUROS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0905' THEN 'PROCESOS JUDICIALES'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0402' THEN 'PAGOS CERTIFICADOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0469' THEN 'PROMOCIONES COMERCIALES'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0868' THEN 'ASESORAMIENTO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0158' THEN 'STOCKPYME'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0860' THEN 'AHORROS' ELSE 'OTROS' END AS product_family
+
+            FROM  elenak.altas_oficina_2014_contracts_no_valor aa
+            JOIN  da_pro.saldos_cuenta_persona_fisica bb ON aa.cod_idcontra = bb.cod_idcontra          
+            WHERE TRIM(bb.cod_situdw) = 'A'  AND CAST(bb.cod_entalfa AS INT) = 182 AND TO_DATE(aa.fec_cierre) = TO_DATE(bb.fec_cierre)
+          
+            GROUP BY aa.cod_persona,        
+                     aa.fec_cierre,
+                     aa.cod_idcontra,  
+ 
+                     bb.cod_situdw, 
+                     bb.imp_salpupo,
+                     bb.imp_salmmcpo,
+                     bb.imp_salsmcpo,
+                     bb.cod_masccntr, 
+ 
+            CASE WHEN substr(bb.cod_masccntr,9,4) in ('0300', '0869', '0870') THEN 'CARTERA'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0431', '0432', '0930') THEN 'VALORES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0289', '0936', '0937') THEN 'GARANTIAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0810', '0815') THEN 'FONDOS DE INVERSION'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0625', '0628', '0675', '0680') THEN 'TARJETAS PARTNER' 
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0617', '0685') THEN 'TARJETAS DEBITO/CREDITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '992' THEN 'AVALES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0620', '0621', '0622') THEN 'BUSINESS TO BUSINESS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0241' THEN 'COMERCIO EXTERIOR'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0404' THEN 'IMPUESTOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0471' THEN 'COLABORADORES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0515', '0516', '0517') THEN 'CONFIRMING'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0001', '0002', '0004', '0005', '0006', '0007', '0008', '0009', '0020', '0021', '0029', '0030', '0201') THEN 'CUENTA DEBITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0403' THEN 'SEGURIDAD SOCIAL'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0010', '0011', '0210') THEN 'CUENTA CREDITO' 
+                 WHEN substr(bb.cod_masccntr,9,4) = '0071' THEN 'CUENTAS DIVERSAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0412', '0428') THEN 'RECIBOS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0511', '0512') THEN 'FACTORING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0435' THEN 'ENVIO DE REMESAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0500', '0501') THEN 'LEASING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0900' THEN 'ACTIVOS EN MORA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0439' THEN 'CONTRATO MARCO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0968' THEN 'PAGARES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0033', '0035', '0037', '0040', '0041', '0213') THEN 'DEPOSITOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0427' THEN 'NOMINA/PENSION'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0505' THEN 'RENTING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0525' THEN 'SISTEMAS TELEMATICOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0438' THEN 'CUENTAS CLARAS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0460' THEN 'TESORERIA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0618' THEN 'TPV'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0435' THEN 'ENVIO DE REMESAS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0615' THEN 'TARJETA CREDITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0616' THEN 'TARJETA DEBITO'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0062', '0070', '0072', '0111', '0247', '0249', '0250', '0441') THEN 'PRESTAMOS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0083', '0155', '0895', '0963', '0974') THEN 'HIPOTECA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0800' THEN 'PLANES DE PENSIONES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0061', '0310', '0312', '0315', '0320', '0561', '0840', '0845', '0850', '0880', '0960', '0961') THEN 'SEGUROS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0905' THEN 'PROCESOS JUDICIALES'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0402' THEN 'PAGOS CERTIFICADOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0469' THEN 'PROMOCIONES COMERCIALES'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0868' THEN 'ASESORAMIENTO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0158' THEN 'STOCKPYME'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0860' THEN 'AHORROS' ELSE 'OTROS' END
+          ")
+
+   do.hive(" CREATE TABLE IF NOT EXISTS elenak.altas_digitales_2014_products_no_valor AS         
+            SELECT aa.cod_persona, 
+                   aa.fec_cierre,
+                   aa.cod_idcontra,   
+ 
+                   bb.cod_situdw, 
+                   bb.imp_salpupo  saldo_cierre_mes,
+                   bb.imp_salmmcpo  saldo_medio_ultim_mes,
+                   bb.imp_salsmcpo saldo_medio_ult_6_mes,
+                   bb.cod_masccntr, 
+ 
+            CASE WHEN substr(bb.cod_masccntr,9,4) in ('0300', '0869', '0870') THEN 'CARTERA'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0431', '0432', '0930') THEN 'VALORES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0289', '0936', '0937') THEN 'GARANTIAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0810', '0815') THEN 'FONDOS DE INVERSION'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0625', '0628', '0675', '0680') THEN 'TARJETAS PARTNER' 
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0617', '0685') THEN 'TARJETAS DEBITO/CREDITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '992' THEN 'AVALES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0620', '0621', '0622') THEN 'BUSINESS TO BUSINESS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0241' THEN 'COMERCIO EXTERIOR'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0404' THEN 'IMPUESTOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0471' THEN 'COLABORADORES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0515', '0516', '0517') THEN 'CONFIRMING'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0001', '0002', '0004', '0005', '0006', '0007', '0008', '0009', '0020', '0021', '0029', '0030', '0201') THEN 'CUENTA DEBITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0403' THEN 'SEGURIDAD SOCIAL'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0010', '0011', '0210') THEN 'CUENTA CREDITO' 
+                 WHEN substr(bb.cod_masccntr,9,4) = '0071' THEN 'CUENTAS DIVERSAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0412', '0428') THEN 'RECIBOS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0511', '0512') THEN 'FACTORING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0435' THEN 'ENVIO DE REMESAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0500', '0501') THEN 'LEASING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0900' THEN 'ACTIVOS EN MORA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0439' THEN 'CONTRATO MARCO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0968' THEN 'PAGARES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0033', '0035', '0037', '0040', '0041', '0213') THEN 'DEPOSITOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0427' THEN 'NOMINA/PENSION'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0505' THEN 'RENTING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0525' THEN 'SISTEMAS TELEMATICOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0438' THEN 'CUENTAS CLARAS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0460' THEN 'TESORERIA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0618' THEN 'TPV'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0435' THEN 'ENVIO DE REMESAS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0615' THEN 'TARJETA CREDITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0616' THEN 'TARJETA DEBITO'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0062', '0070', '0072', '0111', '0247', '0249', '0250', '0441') THEN 'PRESTAMOS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0083', '0155', '0895', '0963', '0974') THEN 'HIPOTECA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0800' THEN 'PLANES DE PENSIONES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0061', '0310', '0312', '0315', '0320', '0561', '0840', '0845', '0850', '0880', '0960', '0961') THEN 'SEGUROS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0905' THEN 'PROCESOS JUDICIALES'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0402' THEN 'PAGOS CERTIFICADOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0469' THEN 'PROMOCIONES COMERCIALES'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0868' THEN 'ASESORAMIENTO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0158' THEN 'STOCKPYME'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0860' THEN 'AHORROS' ELSE 'OTROS' END AS product_family
+
+            FROM  elenak.altas_digitales_2014_contracts_no_valor aa
+            JOIN  da_pro.saldos_cuenta_persona_fisica bb ON aa.cod_idcontra = bb.cod_idcontra          
+            WHERE TRIM(bb.cod_situdw) = 'A'  AND CAST(bb.cod_entalfa AS INT) = 182 AND TO_DATE(aa.fec_cierre) = TO_DATE(bb.fec_cierre)
+          
+            GROUP BY aa.cod_persona, 
+                     aa.fec_cierre,
+                     aa.cod_idcontra,  
+ 
+                     bb.cod_situdw, 
+                     bb.imp_salpupo,
+                     bb.imp_salmmcpo,
+                     bb.imp_salsmcpo,
+                     bb.cod_masccntr, 
+ 
+            CASE WHEN substr(bb.cod_masccntr,9,4) in ('0300', '0869', '0870') THEN 'CARTERA'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0431', '0432', '0930') THEN 'VALORES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0289', '0936', '0937') THEN 'GARANTIAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0810', '0815') THEN 'FONDOS DE INVERSION'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0625', '0628', '0675', '0680') THEN 'TARJETAS PARTNER' 
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0617', '0685') THEN 'TARJETAS DEBITO/CREDITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '992' THEN 'AVALES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0620', '0621', '0622') THEN 'BUSINESS TO BUSINESS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0241' THEN 'COMERCIO EXTERIOR'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0404' THEN 'IMPUESTOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0471' THEN 'COLABORADORES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0515', '0516', '0517') THEN 'CONFIRMING'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0001', '0002', '0004', '0005', '0006', '0007', '0008', '0009', '0020', '0021', '0029', '0030', '0201') THEN 'CUENTA DEBITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0403' THEN 'SEGURIDAD SOCIAL'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0010', '0011', '0210') THEN 'CUENTA CREDITO' 
+                 WHEN substr(bb.cod_masccntr,9,4) = '0071' THEN 'CUENTAS DIVERSAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0412', '0428') THEN 'RECIBOS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0511', '0512') THEN 'FACTORING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0435' THEN 'ENVIO DE REMESAS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0500', '0501') THEN 'LEASING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0900' THEN 'ACTIVOS EN MORA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0439' THEN 'CONTRATO MARCO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0968' THEN 'PAGARES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0033', '0035', '0037', '0040', '0041', '0213') THEN 'DEPOSITOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0427' THEN 'NOMINA/PENSION'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0505' THEN 'RENTING'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0525' THEN 'SISTEMAS TELEMATICOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0438' THEN 'CUENTAS CLARAS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0460' THEN 'TESORERIA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0618' THEN 'TPV'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0435' THEN 'ENVIO DE REMESAS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0615' THEN 'TARJETA CREDITO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0616' THEN 'TARJETA DEBITO'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0062', '0070', '0072', '0111', '0247', '0249', '0250', '0441') THEN 'PRESTAMOS'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0083', '0155', '0895', '0963', '0974') THEN 'HIPOTECA'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0800' THEN 'PLANES DE PENSIONES'
+                 WHEN substr(bb.cod_masccntr,9,4) in ('0061', '0310', '0312', '0315', '0320', '0561', '0840', '0845', '0850', '0880', '0960', '0961') THEN 'SEGUROS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0905' THEN 'PROCESOS JUDICIALES'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0402' THEN 'PAGOS CERTIFICADOS'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0469' THEN 'PROMOCIONES COMERCIALES'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0868' THEN 'ASESORAMIENTO'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0158' THEN 'STOCKPYME'
+                 WHEN substr(bb.cod_masccntr,9,4) = '0860' THEN 'AHORROS' ELSE 'OTROS' END
+          ")
+```
+
+De clientes con altas en oficina se han quedado **`r qhive("SELECT COUNT(distinct cod_persona) FROM elenak.altas_oficina_2014_products_no_valor")`** clientes que **no son de valor** y de clientes con altas digitales **`r qhive("SELECT COUNT(distinct cod_persona) FROM elenak.altas_digitales_2014_products_no_valor")`** clientes de **no valor**.
+
+En la gráfica se demuestra la distribución de productos de clientes de NO valor con altas en los dos canales en base al número de contratos activos a finales del año 2014. Igual que en el caso anterior se ha normalizado la distribución. 
+
+``` {r echo=FALSE, cache=TRUE, fig.width=12, fig.height=6} 
+
+ product <- chname(qhive(" select * 
+                          from elenak.altas_oficina_2014_products_no_valor                            
+                          WHERE (saldo_cierre_mes + saldo_medio_ultim_mes + saldo_medio_ult_6_mes) != 0 
+                          "))
+
+ num_pers_oficina <- qhive(" select count(distinct cod_persona) from elenak.altas_oficina_2014_products_no_valor ")
+ 
+ num_pers_oficina <- num_pers_oficina$EXPR_0
+ 
+ num_pers_net <- qhive(" select count(distinct cod_persona) from elenak.altas_digitales_2014_products_no_valor ")
+
+ num_pers_net <- num_pers_net$EXPR_0
+
+ re <- aggregate(product$cod_idcontra, by=list(product$product_family), FUN=length)  
+ colnames(re) <- c("product_group", "num_active_contracts");
+
+ re1<-re
+ re1$reg_type<-rep("oficina",nrow(re1))
+
+ re1$num_active_contracts_por_pers <- re1$num_active_contracts/num_pers_oficina
+ 
+ product_d <- chname(qhive(" select * 
+                          from elenak.altas_digitales_2014_products_no_valor                            
+                          WHERE (saldo_cierre_mes + saldo_medio_ultim_mes + saldo_medio_ult_6_mes) != 0 
+                          "))
+
+ fe <- aggregate(product_d$cod_idcontra, by=list(product_d$product_family), FUN=length)
+
+ colnames(fe) <- c("product_group", "num_active_contracts");
+
+ fe1<-fe
+ fe1$reg_type<-rep("bbva.es",nrow(fe1))
+
+ fe1$num_active_contracts_por_pers <- fe1$num_active_contracts/num_pers_oficina
+ 
+
+ ae<-rbind(re1,fe1)
+
+ ae1 <- ggplot(ae, aes(x=reg_type,y=num_active_contracts_por_pers, fill=product_group)) + geom_bar(width= 0.6, stat="identity") ;
+
+ library(plyr)
+
+ ce <- ddply(ae, "reg_type", transform, percent_num_active_contracts = num_active_contracts / sum(num_active_contracts) * 100);
+
+ ae2 <- ggplot(ce, aes(x=reg_type, y=percent_num_active_contracts, fill=product_group)) + geom_bar(width= 0.6, stat="identity") ;
+        
+ multiplot(ae1, ae2, cols=2);
+
+```
+
+En la siguiente gráfica se demuestra la distribución de productos de clientes de **no valor** con altas en los dos canales en base al importe total en euros de contratos activos a finales del año 2014.
+
+``` {r echo=FALSE, cache=TRUE, fig.width=12, fig.height=6} 
+
+ de <- aggregate(product$saldo_medio_ultim_mes, by=list(product$product_family), FUN=sum)  
+ 
+ colnames(de) <- c("product_group", "average_balance_EUR");
+
+ de1<-de
+ de1$reg_type<-rep("oficina",nrow(de1))
+
+ de1$average_balance_EUR_por_pers <- de1$average_balance_EUR/num_pers_oficina
+ 
+ he <- aggregate(product_d$saldo_medio_ultim_mes, by=list(product_d$product_family), FUN=sum)
+
+ colnames(he) <- c("product_group", "average_balance_EUR");
+
+ he1<-he
+ he1$reg_type<-rep("bbva.es",nrow(he1))
+
+ he1$average_balance_EUR_por_pers <- he1$average_balance_EUR/num_pers_oficina
+
+ ke<-rbind(de1,he1)
+
+ ke1 <- ggplot(ke, aes(x=reg_type, y=average_balance_EUR_por_pers, fill=product_group)) + geom_bar(width= 0.6, stat="identity");
+
+ library(plyr)
+
+ pe <- ddply(ke, "reg_type", transform, percent_average_balance_EUR = average_balance_EUR / sum(average_balance_EUR) * 100);
+
+ pe <- ddply(pe, c("reg_type"), transform, label_y = cumsum(percent_average_balance_EUR));
+
+ ke2 <- ggplot(pe, aes(x=reg_type, y=percent_average_balance_EUR, fill=product_group)) + geom_bar(width= 0.6, stat="identity") ;
+        
+ multiplot(ke1, ke2, cols=2);
+
+```
+
+Se conserva la tendencia de que los clienes con altas digitales traen menos valor al banco que los clientes con altas en oficina.
+
+### USE OF MOBILE APP and BBVA WALLET
+
+En esta sección se analiza el uso de Mobile app y BBVA Wallet.
+
+``` {r echo=FALSE, cache=TRUE, eval=FALSE}
+
+do.hive(" CREATE TABLE IF NOT EXISTS elenak.digital_onboarding_contracts_alter_3 AS 
+         
+          SELECT DISTINCT cod_persona, fecha_alta, alta_type
+                   
+          FROM elmi.digital_onboarding_contracts_alter_2 
+        
+        "); 
+
+do.hive(" CREATE TABLE IF NOT EXISTS elenak.digital_onboarding_contracts_alter_4 AS 
+         
+          SELECT DISTINCT cod_persona, fecha_alta, alta_type
+                   
+          FROM elenak.digital_onboarding_contracts_alter_3
+        
+          WHERE alta_type = 'bbva.es'
+        
+        "); 
+
+do.hive(" INSERT INTO TABLE elenak.digital_onboarding_contracts_alter_4
+         
+          SELECT DISTINCT cod_persona, fecha_alta, alta_type
+                   
+          FROM elenak.digital_onboarding_contracts_alter_3
+        
+          WHERE alta_type = 'oficina'
+          
+          ORDER BY RAND() LIMIT 1677
+        
+        "); 
+
+do.hive(" CREATE TABLE IF NOT EXISTS elenak.digital_onboard_bbva_wallet_1 AS 
+         
+          SELECT   aa.cod_persona,    
+                   aa.fecha_alta,    
+                   aa.alta_type,    
+                   CAST(bb.cod_geve_trn AS INT) cod_geve_trn,
+        
+                   bb.fec_soli_trn,      
+                   COUNT(*) as wallet_tx_count
+                   
+        
+          FROM elenak.digital_onboarding_contracts_alter_4 aa
+        
+          JOIN da_pro.transacciones_por_canal bb ON CAST(aa.cod_persona AS BIGINT) = CAST(TRIM(bb.cod_pers_trs) AS BIGINT)        
+        
+          WHERE CAST(cod_geve_trn AS INT) in (1,2,3) AND CAST(cod_serv_dv AS INT) in (101, 102) AND partition_id RLIKE '^(2014).*$' 
+          
+          GROUP BY  aa.cod_persona,    
+                    aa.fecha_alta,    
+                    aa.alta_type,    
+                    cod_geve_trn,
+        
+                    bb.fec_soli_trn  "); 
+
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elenak.digital_onboard_bbva_wallet_2 AS 
+         
+           SELECT  *         
+           FROM elenak.digital_onboard_bbva_wallet_1 
+         
+           WHERE ( MONTH(to_date(fec_soli_trn)) > MONTH(fecha_alta)  AND ( MONTH(to_date(fec_soli_trn)) <= MONTH(fecha_alta) + 6) )
+         
+                  AND YEAR(to_date(fec_soli_trn)) = 2014           
+         "); 
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elenak.digital_onboard_bbva_wallet_3 AS 
+         
+           SELECT  *         
+           FROM elenak.digital_onboard_bbva_wallet_2 
+         
+           WHERE  CAST(cod_geve_trn AS INT) in (1,2)       
+         "); 
+
+------------------------------------------------------------------------------------------------------------------------------------------------------
+  
+  do.hive(" CREATE TABLE IF NOT EXISTS elenak.digital_onboard_bbva_mobile_app_1 AS 
+         
+          SELECT   aa.cod_persona,    
+                   aa.fecha_alta,    
+                   aa.alta_type,   
+                   CAST(bb.cod_geve_trn AS INT) cod_geve_trn,        
+                   bb.fec_soli_trn,      
+                   COUNT(*) as mobile_app_tx_count                   
+        
+          FROM elenak.digital_onboarding_contracts_alter_4 aa
+          
+          JOIN da_pro.transacciones_por_canal bb ON CAST(aa.cod_persona AS BIGINT) = CAST(TRIM(bb.cod_pers_trs) AS BIGINT)      
+        
+          WHERE  CAST(cod_geve_trn AS INT) in (1,2,3) AND CAST(cod_serv_dv AS INT) in (17, 18, 44, 55, 56, 66, 73, 80, 82, 83, 84, 101, 102, 106, 107, 111, 112, 113,
+                                                                                       114, 156, 157, 158, 159, 160, 161, 163)         
+         AND partition_id RLIKE '^(2014).*$' 
+                              
+          GROUP BY  aa.cod_persona,    
+                   aa.fecha_alta,    
+                   aa.alta_type, 
+                   bb.cod_geve_trn,        
+                   bb.fec_soli_trn  "); 
+
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elenak.digital_onboard_bbva_mobile_app_2 AS 
+         
+           SELECT  *         
+           FROM elenak.digital_onboard_bbva_mobile_app_1 
+         
+           WHERE ( MONTH(to_date(fec_soli_trn)) > MONTH(fecha_alta)  AND ( MONTH(to_date(fec_soli_trn)) <= MONTH(fecha_alta) + 6) )
+         
+                  AND YEAR(to_date(fec_soli_trn)) = 2014           
+         "); 
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elenak.digital_onboard_bbva_mobile_app_3 AS 
+         
+           SELECT  *         
+           FROM elenak.digital_onboard_bbva_mobile_app_2 
+         
+           WHERE  CAST(cod_geve_trn AS INT) in (1,2)       
+         "); 
+
+```
+
+Han sido seleccionadas dos bolsas iguales de clientes con altas en bbva.es y en oficina del tamaño de 1677 personas. En el caso de **Mobile app** son **`r qhive("SELECT COUNT(distinct cod_persona) FROM elenak.digital_onboard_bbva_mobile_app_2 WHERE alta_type = 'bbva.es'")`** personas con altas digitales y sólo **`r qhive("SELECT COUNT(distinct cod_persona) FROM elenak.digital_onboard_bbva_mobile_app_2 WHERE alta_type = 'oficina'")`** personas con altas en oficina que han realizado por lo menos una transacción a través de móvil a lo largo de 6 meses después de su alta. 
+
+```{r echo=FALSE, cache=TRUE}
+
+mobile_app <- chname(qhive(" select * from elenak.digital_onboard_bbva_mobile_app_2 ")) ;
+
+mobiapp_tx_sum <- aggregate(mobile_app$mobile_app_tx_count, by=list(mobile_app$alta_type, mobile_app$cod_geve_trn), FUN=sum)
+
+colnames(mobiapp_tx_sum) <- c("alta_type", "grupo_evento", "sum_mobile_app_tx")
+
+mobiapp_tx_sum[mobiapp_tx_sum$grupo_evento== 1 , ]$grupo_evento <-  'CONSULTAS'
+mobiapp_tx_sum[mobiapp_tx_sum$grupo_evento== 2 , ]$grupo_evento <-  'OPERACIONES'
+mobiapp_tx_sum[mobiapp_tx_sum$grupo_evento== 3 , ]$grupo_evento <-  'CONTRATACIONES'
+```
+
+Aquí se puede ver el número total de transacciones de tipo CONSULTAS, OPERACIONES Y CONTRATACIONES a lo largo de 6 meses después de alta de cliente:
+
+```{r, echo = FALSE, cache=TRUE}
+
+colnames(mobiapp_tx_sum) <- c("tipo de alta", "tipo de transacción", "número total de transacciones")
+
+kable(mobiapp_tx_sum, align = 'l', longtable=TRUE, booktabs=TRUE, padding = 2)
+
+```
+
+En la siguiente gráfica se ve que el uso de Mobile app por clientes con altas en bbva.es es más elevado que por clientes "oficina". No obstante, hay que tener en cuenta que el número de personas que operan a través de móvil es diferentre en estos dos grupos de clientes y que los clientes que no han operado por el móvil no se muestran en la gráfica. 
+
+``` {r echo=FALSE, cache=TRUE, fig.width=7, fig.height=10} 
+
+mobile_app <- chname(qhive(" select * from elenak.digital_onboard_bbva_mobile_app_3 ")) ;
+
+mobiapp_tx_total <- aggregate(mobile_app$mobile_app_tx_count, by=list(mobile_app$cod_persona, mobile_app$alta_type, mobile_app$cod_geve_trn), FUN=sum)
+
+colnames(mobiapp_tx_total) <- c("cod_persona", "alta_type", "cod_geve_trn", "mobile_app_tx_total")
+
+#mobile_app_tx_total_cat <- cut(mobiapp_tx_total$mobile_app_tx_total, breaks = c(seq(0, 50, 5), seq(60, 100, 10), seq(150, 1000, 50)), right = F) 
+#mobiapp_tx_total <- cbind( mobiapp_tx_total, mobile_app_tx_total_cat)
+
+mobiapp_tx_total[mobiapp_tx_total$cod_geve_trn== 1 , ]$cod_geve_trn <-  'CONSULTAS'
+mobiapp_tx_total[mobiapp_tx_total$cod_geve_trn== 2 , ]$cod_geve_trn <-  'OPERACIONES'
+#mobiapp_tx_total[mobiapp_tx_total$cod_geve_trn== 3 , ]$cod_geve_trn <-  'CONTRATACIONES'
+
+ggplot(mobiapp_tx_total, aes(x= mobile_app_tx_total, fill=alta_type)) + geom_histogram(binwidth=5, alpha=.5, position="identity") + facet_grid(cod_geve_trn ~ .) + xlim(c(0,100))+ ylab("Nº de personas") + ggtitle("Uso de Mobile app por tipo de transacción")
+
+```
+
+La diferencia en el uso se nota aún más en el caso de CONTRATACIONES:
+
+``` {r echo=FALSE, cache=TRUE, fig.width=6, fig.height=5} 
+
+mobile_app_contr <- chname(qhive(" select * from elenak.digital_onboard_bbva_mobile_app_2 where cast(cod_geve_trn as int) in (3)  ")) ;
+
+mobiapp_tx_total_contr <- aggregate(mobile_app_contr$mobile_app_tx_count, by=list(mobile_app_contr$cod_persona, mobile_app_contr$alta_type, mobile_app_contr$cod_geve_trn), FUN=sum)
+
+colnames(mobiapp_tx_total_contr) <- c("cod_persona", "alta_type", "cod_geve_trn", "mobile_app_tx_total")
+
+mobiapp_tx_total_contr[mobiapp_tx_total_contr$cod_geve_trn== 3 , ]$cod_geve_trn <-  'CONTRATACIONES'
+
+ggplot(mobiapp_tx_total_contr, aes(x= mobile_app_tx_total, fill=alta_type)) + geom_histogram(binwidth=5, alpha=.5, position="identity") + facet_grid(cod_geve_trn ~ .) + xlim(c(0,30))+ ylab("Nº de personas") + ggtitle("Uso de Mobile app en caso de contrataciones")
+
+# mobile_app_tx_total_cat <- cut(mobiapp_tx_total_contr$mobile_app_tx_total, breaks = c(seq(0, 25, 1), seq(26, 50, 4)), right = F) 
+# mobiapp_tx_total <- cbind( mobiapp_tx_total_contr, mobile_app_tx_total_cat)
+# 
+# ggplot(mobiapp_tx_total, aes(x= mobile_app_tx_total, fill=alta_type)) + geom_histogram(binwidth=5, alpha=.5, position="identity") + facet_grid(cod_geve_trn ~ .) + xlim(c(0,25))+ ylab("Nº de personas") + ggtitle("Uso de Mobile app por tipo de transacción")
+
+```
+
+```{r echo=FALSE, cache=TRUE}
+
+wallet <- chname(qhive(" select * from elenak.digital_onboard_bbva_wallet_2 ")) ;
+
+wallet_tx_sum <- aggregate(wallet$wallet_tx_count, by=list(wallet$alta_type, wallet$cod_geve_trn), FUN=sum)
+
+colnames(wallet_tx_sum) <- c("alta_type", "grupo_evento", "sum_wallet_tx")
+
+wallet_tx_sum[wallet_tx_sum$grupo_evento== 1 , ]$grupo_evento <-  'CONSULTAS'
+wallet_tx_sum[wallet_tx_sum$grupo_evento== 2 , ]$grupo_evento <-  'OPERACIONES'
+wallet_tx_sum[wallet_tx_sum$grupo_evento== 3 , ]$grupo_evento <-  'CONTRATACIONES'
+```
+
+En el caso de **Wallet** son **`r qhive("SELECT COUNT(distinct cod_persona) FROM elenak.digital_onboard_bbva_wallet_2 WHERE alta_type = 'bbva.es'")`** personas con altas en bbva.es y **`r qhive("SELECT COUNT(distinct cod_persona) FROM elenak.digital_onboard_bbva_wallet_2 WHERE alta_type = 'oficina'")`** con altas en oficina que han realizado por lo menos una transacción a través de Wallet a lo largo de 6 meses después de su alta. 
+
+Se observa la misma tendencia. Los clientes con altas bbva.es usan más Wallet que los clientes "tradicionales".
+
+```{r, echo = FALSE, cache=TRUE}
+
+colnames(wallet_tx_sum) <- c("tipo de alta", "tipo de transacción", "número total de transacciones")
+
+kable(wallet_tx_sum, align = 'l', longtable=TRUE, booktabs=TRUE, padding = 2)
+
+```
+
+``` {r echo=FALSE, cache=TRUE, fig.width=7, fig.height=10} 
+
+wallet <- chname(qhive(" select * from elenak.digital_onboard_bbva_wallet_3 ")) ;
+
+wallet_tx_total <- aggregate(wallet$wallet_tx_count, by=list(wallet$cod_persona, wallet$alta_type, wallet$cod_geve_trn), FUN=sum)
+
+colnames(wallet_tx_total) <- c("cod_persona", "alta_type", "cod_geve_trn", "wallet_tx_total")
+
+wallet_tx_total[wallet_tx_total$cod_geve_trn== 1 , ]$cod_geve_trn <-  'CONSULTAS'
+wallet_tx_total[wallet_tx_total$cod_geve_trn== 2 , ]$cod_geve_trn <-  'OPERACIONES'
+#wallet_tx_total[wallet_tx_total$cod_geve_trn== 3 , ]$cod_geve_trn <-  'CONTRATACIONES'
+
+ggplot(wallet_tx_total, aes(x= wallet_tx_total, fill=alta_type)) + geom_histogram(binwidth=5, alpha=.5, position="identity") + facet_grid(cod_geve_trn ~ .) + xlim(c(0,100))+ ylab("Nº de personas") + ggtitle("Uso de Wallet por tipo de transacción")
+```
+
+CONTRATACIONES:
+
+``` {r echo=FALSE, cache=TRUE, fig.width=6, fig.height=5} 
+
+wallet_contr <- chname(qhive(" select * from elenak.digital_onboard_bbva_wallet_2 where cast(cod_geve_trn as int) in (3)  ")) ;
+
+wallet_tx_total_contr <- aggregate(wallet_contr$wallet_tx_count, by=list(wallet_contr$cod_persona, wallet_contr$alta_type, wallet_contr$cod_geve_trn), FUN=sum)
+
+colnames(wallet_tx_total_contr) <- c("cod_persona", "alta_type", "cod_geve_trn", "wallet_tx_total")
+
+wallet_tx_total_contr[wallet_tx_total_contr$cod_geve_trn== 3 , ]$cod_geve_trn <-  'CONTRATACIONES'
+
+ggplot(wallet_tx_total_contr, aes(x= wallet_tx_total, fill=alta_type)) + geom_histogram(binwidth=5, alpha=.5, position="identity") + facet_grid(cod_geve_trn ~ .) + xlim(c(0,30))+ ylab("Nº de personas") + ggtitle("Uso de Wallet en caso de contrataciones")
+
+```
+
+
+### USE OF BBVA NET
+
+En esta sección se analiza el uso de BBVA NET.
+
+``` {r echo=FALSE, cache=TRUE, eval=FALSE}
+
+do.hive(" CREATE TABLE IF NOT EXISTS elenak.digital_onboard_bbva_net_1 AS 
+         
+          SELECT   aa.cod_persona,    
+                   aa.fecha_alta,    
+                   aa.alta_type,    
+                   CAST(bb.cod_geve_trn AS INT) cod_geve_trn,
+        
+                   bb.fec_soli_trn,      
+                   COUNT(*) as net_tx_count
+                   
+        
+          FROM elenak.digital_onboarding_contracts_alter_4 aa
+        
+          JOIN da_pro.transacciones_por_canal bb ON CAST(aa.cod_persona AS BIGINT) = CAST(TRIM(bb.cod_pers_trs) AS BIGINT)        
+        
+          WHERE CAST(cod_geve_trn AS INT) in (1,2,3) AND CAST(cod_serv_dv AS INT) in (19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 38, 42, 43,
+                                                                                      45, 47, 48, 49, 50, 53, 57, 59, 60, 61, 64, 65, 67, 68, 69,
+                                                                                      70, 103, 109, 110, 151, 152) 
+        
+          AND partition_id RLIKE '^(2014).*$' 
+        
+          GROUP BY  aa.cod_persona,    
+                    aa.fecha_alta,    
+                    aa.alta_type,    
+                    cod_geve_trn,
+        
+                    bb.fec_soli_trn  "); 
+
+**************************************************************************
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elenak.digital_onboard_bbva_net_2 AS 
+         
+           SELECT  *         
+           FROM elenak.digital_onboard_bbva_net_1 
+         
+           WHERE ( MONTH(to_date(fec_soli_trn)) > MONTH(fecha_alta)  AND ( MONTH(to_date(fec_soli_trn)) <= MONTH(fecha_alta) + 6) )
+         
+                  AND YEAR(to_date(fec_soli_trn)) = 2014           
+         "); 
+
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elenak.digital_onboard_bbva_net_3 AS 
+         
+           SELECT  *         
+           FROM elenak.digital_onboard_bbva_net_2
+         
+           WHERE  CAST(cod_geve_trn AS INT) in (1,2)
+         
+         "); 
+
+```
+
+En el caso de **la Net** de dos bolsas iguales son **`r qhive("SELECT COUNT(distinct cod_persona) FROM elenak.digital_onboard_bbva_net_2 WHERE alta_type = 'bbva.es'")`** personas con altas digitales y **`r qhive("SELECT COUNT(distinct cod_persona) FROM elenak.digital_onboard_bbva_net_2 WHERE alta_type = 'oficina'")`** personas con altas en oficina que han realizado por lo menos una transacción a través dela Net a lo largo de 6 meses después de su alta. 
+
+```{r echo=FALSE, cache=TRUE}
+
+net <- chname(qhive(" select * from elenak.digital_onboard_bbva_net_2 ")) ;
+
+net_tx_sum <- aggregate(net$net_tx_count, by=list(net$alta_type, net$cod_geve_trn), FUN=sum)
+
+colnames(net_tx_sum) <- c("alta_type", "grupo_evento", "net_app_tx")
+
+net_tx_sum[net_tx_sum$grupo_evento== 1 , ]$grupo_evento <-  'CONSULTAS'
+net_tx_sum[net_tx_sum$grupo_evento== 2 , ]$grupo_evento <-  'OPERACIONES'
+net_tx_sum[net_tx_sum$grupo_evento== 3 , ]$grupo_evento <-  'CONTRATACIONES'
+```
+
+El número total de transacciones de cada tipo dependiendo del tipo de alta de cliente:
+
+```{r, echo = FALSE, cache=TRUE}
+
+colnames(net_tx_sum) <- c("tipo de alta", "tipo de transacción", "número total de transacciones")
+
+kable(net_tx_sum, align = 'l', longtable=TRUE, booktabs=TRUE, padding = 2)
+
+```
+
+Se ve que el uso del canal Net es mucho más alto en el caso de clientes con altas en bbva.es. 
+
+``` {r echo=FALSE, cache=TRUE, fig.width=7, fig.height=10} 
+
+net <- chname(qhive(" select * from elenak.digital_onboard_bbva_net_3 ")) ;
+
+net_tx_total <- aggregate(net$net_tx_count, by=list(net$cod_persona, net$alta_type, net$cod_geve_trn), FUN=sum)
+
+colnames(net_tx_total) <- c("cod_persona", "alta_type", "cod_geve_trn", "net_tx_total")
+
+#net_tx_total_cat <- cut(net_tx_total$net_tx_total, breaks = c(seq(0, 50, 5), seq(60, 100, 10), seq(150, 1000, 50)), right = F) 
+#net_tx_total <- cbind(net_tx_total, net_tx_total_cat)
+
+net_tx_total[net_tx_total$cod_geve_trn== 1 , ]$cod_geve_trn <-  'CONSULTAS'
+net_tx_total[net_tx_total$cod_geve_trn== 2 , ]$cod_geve_trn <-  'OPERACIONES'
+#net_tx_total[net_tx_total$cod_geve_trn== 3 , ]$cod_geve_trn <-  'CONTRATACIONES'
+
+ggplot(net_tx_total, aes(x= net_tx_total, fill=alta_type)) + geom_histogram(binwidth=5, alpha=.5, position="identity") + facet_grid(cod_geve_trn ~ .) + xlim(c(0,100))+ ylab("Nº de personas") + ggtitle("Uso de la Net por tipo de transacción")
+```
+
+Cuando el número de transacciones es mínimo, el número de personas con altas en oficina que ejecutan esta transacción es más elevado. Sin embargo, a continuación se ve claramente la tendencia del uso más frecuente del canal Net por clientes con altas digitales.
+
+CONTRATACIONES:
+
+``` {r echo=FALSE, cache=TRUE, fig.width=6, fig.height=5} 
+
+net_contr <- chname(qhive(" select * from elenak.digital_onboard_bbva_net_2 where cast(cod_geve_trn as int) in (3)  ")) ;
+
+net_tx_total_contr <- aggregate(net_contr$net_tx_count, by=list(net_contr$cod_persona, net_contr$alta_type, net_contr$cod_geve_trn), FUN=sum)
+
+colnames(net_tx_total_contr) <- c("cod_persona", "alta_type", "cod_geve_trn", "net_tx_total")
+
+net_tx_total_contr[net_tx_total_contr$cod_geve_trn== 3 , ]$cod_geve_trn <-  'CONTRATACIONES'
+
+ggplot(net_tx_total_contr, aes(x= net_tx_total, fill=alta_type)) + geom_histogram(binwidth=5, alpha=.5, position="identity") + facet_grid(cod_geve_trn ~ .) + xlim(c(0,20))+ ylab("Nº de personas") + ggtitle("Uso de la Net en caso de contrataciones")
+
+```
+
+### CHANNEL USAGE
+
+El número de operaciones que ha realizado cada cliente durante el último mes y los últimos 3 meses en diferentes canales: Móvil, TPV, ATM, Net, Oficina y Mailing.
+
+```{r echo=FALSE, cache=TRUE, eval=FALSE}
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elenak.digital_onboard_channel_usage AS
+         
+           SELECT aa.cod_persona,
+                  aa.fecha_alta,
+                  aa.alta_type,
+         
+                  bb.movil_ultimo_mes,
+                  bb.tpv_ultimo_mes,
+                  bb.atm_ultimo_mes,
+                  bb.net_ultimo_mes,
+                  bb.oficina_ultimo_mes,
+                  bb.mailing_ultimo_mes,
+                  bb.movil_ultimos_3_meses,
+                  bb.tpv_ultimos_3_meses,
+                  bb.atm_ultimos_3_meses,
+                  bb.net_ultimos_3_meses,
+                  bb.oficina_ultimos_3_meses,
+                  bb.mailing_ultimos_3_meses
+         
+           FROM elenak.digital_onboarding_contracts_alter_4 aa
+        
+           JOIN da_rafa.num_transacciones_por_canal bb ON aa.cod_persona = bb.cod_persona ");
+
+```
+
+``````{r Canales, results='asis', tidy=FALSE, echo=FALSE, cache=TRUE, fig.width=8}
+
+channel_usage <- chname(qhive(" select * from elenak.digital_onboard_channel_usage ")) ;
+
+channel_usage_vis <- gvisTable(data.frame(channel_usage), 
+                             options=list(
+                              width=1000,
+                              height=500,title = "Uso de canales"), chartid = "Canales")
+
+print(channel_usage_vis, 'chart')
+
+```
+
+```{r echo=FALSE, cache=TRUE, eval=FALSE}
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elenak.digital_onboard_movil_user_last_month AS
+         
+           SELECT cod_persona,
+                  fecha_alta,
+                  alta_type,
+                  movil_ultimo_mes,
+                  tpv_ultimo_mes,
+                  atm_ultimo_mes,
+                  net_ultimo_mes,
+                  oficina_ultimo_mes,
+                  mailing_ultimo_mes
+         
+           FROM elenak.digital_onboard_channel_usage
+         
+           WHERE movil_ultimo_mes <> 0 AND net_ultimo_mes = 0 AND oficina_ultimo_mes = 0 ");   
+
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elenak.digital_onboard_movil_user_last_3_months AS
+         
+           SELECT cod_persona,
+                  fecha_alta,
+                  alta_type,
+                  movil_ultimos_3_meses,
+                  tpv_ultimos_3_meses,
+                  atm_ultimos_3_meses,
+                  net_ultimos_3_meses,
+                  oficina_ultimos_3_meses,
+                  mailing_ultimos_3_meses
+         
+           FROM elenak.digital_onboard_channel_usage
+         
+           WHERE movil_ultimos_3_meses <> 0 AND net_ultimos_3_meses = 0 AND oficina_ultimos_3_meses = 0 ");
+
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elenak.digital_onboard_net_user_last_month AS
+         
+           SELECT cod_persona,
+                  fecha_alta,
+                  alta_type,
+                  movil_ultimo_mes,
+                  tpv_ultimo_mes,
+                  atm_ultimo_mes,
+                  net_ultimo_mes,
+                  oficina_ultimo_mes,
+                  mailing_ultimo_mes
+         
+           FROM elenak.digital_onboard_channel_usage
+         
+           WHERE net_ultimo_mes <> 0 AND movil_ultimo_mes = 0 AND oficina_ultimo_mes = 0 ");   
+
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elenak.digital_onboard_net_user_last_3_months AS
+         
+           SELECT cod_persona,
+                  fecha_alta,
+                  alta_type,
+                  movil_ultimos_3_meses,
+                  tpv_ultimos_3_meses,
+                  atm_ultimos_3_meses,
+                  net_ultimos_3_meses,
+                  oficina_ultimos_3_meses,
+                  mailing_ultimos_3_meses
+         
+           FROM elenak.digital_onboard_channel_usage
+         
+           WHERE net_ultimos_3_meses <> 0 AND movil_ultimos_3_meses = 0 AND oficina_ultimos_3_meses = 0 ");
+
+```
+
+
+El porcentaje de clientes que han operado por el **móvil** y otros canales y **no han operado ni en la Net, ni en oficina** en el mes de diciembdre de 2014 con altas en **bbva.es** es **11,2%** y con altas en oficina es **9,1%**. La tendencia se conserva si analizamos el período de 3 últimos meses del año 2014: **3,8%** clientes de **bbva.es** y **3,1%** de oficina. 
+
+El porcentaje de clientes que han operado por **la Net** y otros canales y **no han operado ni por el móvil, ni en oficina** son **13,3%** de **bbva.es** y **6%** de **oficina**. Igual que en el caso anterior la tendencia se confirma para el período de 3 meses: **5,9%** de clientes con altas digitales y **3,1%** de clientes con altas en oficina.
+
+En el caso de uso de móvil sin uso de oficina y Net la diferencia entre porcentajes para dos bolsas no es grande. En el caso de la Net la diferencia es bastante más notable.
+
+### VISITS TO BRANCHES
+
+```{r echo=FALSE, eval=FALSE, cache=TRUE}
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elenak.txc_num_visitas_oficina_last_month AS
+         
+           SELECT cod_pers_trs as cod_persona,
+                  COUNT(DISTINCT fec_soli_trn) as visitas_oficina
+         
+           FROM da_pro.transacciones_por_canal
+         
+           WHERE CAST(trim(cod_serv_dv) AS INT) = 1 AND CAST(trim(cod_canal_dv) AS INT) = 1 AND CAST(trim(cod_medio_dv) as int) = 1 AND partition_id = '20141231'
+                 AND CAST(trim(cod_eve_trn) AS INT) NOT IN (146, 147, 153, 177, 180, 183, 184, 194, 195, 196, 197, 203, 205, 209, 210, 211, 212, 219, 223, 231,
+                                                            264, 284, 285, 289, 291, 304) 
+                 AND CAST(trim(cod_geve_trn) AS INT) in (1, 2, 3, 4)
+         
+           GROUP BY cod_pers_trs");   
+
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elenak.digital_onboard_num_visitas_oficina_last_month AS
+         
+           SELECT aa.cod_persona,
+                  aa.fecha_alta,
+                  aa.alta_type,
+                  
+                  bb.visitas_oficina
+         
+           FROM elenak.digital_onboarding_contracts_alter_3 aa
+         
+           JOIN elenak.txc_num_visitas_oficina_last_month bb ON aa.cod_persona = bb.cod_persona ");
+
+```
+
+La media de visitas a la oficina en el mes de diciembre 2014 por clientes con altas en **bbva.es** es **1,95** y por clientes con altas en **oficina** es **2,211**. 
+
+
+
+
+
+
+

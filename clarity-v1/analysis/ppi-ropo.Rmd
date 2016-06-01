@@ -1,0 +1,1761 @@
+---
+output:
+  html_document:
+    self_contained: no
+  pdf_document: default
+---
+
+[Digital Sales] Pension Plan - ROPO (Online To Store)
+
+```{r, echo=FALSE}
+# This is the first mandatory section.
+
+title     <- '[Digital Sales] Pension Plan - ROPO (Online To Store)'
+
+# Keywords. Text separated by commas. E.g. keywords <- 'customer health, recibos' 
+# Keywords can classify the attribute in categories such as 'valor, vinculación, digitalidad', describe used tables such as 'recibos, 
+# transacciones tarjetas, segmento plan uno' or include other relevant info. Search keywords in the portal to find commonly used terms
+# and create new keywords only if justified.
+
+keywords  <- 'planes de pensiones, PPI, pp, plan de pesiones, aportacion extaordinaria, alta, ROPO, googlevis'
+```
+
+
+
+```{r, echo=FALSE, cache=FALSE, warning=FALSE, message=FALSE}
+fec_inicial <- "2014-10-01"
+fec_final   <- "2014-12-31"
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+source('~/bda_clarity/tools/warehouse_basics.R')
+source('~/bda_clarity/tools/write.hive.R')
+suppressPackageStartupMessages(library('data.table'))
+suppressPackageStartupMessages(library('ggplot2'))
+suppressPackageStartupMessages(library('plyr'))
+suppressPackageStartupMessages(library('data.table'))
+suppressPackageStartupMessages(library('googleVis'))
+suppressPackageStartupMessages(library('reshape2'))
+suppressPackageStartupMessages(library('reshape'))
+suppressPackageStartupMessages(library('scales'))
+suppressPackageStartupMessages(library('scales'))
+suppressPackageStartupMessages(library('grid'))
+
+
+op <- options(gvis.plot.tag=NULL)
+op <- options(gvis.plot.tag="chart")
+
+doit = FALSE
+
+
+labels_euro <- function(x) {# no rounding
+paste0(format(x, big.mark = ",", decimal.mark = ".", trim = TRUE,
+    scientific = FALSE), " €")
+} 
+
+
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  require(grid)
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+
+```
+
+```{r dependencias, echo=FALSE}
+
+### DEPENDENCIAS DE TABLAS
+
+campaigns.navegacion_ppi_octenero <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'campaigns.navegacion_ppi_octenero', '*', sqname = 'campaigns.navegacion_ppi_octenero')
+clarity_elements.saldos_pasivo_particular <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'clarity_elements.saldos_pasivo_particular', '*', sqname = 'clarity_elements.saldos_pasivo_particular')
+clarity_elements.saldos_activo_particular <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'clarity_elements.saldos_activo_particular', '*', sqname = 'clarity_elements.saldos_activo_particular')
+clarity_elements.metricas_segm_comport <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'clarity_elements.metricas_segm_comport', '*', sqname = 'clarity_elements.metricas_segm_comport')
+campaigns.edad <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'campaigns.edad', '*', sqname = 'campaigns.edad')
+da_pro.clientes_domicilios <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'da_pro.clientes_domicilios', '*', sqname = 'da_pro.clientes_domicilios')
+
+segmcomport_sep14 <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20140930', '*', sqname = 'da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20140930')
+
+
+
+
+
+```
+
+
+
+###ONLINE TO STORE Plan de Pensiones (Último trimestre 2014)
+
+El objeto de este estudio es intentar detectar el % de clientes que antes de realizar una aportación extraordinaria o una alta a Plan de pensiones a través de la oficina ha estado brujuleando en la web de bbva.es.
+
+
+Tanto las altas como las aportaciones extra **NET** representan aproximadamente un **10% de las de OFICINA** de Octubre a Diciembre 2014.
+
+
+Según el dato MIS de Altas y Aportaciones extraordinarias PPI de Octubre a Diciembre 2014  obtenemos las siguientes cifras:
+
+ - Altas OFICINA: 27.990 
+ - Altas NET: 257
+ 
+ - Aportación extraordinaria OFICINA: 51.690
+ - Aportación extraordinaria NET: 501 
+
+```{r altasaportacionesinfo, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE, fig.width=7, fig.height=5}
+ 
+ofi <- c(27999, 51690)
+net <- c(257, 501)
+names <- c("Alta", "Aport extra")
+
+df = data.frame(names, ofi, net) 
+
+df2 <-melt(df)
+
+d <- ggplot(df2, aes(names, value, colour=variable))
+d + geom_point(size=5) + ggtitle("Número de altas y aportaciones extra OFICINA/NET Oct-Dic14") + ylab("Número de altas/aportaciones extra")  + xlab("Tipo")
+
+````
+
+
+
+
+ 
+```{r, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+
+# *Explicación*
+# 
+# Con los ficheros que ha obtenido Marta correspondientes a cclien que han realizado contrataciones y aportaciones extraordinarias en el canal oficina, deberíamos ser capaces de, si pudiesemos diferenciar el comportamiento por contrataciones y aportaciones extraordinarias/periódica mejor :
+# 
+#  - % de CClient que previamente han navegado por páginas de contenido ppis en la web
+#  - % de CClient que han iniciado un proceso de contratación o aportación extraordinaria
+#  - % de Cclient que han utilizado el Simulador de Aportaciones
+#  - Ranking de páginas, elementos (Simuladores) más vistos por estos Cclient
+#  - Periodo de tiempo que pasa desde que realizan la última navegación en el canal web y formalización la contratación o aportación en la oficina.
+#  - Demás aspectos interesantes que se os ocurran
+#      -  Comparar digitalidad, ingresos, edad, sexo de los de ofi vs no of i
+# 
+# 
+# Para complementar este análisis nuestro compañero Nacho va a realizar un ejercicio similar de contribución de páginas pero acotándolo a los cclient que han contratado o realizado una aportación extraordinaria desde el canal web. Aqui Nacho si podemos incluir aportaciones periódicas y diferenciar entre contrataciones, aport.extraordinarias y aport.periódicas mejor
+
+`````
+
+
+####RESULTADOS ROPO
+
+Clientes que han realizado el alta o la aportación extra en la OFICINA pero hacen uso de la web antes de la contratación.
+
+**Octubre-Diciembre 2014**
+
+De los **51.690** clientes con aportación extraordinaria en oficina entre Octubre a Diciembre 2014:
+
+ - El **10%** ha navegado por **contenido PPI** antes de contratar en la oficina (5169)
+ - El **5%** han **iniciado la simulación** antes de contratar en oficina (2584)
+ - Un **3,5%** han **terminado la simulación**  antes de contratar en oficina (1809)
+
+De los **27.990** clientes con altas PPI en oficina entre Octubre a Diciembre 2014:
+
+ - Un **9%** ha navegado por **contenido PPI** antes de contratar en la oficina (2519)
+ - El **4%** han **iniciado la simulación** antes de contratar en oficina (1119)
+ - Un **2,5%** han **terminado la simulación**  antes de contratar en oficina (699)
+ 
+ 
+
+```{r, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+
+# **Enero 2015**
+# 
+# De los  22.184 clientes con aport extra en Enero 2015:
+# 
+#  - El 2,6% navega por contenido PPI antes de contratar en oficina
+#  - El 5,6% inician el formulario de simulación antes de contratar en oficina
+# 
+# De los  5,192 clientes con alta PPI en Enero 2015:
+# 
+#  - El 3,6% navega por contenido PPI antes de contratar en oficina
+#  - El 0% simula antes de contratar en oficina (¿no tienen acceso?)
+
+````
+
+
+
+```{r datosinput, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+
+####DATOS INPUT : ALTAS Y APORTACIONES OCT-DIC14 (NET Y OFI)
+
+#### Tanto las altas como las aportaciones extra NET representan aprox un 10% de las de OFI
+
+#altas_octdic14_ALL = read.xls("../DATA/Altas_y_aport_ext_PPIoct-dic2014.xlsx", header = TRUE, sheet="Altas PPIs")
+#LIMPIO
+#altas_octdic14_ALL = read.csv("/us/e042614//DATA/Altas_ppi_octdic14_2.csv", header = TRUE, sep="\t")
+altas_octdic14_ALL = read.csv("/us/e042614/DATA/Altas_ppi_octdic14.csv", header = TRUE, sep="\t")
+
+#Replace importes 7.353,34 por 7353.34 interpretable por R and transform character to numeric
+altas_octdic14_ALL$Importe.Homogéneo.resto <- gsub("[.]","", altas_octdic14_ALL$Importe.Homogéneo.resto)
+altas_octdic14_ALL$Importe.Homogéneo.resto <- gsub(",",".", altas_octdic14_ALL$Importe.Homogéneo.resto)
+altas_octdic14_ALL$Importe.Homogéneo.web <- gsub("[.]","", altas_octdic14_ALL$Importe.Homogéneo.web)
+altas_octdic14_ALL$Importe.Homogéneo.web <- gsub(",",".", altas_octdic14_ALL$Importe.Homogéneo.web)
+
+altas_octdic14_ALL2 <- transform(altas_octdic14_ALL, Importe.Homogéneo.web = as.numeric(Importe.Homogéneo.web), Importe.Homogéneo.resto = as.numeric(Importe.Homogéneo.resto))
+altas_octdic14_ALL <- altas_octdic14_ALL2
+
+#34.145 registros ALTAS TOTALES Oct-Dic 14
+
+
+Altas_OctDic14_NET <- subset(altas_octdic14_ALL, altas_octdic14_ALL$Epigrafe == ".    INDIVIDUALES PARTICIPES" &  altas_octdic14_ALL$descrip.área.operativa == "BANCA COMERCIAL" & altas_octdic14_ALL$Número.Homogéneo.web == 1)
+#257 registros altas NET Oct-Dic 14
+Altas_OctDic14_OFI <- subset(altas_octdic14_ALL, altas_octdic14_ALL$Epigrafe == ".    INDIVIDUALES PARTICIPES" &  altas_octdic14_ALL$descrip.área.operativa == "BANCA COMERCIAL" & altas_octdic14_ALL$Número.Homogéneo.resto == 1)
+#27.990 registros altas OFI Oct-Dic 14
+
+#aport_extra_octdic14_ALL = read.xls("../DATA/Altas y aport ext PPI oct-dic 2014.xlsx", header = TRUE, sheet="Aportaciones PPIs")
+##LIMPIO
+#aport_extra_octdic14_ALL = read.csv("/us/e042614/DATA/Aportextra_octdic14_2.csv", header = TRUE, sep="\t")
+aport_extra_octdic14_ALL = read.csv("/us/e042614/DATA/Aportextra_octdic14.csv", header = TRUE, sep="\t")
+
+#Replace importes 7.353,34 por 7353.34 interpretable por R and transform character to numeric
+aport_extra_octdic14_ALL$Importe.Homogéneo.resto <- gsub("[.]","", aport_extra_octdic14_ALL$Importe.Homogéneo.resto)
+aport_extra_octdic14_ALL$Importe.Homogéneo.resto <- gsub(",",".", aport_extra_octdic14_ALL$Importe.Homogéneo.resto)
+aport_extra_octdic14_ALL$Importe.Homogéneo.web <- gsub("[.]","", aport_extra_octdic14_ALL$Importe.Homogéneo.web)
+aport_extra_octdic14_ALL$Importe.Homogéneo.web <- gsub(",",".", aport_extra_octdic14_ALL$Importe.Homogéneo.web)
+
+aport_extra_octdic14_ALL2 <- transform(aport_extra_octdic14_ALL, Importe.Homogéneo.web = as.numeric(Importe.Homogéneo.web), Importe.Homogéneo.resto = as.numeric(Importe.Homogéneo.resto))
+aport_extra_octdic14_ALL <- aport_extra_octdic14_ALL2
+
+
+##62.207 registros APORT EXTRA TOTALES Oct-Dic 14
+
+Aport_extra_OctDic14_NET <- subset(aport_extra_octdic14_ALL, aport_extra_octdic14_ALL$Epigrafe == ".    INDIVIDUALES PARTICIPES" &  aport_extra_octdic14_ALL$descrip.área.operativa == "BANCA COMERCIAL" & aport_extra_octdic14_ALL$Número.Homogéneo.web == 1)
+##5263 registros NET aport extra Oct-Dic 14
+Aport_extra_OctDic14_OFI <- subset(aport_extra_octdic14_ALL, aport_extra_octdic14_ALL$Epigrafe == ".    INDIVIDUALES PARTICIPES" &  aport_extra_octdic14_ALL$descrip.área.operativa == "BANCA COMERCIAL" & aport_extra_octdic14_ALL$Número.Homogéneo.resto == 1)
+#40.608 registros OFI aport extra Oct-Dic 14
+
+``````
+
+
+
+
+```{r navegacionomniture, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+
+
+#### DATOS DE NAVEGACION OMNITURE
+
+#navegacionALL_Enero15 <- qimpala("select * from campaigns.navegacion_ppi_octenero where fecha LIKE '%January%'")
+#2.956.625 registros en Enero 2015
+navegacionALL_OctDic14 <- qimpala("select * from campaigns.navegacion_ppi_octenero where fecha NOT LIKE '%January%'")
+#10.469.335 registros de Octubre a Diciembre 2014
+
+#navegacion <- navegacionALL_Enero15
+navegacion <- navegacionALL_OctDic14
+
+navegacion <- transform(navegacion, idclient= as.numeric(idclient))
+`````
+
+
+
+
+
+
+```{r altasnavegacion, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+
+
+######## NAVEGACION EN CONTENIDO Y PPI  + TIEMPO MEDIO ENTRE LA ULTIMA CONEXION WEB Y LA CONTRATACION EN OFICINA
+
+###### ALTAS OCT-DIC 14 OFICINA 
+
+
+
+
+##INPUT DATA (only cod_cliente: MEJOR USAR LOS DATOS DEL EXCELL ABOVE)
+
+#altaEnero15 <- read.csv("../DATA/alta_ppi_enero2015.csv")
+#5192 altas PPI Enero 2015
+#aportextraEnero15 <- read.csv("../DATA/aport_extra_ppi_enero2015.csv")
+## 22.184 aportaciones extra en Enero 2015
+
+
+#altaOctDic14 <- read.csv("../DATA/alta_ppi_octdic2014.csv")
+## 27.281 altas de Octubre a Diciembre 2014
+#aportextraOctDic14 <- read.csv("../DATA/aport_extra_ppi_octdic2014.csv")
+## 40.610 aportaciones extra de Octubre a Diciembre 2014
+
+
+### !!!!! CHANGE data and navegacion  DEPENDING ON THE DATASET
+
+#data <- altaEnero15
+#names(data) <- "idclient"
+# 
+data <- Altas_OctDic14_OFI
+names(data)[15] <- "idclient"
+
+
+data <- transform(data, idclient= as.numeric(idclient))
+
+naveg_data <- merge(data, navegacion, by="idclient")
+
+#length(unique(naveg_data$idclient))
+##269 clientes unicos con altas PPI Enero 2015 con navegacion web
+##821 clientes unicos con aport extra PPI Enero 2015 con navegacion web
+
+#4742 clientes unicos con aport extra PPI Oct-Dic 2014 con navegacion web
+#187 clientes unicos con alta  PPI Oct-Dic 2014 con navegacion web
+
+#length(unique(naveg_data$idclient))/dim(data) *100 
+#Solo un 5,2% navega antes (contenido sin distinguir) altas PPI Enero 2015
+#Solo un 3,7% navega antes (contenido sin distinguir) aport extra PPI Enero 2015
+
+#Un 17% navega antes (contenido sin distinguir) aport extra PPI OctDic 2014
+#Un 13% navega antes (contenido sin distinguir) altas PPI Enero 2015
+
+
+####MIRAR CLIENTES NO LOGEADOS SIN COD_CLIENTE   - visitor_id always = NULL
+
+
+
+
+
+######################
+
+
+
+
+###% DE CLIENTES CON CONTENIDO PLAN DE PENSIONES
+contenido <- grep(".*(ahorro e inversion).*", naveg_data$pages , value=TRUE) 
+navegac_clientes_contenido <- naveg_data[naveg_data$pages %in% contenido,]
+
+
+navegac_clientes_contenido$fecha <- as.Date(navegac_clientes_contenido$fecha, format="%B %d %Y")
+#unique(as.Date(navegacion$fecha, format="%B %d %Y"))
+
+navegac_clientes_contenido$fecha <- format(as.Date(navegac_clientes_contenido$fecha, format="%B %d %Y"), format="%d/%m/%y")
+#unique(format(as.Date(navegacion$fecha, format="%B %d %Y"), format="%d/%m/%y"))
+
+
+
+NOnavegac_clientes_contenido <- naveg_data[!naveg_data$pages %in% contenido,]
+
+#length(unique(navegac_clientes_contenido$idclient))
+##190 altas Enero15 navega antes por contenido PPI
+##591 apor extra Enero15 navega antes por contenido PPI
+
+##2999 apor extra OctDic 2014 navega antes por contenido PPI
+
+
+#length(unique(navegac_clientes_contenido$idclient))/dim(data) *100 
+## Un 3,6% del total de altas ofi PP en ENERO 2015 ha navegado antes por contenido PPI
+## Un 2,6% del total de aport extra ofi PP en ENERO 2015 ha navegado antes por contenido PPI
+
+
+## Un 10% del total de aport extra ofi PP en OctDic 2015 ha navegado antes por contenido PPI
+## Un 9% del total de altas ofi PP en OctDic 2015 ha navegado antes por contenido PPI
+
+
+
+
+
+
+
+
+
+
+#############
+
+
+
+# ### TIEMPO MEDIO DESDE LA ULTIMA VISITA WEB HASTA LA CONTRATACION
+
+
+navegac_clientes_contenido_maxmin <- ddply(navegac_clientes_contenido, c("idclient", "Fecha.del.Evento"), summarise,
+               maxfec    = max(fecha),
+           minfec = min(fecha))
+
+# head(navegac_clientes_contenido_maxmin)
+#   idclient Fecha.del.Evento   maxfec   minfec
+# 1       11         30/12/14 06/12/14 06/12/14
+# 2       35         19/12/14 02/11/14 02/11/14
+# 3      234          9/12/14 26/10/14 26/10/14
+# 4      597          3/11/14 21/11/14 21/11/14
+# 5      733         16/10/14 31/10/14 28/10/14
+# 6      733          4/12/14 31/10/14 28/10/14
+
+## RESTA  FECHA DEL ALTA - FECHA DE ULTIMA NAVEGACION
+navegac_clientes_contenido_maxmin$diferencia <- as.integer(difftime(strptime(navegac_clientes_contenido_maxmin$Fecha.del.Evento, "%d/%m/%y"), strptime(navegac_clientes_contenido_maxmin$maxfec, "%d/%m/%y"), units="days"))
+
+# 
+# idclient Fecha.del.Evento   maxfec   minfec diferencia
+# 1       11         30/12/14 06/12/14 06/12/14         24
+# 2       35         19/12/14 02/11/14 02/11/14         47
+# 3      234          9/12/14 26/10/14 26/10/14         44
+# 4      597          3/11/14 21/11/14 21/11/14        -18
+# 5      733         16/10/14 31/10/14 28/10/14        -15
+# 6      733          4/12/14 31/10/14 28/10/14         34
+
+
+#mean(navegac_clientes_contenido_maxmin$diferencia)
+#15 aport periodica octdic14 (positivos y negativos)
+# 8 alta octdic14 (positivos y negativos)
+
+navegac_clientes_contenido_maxmin_pos <- subset(navegac_clientes_contenido_maxmin, diferencia > 0)
+# 120 positivos APORTACION EXTRA OCT-DIC14
+#mean(navegac_clientes_contenido_maxmin_pos$diferencia)
+# 38 días APORTACION EXTRA OCT-DIC14
+# 34 días ALTA
+
+
+#ggplot(navegac_clientes_contenido_maxmin_pos, aes(diferencia)) +
+#  geom_density()
+
+navegac_clientes_contenido_maxmin_neg <- subset(navegac_clientes_contenido_maxmin, diferencia < 0)
+#67 negativos (días después del alta navegan por contenido PPI) APORTACION EXTRA OCT-DIC14
+#mean(navegac_clientes_contenido_maxmin_neg$diferencia)
+# - 24 días APORTACION EXTRA OCT-DIC14
+# - 30 dias ALTA
+
+
+
+altas_octdic14_dif <- navegac_clientes_contenido_maxmin_pos
+altas_octdic14_dif$tipo <- "Altas"
+
+
+```
+
+
+```{r aportacionesnavegacion, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+
+
+######## NAVEGACION EN CONTENIDO Y PPI  + TIEMPO MEDIO ENTRE LA ULTIMA CONEXION WEB Y LA CONTRATACION EN OFICINA
+
+###### APORTACIONES EXTRA OCT-DIC 14 OFICINA 
+
+
+
+
+##INPUT DATA (only cod_cliente: MEJOR USAR LOS DATOS DEL EXCELL ABOVE)
+
+#altaEnero15 <- read.csv("../DATA/alta_ppi_enero2015.csv")
+#5192 altas PPI Enero 2015
+#aportextraEnero15 <- read.csv("../DATA/aport_extra_ppi_enero2015.csv")
+## 22.184 aportaciones extra en Enero 2015
+
+
+#altaOctDic14 <- read.csv("../DATA/alta_ppi_octdic2014.csv")
+## 27.281 altas de Octubre a Diciembre 2014
+#aportextraOctDic14 <- read.csv("../DATA/aport_extra_ppi_octdic2014.csv")
+## 40.610 aportaciones extra de Octubre a Diciembre 2014
+
+
+### !!!!! CHANGE data and navegacion  DEPENDING ON THE DATASET
+
+#data <- altaEnero15
+#names(data) <- "idclient"
+# 
+data <- Aport_extra_OctDic14_OFI
+names(data)[15] <- "idclient"
+
+
+data <- transform(data, idclient= as.numeric(idclient))
+
+naveg_data <- merge(data, navegacion, by="idclient")
+
+#length(unique(naveg_data$idclient))
+##269 clientes unicos con altas PPI Enero 2015 con navegacion web
+##821 clientes unicos con aport extra PPI Enero 2015 con navegacion web
+
+#4742 clientes unicos con aport extra PPI Oct-Dic 2014 con navegacion web
+#187 clientes unicos con alta  PPI Oct-Dic 2014 con navegacion web
+
+#length(unique(naveg_data$idclient))/dim(data) *100 
+#Solo un 5,2% navega antes (contenido sin distinguir) altas PPI Enero 2015
+#Solo un 3,7% navega antes (contenido sin distinguir) aport extra PPI Enero 2015
+
+#Un 17% navega antes (contenido sin distinguir) aport extra PPI OctDic 2014
+#Un 13% navega antes (contenido sin distinguir) altas PPI Enero 2015
+
+
+####MIRAR CLIENTES NO LOGEADOS SIN COD_CLIENTE   - visitor_id always = NULL
+
+
+
+
+
+######################
+
+
+
+
+###% DE CLIENTES CON CONTENIDO PLAN DE PENSIONES
+contenido <- grep(".*(ahorro e inversion).*", naveg_data$pages , value=TRUE) 
+navegac_clientes_contenido <- naveg_data[naveg_data$pages %in% contenido,]
+
+
+navegac_clientes_contenido$fecha <- as.Date(navegac_clientes_contenido$fecha, format="%B %d %Y")
+#unique(as.Date(navegacion$fecha, format="%B %d %Y"))
+
+navegac_clientes_contenido$fecha <- format(as.Date(navegac_clientes_contenido$fecha, format="%B %d %Y"), format="%d/%m/%y")
+#unique(format(as.Date(navegacion$fecha, format="%B %d %Y"), format="%d/%m/%y"))
+
+
+
+NOnavegac_clientes_contenido <- naveg_data[!naveg_data$pages %in% contenido,]
+
+#length(unique(navegac_clientes_contenido$idclient))
+##190 altas Enero15 navega antes por contenido PPI
+##591 apor extra Enero15 navega antes por contenido PPI
+
+##2999 apor extra OctDic 2014 navega antes por contenido PPI
+
+
+#length(unique(navegac_clientes_contenido$idclient))/dim(data) *100 
+## Un 3,6% del total de altas ofi PP en ENERO 2015 ha navegado antes por contenido PPI
+## Un 2,6% del total de aport extra ofi PP en ENERO 2015 ha navegado antes por contenido PPI
+
+
+## Un 10% del total de aport extra ofi PP en OctDic 2015 ha navegado antes por contenido PPI
+## Un 9% del total de altas ofi PP en OctDic 2015 ha navegado antes por contenido PPI
+
+
+
+
+
+
+
+
+
+
+#############
+
+
+
+# ### TIEMPO MEDIO DESDE LA ULTIMA VISITA WEB HASTA LA CONTRATACION
+
+
+navegac_clientes_contenido_maxmin <- ddply(navegac_clientes_contenido, c("idclient", "Fecha.del.Evento"), summarise,
+               maxfec    = max(fecha),
+           minfec = min(fecha))
+
+# head(navegac_clientes_contenido_maxmin)
+#   idclient Fecha.del.Evento   maxfec   minfec
+# 1       11         30/12/14 06/12/14 06/12/14
+# 2       35         19/12/14 02/11/14 02/11/14
+# 3      234          9/12/14 26/10/14 26/10/14
+# 4      597          3/11/14 21/11/14 21/11/14
+# 5      733         16/10/14 31/10/14 28/10/14
+# 6      733          4/12/14 31/10/14 28/10/14
+
+## RESTA  FECHA DEL ALTA - FECHA DE ULTIMA NAVEGACION
+navegac_clientes_contenido_maxmin$diferencia <- as.integer(difftime(strptime(navegac_clientes_contenido_maxmin$Fecha.del.Evento, "%d/%m/%y"), strptime(navegac_clientes_contenido_maxmin$maxfec, "%d/%m/%y"), units="days"))
+
+# 
+# idclient Fecha.del.Evento   maxfec   minfec diferencia
+# 1       11         30/12/14 06/12/14 06/12/14         24
+# 2       35         19/12/14 02/11/14 02/11/14         47
+# 3      234          9/12/14 26/10/14 26/10/14         44
+# 4      597          3/11/14 21/11/14 21/11/14        -18
+# 5      733         16/10/14 31/10/14 28/10/14        -15
+# 6      733          4/12/14 31/10/14 28/10/14         34
+
+
+#mean(navegac_clientes_contenido_maxmin$diferencia)
+#15 aport periodica octdic14 (positivos y negativos)
+# 8 alta octdic14 (positivos y negativos)
+
+navegac_clientes_contenido_maxmin_pos <- subset(navegac_clientes_contenido_maxmin, diferencia > 0)
+# 120 positivos APORTACION EXTRA OCT-DIC14
+#mean(navegac_clientes_contenido_maxmin_pos$diferencia)
+# 38 días APORTACION EXTRA OCT-DIC14
+# 34 días ALTA
+
+
+#ggplot(navegac_clientes_contenido_maxmin_pos, aes(diferencia)) +
+#  geom_density()
+
+navegac_clientes_contenido_maxmin_neg <- subset(navegac_clientes_contenido_maxmin, diferencia < 0)
+#67 negativos (días después del alta navegan por contenido PPI) APORTACION EXTRA OCT-DIC14
+#mean(navegac_clientes_contenido_maxmin_neg$diferencia)
+# - 24 días APORTACION EXTRA OCT-DIC14
+# - 30 dias ALTA
+
+
+
+aportextra_octdic14_dif <- navegac_clientes_contenido_maxmin_pos
+aportextra_octdic14_dif$tipo <- "Aport extra"
+
+
+
+```
+
+
+#### TIEMPO QUE TRANSCURRE ENTRE LA ÚLTIMA CONEXIÓN A INTERNET Y EL ALTA/APORTACIÓN EN OFICINA
+
+
+El tiempo medio transcurrido desde la última navegación por contenido relacionado con ahorro e inversión hasta la contratación es:
+
+  - Media de días en aportaciones extraordinarias PPI:  `r round(mean(aportextra_octdic14_dif$diferencia),0)` días 
+  - Media de días en altas PPI: `r round(mean(altas_octdic14_dif$diferencia),0)` días
+
+```{r, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE, fig.width=15, fig.height=8}
+
+##### PLOT DENSITY DE APORT EXTRA Y ALTAS A LA VEZ
+t <- rbind(aportextra_octdic14_dif, altas_octdic14_dif)
+
+cdat <- ddply(t, "tipo", summarise, diferencia.mean=mean(diferencia))
+#cdat
+#>      canal Importe.mean
+#1     NET     2463.759
+#2 OFICINA     3768.746
+
+
+media_dias_density <- ggplot(t, aes(diferencia, colour = tipo)) +
+  geom_density() + ggtitle("Media de días desde la última navegación hasta la contratación") + geom_vline(data=cdat, aes(xintercept=diferencia.mean,  colour=tipo),linetype="dashed", size=1)
+
+
+#ggplot(vegLengths, aes(x=canal, y=as.numeric(Importe), fill=canal)) + geom_boxplot()
+
+#ggplot(t, aes(x=as.factor(tipo), y=as.numeric(diferencia))) + geom_boxplot()
+
+### PLOTTING DIAS MEDIOS DE NAVEGACIÓN DE ALTAS Y APORTACIONES EXTRA OCTDIC 14
+
+
+cifras <- c("38", "34")
+names <- c("Aport_extra", "Alta")
+
+df <- data.frame(names, cifras)
+
+library(reshape2)
+#melt(df)
+
+
+#ggplot(df, aes(x=names, y=cifras, group=1)) +
+#    geom_line() + geom_point(shape=21, size=3, fill="white") + ggtitle("Media de días desde la última navegación hasta la contratación")
+
+
+
+p <- ggplot(t, aes(x=as.factor(tipo), y=as.numeric(diferencia), fill=tipo))
+media_dias_boxplot <- p + geom_boxplot() + ggtitle("Media de días desde la última navegación hasta la contratación") 
+
+
+multiplot(media_dias_density, media_dias_boxplot, cols=2)
+
+
+
+````
+
+
+
+
+```{r simulacion, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+
+# ### % DE CLIENTES QUE SIMULAN
+# 
+# 
+# # Simulador de aportaciones a planes:
+# # 
+# # Inicio formulario:formulario simulador aportaciones a planes:1 datos para la simulacion
+# # 
+# # Fin formulario:formulario simulador aportaciones a planes:2 resultados
+# # 
+# # Algo a tener en cuenta es que a finales de Octubre se inicio un concurso que incitaba a la gente a usar el simulador, por lo que los datos a partir de esa fecha pueden estar un poco sesgados en cuanto a contribuciones del simulador a contrataciones/aport. 
+# # Existe la opción de eliminar a los usuarios que han visto las página relativas a esta, si se quieres hacer una análisis más acertado de la contribución del simulador.
+# # 
+# # Sorteo. Pagenames:
+# # 
+# # Inicio formulario:formulario crm sorteo
+# # 
+# # Fin formulario:formulario crm sorteo:2 confirmacion
+# # 
+# 
+# 
+# #####SIMULA FORM INICIO
+# simulan_ini <- grep(".*(formulario:formulario simulador aportaciones a planes:1 datos para la simulacion).*", naveg_data$pages , value=TRUE) 
+# naveg_data_simulan_ini <- naveg_data[(naveg_data$pages %in% simulan_ini ),]
+# # 0 Inicio de propuesta entre las altas PPI Enero 2015
+# # 253 inicios de propuesta entre las aport extra PPI Enero 2015
+# 
+# #length(unique(naveg_data_simulan_ini$idclient))
+# 
+# #length(unique(naveg_data_simulan_ini$idclient))/dim(data) *100 
+# ## Un X del total de altas ofi PP en ENERO 2015 simulan
+# ## Un 5,2% del total de aport extra ofi PP en ENERO 2015 simulan
+# 
+# 
+# ## Un 5% del total de aport extra ofi PP en OctDic 2014 simulan
+# ## Un 4% del total de altas ofi PP en OctDic 2014 simulan
+# 
+# #####SIMULA FORM FIN
+# 
+# simulan_fin <- grep(".*(formulario:formulario simulador aportaciones a planes:2 resultados).*", naveg_data$pages , value=TRUE) 
+# naveg_data_simulan_fin <- naveg_data[(naveg_data$pages %in% simulan_fin ),]
+# # x FIN de simulador entre las altas PPI Enero 2015
+# # 86 fin de simulador entre las aport extra PPI Enero 2015
+# 
+# #length(unique(naveg_data_simulan_fin$idclient))
+# 
+# #length(unique(naveg_data_simulan_fin$idclient))/dim(data) *100 
+# ## Un X del total de altas ofi PP en ENERO 2015 simulan
+# ## Un 0,2% del total de aport extra ofi PP en ENERO 2015 terminan la simulacion
+# 
+# ## Un 3,5% del total de aport extra ofi PP en OctDic 2015 terminan la simulacion
+# ## Un 2,5% del total de altas ofi PP en OctDic 2015 terminan la simulacion
+
+
+```
+
+
+```{r, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+
+
+### % DE CLIENTES QUE INICIAN EL PROCESO DE CONTRATACION/APORTACION EXTRA
+
+#formulario:formulario crm planes de pensiones y de prevision asegurada
+##!!!! pageName de inicio aportacion!!!!
+
+```
+
+
+
+
+
+
+#### DIGITALIDAD DE LOS CLIENTES DE PLAN DE PENSIONES (ALTA o APORTACIÓN EXTRA) ROPO
+
+Digitalidad de estos clientes según la Segmentación comportamental, que se distribuye de la siguiente manera:
+
+            o  00 Sin Segmentar
+            o  01 Net contrata
+            o  02 Net opera elevado
+            o   03 Net opera básico
+            o   04 Net consulta + ATM elevado
+            o   05 Net consulta + ATM básico
+            o   06 Solo consulta net
+            o   07 ATM avanzado
+            o   08 ATM básico
+            o	 09 Oficina y ATM reducido
+            o	 10 Solo oficina
+            o	 11 Poco uso de canales
+            o	 12 Sin uso
+            
+Siendo el 01 el cliente más digital y el 12 el que menos.
+
+
+Teniendo en cuenta estas métricas, la digitalidad media de los clientes analizados es la siguiente en el momento de la contratación:
+
+ - **Oficina** es de **7. ATM avanzado** (poco digitales, sólo van a la oficina y sacan dinero en el cajero recurrentemente)
+
+ - **Online to Store** entre **3. NET OPERA BASICO** (realizan operaciones básicas en la net: consultas de posición global) y **2. NET OPERA AVANZADO** (realiza operaciones más avanzadas: por ejemplo transferencias)
+
+ - **Net** es de **1. NET CONTRATA** (su canal principal es la net, contratan y realizan sus operaciones por este medio)
+ 
+ Si comparamos la digitalidad de estos mismos clientes en diciembre con la de septiembre (antes de la contratación) observamos que los niveles de digitalidad entre la gente de oficina suben un nivel en oficina (de ATM básico a ATM avanzado de septiembre a diciembre).
+ 
+A continuación observamos las distribuciones con respecto a la segmentación comportamental por cada grupo de clientes en diciembre 2014: ROPO, NET y OFICINA respectivamente.
+
+¿Por qué hay 4.300 clientes muy digitales (01. Net Contrata) que realizan la contratación en la oficina?
+¿Navegan pero no les ayuda la web?
+
+```{r digitalidad, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+
+Altas_OctDic14_NET2 <- transform(Altas_OctDic14_NET, cclient= as.numeric(cclient))
+Altas_OctDic14_OFI2 <- transform(Altas_OctDic14_OFI, cclient= as.numeric(cclient))
+
+
+### DIGITALIDAD CLIENTES FORMALIZAN OFI Y NO SE INFORMA vs. SE INFORMAN Y CONTRATAN OFI
+
+           # Segmentacion comportamental
+           # o  00 Sin Segmentar. 
+           # o  01 Net contrata
+           # o	02 Net opera elevado
+           # o	03 Net opera básico
+           # o	04 Net consulta + ATM elevado
+           # o	05 Net consulta + ATM básico
+           # o	06 Solo consulta net
+           # o	07 ATM avanzado
+           # o	08 ATM básico
+           # o	09 Oficina y ATM reducido
+           # o	10 Solo oficina
+           # o	11 Poco uso de canales
+           # o	12 Sin uso
+           
+           
+           
+           # Perfil digital (frecuencia, mix_actividad)
+           # 00 – Sin perfil Digital
+           # 01 - Developing
+           # 02 - Engaged
+           # 03 - Beginer
+           # 04 - Potential
+           # 05 - Undeveloped
+           # 06 - Disengaged
+
+#digi <- qhive("select * from clarity_elements.metricas_segm_comport")
+#digi <- qimpala("select cod_cliente,  fecha,	pais,	entidad,	segmento_comportamental,	perfil_digital,	frecuencia,	mix_actividad from da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20140930")
+#write.table(digi, "/us/e042614/DATA/digitalidad_sep14.csv",row.names=FALSE, na="", sep=";")
+digi <- read.csv("/us/e042614/DATA/digitalidad_sep14.csv", sep=";")
+
+#names(digi)[1] <- "idclient"
+#names(digi)[1] <- "cclient"
+
+## DIGITALIDAD CLIENTES CON NAVEGACION PPI (ROPO)
+#digi_clientes_naveg_contenidoPPI <- merge(navegac_clientes_contenido, digi, by="idclient")
+#mean(digi_clientes_naveg_contenidoPPI$segmento_comportamental)
+#En diciembre 2014 (antes de la contratacion)
+# 3 aport extra Enero 2015 clientes con contenido PPI antes de contratar  : NET OPERA BASICO
+# 2.5 aport extra Oct-Dic 2014 clientes con contenido PPI antes de contratar  : Entre NET OPERA BASICO Y ELEVADO
+# 2.8 altas Oct-Dic 2014 clientes con contenido PPI antes de contratar  : + NET OPERA BASICO que ELEVADO
+#Observemos septiembre 2014 antes de la contratación para ver su digitalidad entonces:
+
+## DIGITALIDA CLIENTES SIN NAVEGACION CONTENIDO PPI
+#digi_clientes_naveg_contenidoPPI_no <- merge(NOnavegac_clientes_contenido, digi, by="idclient")
+#mean(digi_clientes_naveg_contenidoPPI_no$segmento_comportamental)
+# 3 aport extra Enero 2014  sin contenido PPI antes de contratar : NET OPERA BASICO
+## practicamente mismas cifras
+
+## DIGITALIDAD CLIENTES CONTRATAN NET : NET CONTRATA
+#digi_clientes_altasNET <- merge(Altas_OctDic14_NET_digi2, digi, by="cclient")
+#mean(digi_clientes_altasNET$segmento_comportamental)
+
+## DIGITALIDAD CLIENTES CONTRATAN OFI :
+#digi_clientes_altasOFI <- merge(Altas_OctDic14_OFI_digi2, digi, by="cclient")
+#mean(digi_clientes_altasOFI$segmento_comportamental)
+##6.7
+```
+
+
+
+
+
+```{r datoDB, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE,  fig.width=8, fig.height=5}
+
+## DIGITALIDAD CLIENTES CON NAVEGACION PPI (ROPO) en septiembre (un mes antes de la contratación)
+
+names(digi)[1] <- "idclient"
+
+digi_clientes_naveg_contenidoPPI <- merge(navegac_clientes_contenido, digi, by="idclient")
+#mean(as.numeric(digi_clientes_naveg_contenidoPPI$segmento_comportamental))
+#En diciembre 2014 (antes de la contratacion)
+# 3 aport extra Enero 2015 clientes con contenido PPI antes de contratar  : NET OPERA BASICO
+# 2.5 aport extra Oct-Dic 2014 clientes con contenido PPI antes de contratar  : Entre NET OPERA BASICO Y ELEVADO
+# 2.8 altas Oct-Dic 2014 clientes con contenido PPI antes de contratar  : + NET OPERA BASICO que ELEVADO
+
+#Observemos septiembre 2014 antes de la contratación para ver su digitalidad entonces:
+#3 aport extra Enero 2015 clientes con contenido PPI antes de contratar  : NET OPERA BASICO
+
+ggplot(digi_clientes_naveg_contenidoPPI, aes(x=segmento_comportamental)) + geom_histogram(binwidth=.5, colour="black", fill="white") + ggtitle("Histograma de la distribución de los clientes ROPO") + geom_vline(aes(xintercept=mean(segmento_comportamental, na.rm=T)),  color="red", linetype="dashed", size=1)
+
+
+
+
+#hist(digi_clientes_naveg_contenidoPPI$segmento_comportamental, breaks=20, main="Histograma de la distribución de los clientes ROPO")
+
+
+
+## DIGITALIDA CLIENTES SIN NAVEGACION CONTENIDO PPI
+#digi_clientes_naveg_contenidoPPI_no <- merge(NOnavegac_clientes_contenido, digi, by="idclient")
+#mean(digi_clientes_naveg_contenidoPPI_no$segmento_comportamental)
+# 3 aport extra Enero 2014  sin contenido PPI antes de contratar : NET OPERA BASICO
+## practicamente mismas cifras
+
+## DIGITALIDAD CLIENTES CONTRATAN NET : NET CONTRATA
+names(digi)[1] <- "cclient"
+
+digi_clientes_altasNET <- merge(Altas_OctDic14_NET, digi, by="cclient")
+#mean(as.numeric(digi_clientes_altasNET$segmento_comportamental))
+
+## en septiembre 02 Net opera elevado de media para la gente que después ha contratado
+#hist(as.numeric(digi_clientes_altasNET$segmento_comportamental))
+
+#ggplot(digi_clientes_altasNET, aes(x=segmento_comportamental)) +
+#    geom_histogram(binwidth=.5, colour="black", fill="white") + ggtitle("Histograma de la distribución de los clientes NET")
+
+#hist(digi_clientes_altasNET$segmento_comportamental, breaks=20, main="Histograma de la distribución de los clientes NET")
+
+
+## DIGITALIDAD CLIENTES CONTRATAN OFI :
+digi_clientes_altasOFI <- merge(Altas_OctDic14_OFI, digi, by="cclient")
+#mean(as.numeric(digi_clientes_altasOFI$segmento_comportamental))
+##6.7 NET CONSULTA ATM ELEVADO (en diciembre)
+# 5.2 NET CONSULTA ATM BASICO (en septiembre)
+
+#ggplot(digi_clientes_altasOFI, aes(x=segmento_comportamental)) +
+#    geom_histogram(binwidth=.5, colour="black", fill="white") + ggtitle("Histograma de la distribución de los clientes OFICINA")
+
+#hist(digi_clientes_altasOFI$segmento_comportamental, breaks=20, main="Histograma de la distribución de los clientes OFICINA")
+
+##NET
+
+#Altas_OctDic14_NET$canal <- "NET"
+
+net <- Altas_OctDic14_NET
+
+#write.csv(net, "/us/e042614/DATA/net.csv")
+
+##OFICINA
+
+#dim(Altas_OctDic14_OFI)
+
+oficina <- Altas_OctDic14_OFI[!Altas_OctDic14_OFI$cclient%in%navegac_clientes_contenido$idclient,]
+#dim(oficina)
+
+#oficina$canal <- "OFICINA"
+
+#write.csv(oficina, "/us/e042614/DATA/oficina.csv")
+
+##ROPO
+
+ropo <- Altas_OctDic14_OFI[Altas_OctDic14_OFI$cclient%in%navegac_clientes_contenido$idclient,]
+#dim(ropo)
+
+#ropo$canal <- "ROPO"
+
+#write.csv(ropo, "/us/e042614/DATA/ropo.csv")
+
+
+
+
+## PLOTS ROPO
+
+# oficina$Fecha.del.Evento<- as.Date(oficina$Fecha.del.Event, format ="%d/%m/%Y" )
+# oficina$mes
+# 
+# library(mondate)
+# unique(month(oficina$Fecha.del.Evento))
+# 
+# df1 <- rbind(oficina,ropo)
+# df2 <- rbind(df1, net)
+# 
+# dato <- df2
+# 
+# dato$mes <- month(dato$Fecha.del.Evento)
+# 
+# library(sqldf)
+# #dato_i <- sqldf("select distinct Concepto.de.Gestion,  cclient,canal, mes from dato  ")
+# dato_i <- sqldf("select distinct  cclient,canal, mes from dato  ")
+# 
+# group <- sqldf("select canal, count(cclient) from dato_i group by canal")
+# 
+# group_i <- sqldf("select canal,mes, count(cclient) from dato_i group by mes,canal")
+
+```
+
+
+
+
+
+```{r transacciones, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+
+##!!! TO DO
+
+####NUMERO DE TRANSACCIONES QUE REALIZAN LOS CLIENTES DE PLAN DE PENSIONES (ALTA o APORTACIÓN EXTRA) EN LA NET
+
+#Numero de operaciones en la net (consultas, operaciones o contrataciones) que realizan los usuarios del ROPO (Online to Store)
+
+
+
+
+
+###NUMERO DE OPERACIONES, CONSULTAS, ETC 
+
+#digi <- qimpala("select * from clarity_elements.metricas_segm_comport")
+#names(digi)[1] <- "cclient"
+
+#digicsv <- write.csv(digi, "/us/e042614/DATA/digitalidad.csv")
+#digicsv <- read.csv("/us/e042614/DATA/digitalidad.csv")
+
+##ALTAS OCTDIC 14
+
+# 
+# Altas_OctDic14_NET_digi <- merge(Altas_OctDic14_NET_digi2, digi, by="cclient")
+# Altas_OctDic14_NET_digi_SUB <- subset(Altas_OctDic14_NET_digi, select = c(cclient,n_op_net_tot))  
+# Altas_OctDic14_NET_digi_SUB$canal <- "NET"
+# 
+# 
+# Altas_OctDic14_OFI_digi <- merge(Altas_OctDic14_OFI_digi2, digi, by="cclient")
+# Altas_OctDic14_OFI_digi_SUB <- subset(Altas_OctDic14_OFI_digi, select = c(cclient,n_op_net_tot))
+# 
+# Altas_OctDic14_OFI_importe_SUB$canal <- "OFICINA"
+# 
+# 
+# vegLengths <- rbind(Altas_OctDic14_NET_digi_SUB, Altas_OctDic14_OFI_importe_SUB)
+# 
+# ggplot(vegLengths, aes(Importe, fill = toupper(canal))) + geom_density(alpha = 0.2) + 
+#   ggtitle("Altas NET/OFI OctDic14")  + theme(plot.title = element_text(lineheight=.8, face="bold"))
+# 
+# 
+# ### APORT OCTDIC14
+# Aport_extra_OctDic14_NET_digi2 <- transform(Aport_extra_OctDic14_NET, cclient= as.numeric(cclient))
+# 
+# Aport_extra_OctDic14_NET_digi <- merge(Aport_extra_OctDic14_NET_digi2, digi, by="cclient")
+# Aport_extra_OctDic14_NET_digi_SUB <- subset(Aport_extra_OctDic14_NET_digi, select = c(cclient,n_op_net_tot))  
+# Aport_extra_OctDic14_NET_digi_SUB$canal <- "NET"
+# 
+# Aport_extra_OctDic14_OFI_digi2 <- transform(Aport_extra_OctDic14_OFI, cclient= as.numeric(cclient))
+# 
+# Aport_extra_OctDic14_OFI_digi <- merge(Aport_extra_OctDic14_OFI_digi2, digi, by="cclient")
+# Aport_extra_OctDic14_OFI_digi_SUB <- subset(Aport_extra_OctDic14_OFI_digi, select = c(cclient,n_op_net_tot))
+# 
+# Aport_extra_OctDic14_OFI_importe_SUB$canal <- "OFICINA"
+# 
+# 
+# vegLengths <- rbind(Aport_extra_OctDic14_NET_digi_SUB, Aport_extra_OctDic14_OFI_importe_SUB)
+# 
+# ggplot(vegLengths, aes(Importe, fill = toupper(canal))) + geom_density(alpha = 0.2) + 
+#   ggtitle("Altas NET/OFI OctDic14")  + theme(plot.title = element_text(lineheight=.8, face="bold"))
+``````
+
+
+
+####IMPORTE APORTADO EN EL PLAN DE PENSIONES (ALTA o APORTACIÓN EXTRA)
+
+
+¿La cantidad del importe aportado difiere según el canal por el que se realice? SÍ
+
+El objetivo es comparar si los importes aportados a planes de pensiones (tanto en altas como en extraordinarias) difieren entre la gente que contrata/aporta en la net vs oficina.
+
+
+
+
+
+```{r importe, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+
+### HISTOGRAMA IMPORTE PLAN PENSIONES
+# > mean(as.numeric(Aport_extra_OctDic14_NET$Importe.Homogéneo.web))
+# [1] 1803.825
+# >  mean(as.numeric(Aport_extra_OctDic14_OFI$Importe.Homogéneo.resto))
+# [1] 3012.19
+# >  mean(as.numeric(Altas_OctDic14_OFI$Importe.Homogéneo.resto))
+# [1] 3768.746
+# >  mean(as.numeric(Altas_OctDic14_NET$Importe.Homogéneo.web))
+# [1] 2463.759
+
+
+###Alta OctDic 14 NET
+
+
+Altas_OctDic14_NET_importe <- transform(Altas_OctDic14_NET, Importe.Homogéneo.web= as.numeric(Importe.Homogéneo.web))
+Altas_OctDic14_NET_importe2 <- Altas_OctDic14_NET_importe[order(-Altas_OctDic14_NET_importe$Importe.Homogéneo.web),] 
+
+#max(Altas_OctDic14_NET_importe2$Importe.Homogéneo.web)
+#min(Altas_OctDic14_NET_importe2$Importe.Homogéneo.web)
+#mean(Altas_OctDic14_NET_importe2$Importe.Homogéneo.web)
+
+#hist(Altas_OctDic14_NET_importe2$Importe.Homogéneo.web)
+#qplot(Altas_OctDic14_NET_importe2$Importe.Homogéneo.web,  geom="histogram" )  + 
+#  ggtitle("Histograma Alta NET OctDic14")  + theme(plot.title = element_text(lineheight=.8, face="bold"))
+
+
+
+###Alta OctDic 14 OFI
+
+Altas_OctDic14_OFI_importe <- transform(Altas_OctDic14_OFI, Importe.Homogéneo.resto= as.numeric(Importe.Homogéneo.resto))
+Altas_OctDic14_OFI_importe2 <- Altas_OctDic14_OFI_importe[order(-Altas_OctDic14_OFI_importe$Importe.Homogéneo.resto),] 
+
+#max(Altas_OctDic14_OFI_importe2$Importe.Homogéneo.resto)
+#min(Altas_OctDic14_OFI_importe2$Importe.Homogéneo.resto)
+#mean(Altas_OctDic14_OFI_importe2$Importe.Homogéneo.resto)
+
+#hist(Altas_OctDic14_OFI_importe2$Importe.Homogéneo.resto)
+#qplot(Altas_OctDic14_OFI_importe2$Importe.Homogéneo.resto,  geom="histogram") + 
+#  ggtitle("Histograma Alta OFI OctDic14")  + theme(plot.title = element_text(lineheight=.8, face="bold"))
+
+
+
+
+
+####################
+
+
+
+###Aporta extra OctDic 14 NET
+
+
+Aport_extra_OctDic14_NET_importe <- transform(Aport_extra_OctDic14_NET, Importe.Homogéneo.web= as.numeric(Importe.Homogéneo.web))
+Aport_extra_OctDic14_NET_importe2 <- Aport_extra_OctDic14_NET_importe[order(-Aport_extra_OctDic14_NET_importe$Importe.Homogéneo.web),] 
+
+#max(Aport_extra_OctDic14_NET_importe2$Importe.Homogéneo.web)
+#min(Aport_extra_OctDic14_NET_importe2$Importe.Homogéneo.web)
+#mean(Aport_extra_OctDic14_NET_importe2$Importe.Homogéneo.web)
+
+#hist(Aport_extra_OctDic14_NET_importe2$Importe.Homogéneo.web)
+#qplot(Aport_extra_OctDic14_NET_importe2$Importe.Homogéneo.web,  geom="histogram") + 
+#  ggtitle("Histograma Aport Extra NET OctDic14")  + theme(plot.title = element_text(lineheight=.8, face="bold"))
+
+
+
+
+###Aporta extra  OctDic 14 OFI
+
+Aport_extra_OctDic14_OFI_importe <- transform(Aport_extra_OctDic14_OFI, Importe.Homogéneo.resto= as.numeric(Importe.Homogéneo.resto))
+Aport_extra_OctDic14_OFI_importe2 <- Aport_extra_OctDic14_OFI_importe[order(-Aport_extra_OctDic14_OFI_importe$Importe.Homogéneo.resto),] 
+
+#max(Aport_extra_OctDic14_OFI_importe2$Importe.Homogéneo.resto)
+#min(Aport_extra_OctDic14_OFI_importe2$Importe.Homogéneo.resto)
+#mean(Aport_extra_OctDic14_OFI_importe2$Importe.Homogéneo.resto)
+
+#hist(Aport_extra_OctDic14_OFI_importe2$Importe.Homogéneo.resto)
+#qplot(Aport_extra_OctDic14_OFI_importe2$Importe.Homogéneo.resto,  geom="histogram") + 
+#  ggtitle("Histograma Aport Extra OFI OctDic14")  + theme(plot.title = element_text(lineheight=.8, face="bold"))
+
+
+
+``````
+
+
+
+Observamos que la diferencia de importe aportado por canal siempre es ciertamente superior por oficina.
+
+
+```{r importe2, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE,  fig.width=14, fig.height=8}
+
+####### HISTOGRAMA DOBLE
+
+##NET
+Altas_OctDic14_NET_importe_SUB <- subset(Altas_OctDic14_NET_importe, select = c(cclient,Concepto.de.Gestion,Importe.Homogéneo.web))
+names(Altas_OctDic14_NET_importe_SUB)[3] <- "Importe"
+Altas_OctDic14_NET_importe_SUB$canal <- "NET"
+Altas_OctDic14_OFI_importe_SUB <- subset(Altas_OctDic14_OFI_importe, select = c(cclient,Concepto.de.Gestion,Importe.Homogéneo.resto))
+names(Altas_OctDic14_OFI_importe_SUB)[3] <- "Importe"
+Altas_OctDic14_OFI_importe_SUB$canal <- "OFICINA"
+
+
+vegLengths <- rbind(Altas_OctDic14_NET_importe_SUB, Altas_OctDic14_OFI_importe_SUB)
+
+#FIND THE MEAN OF EACH GROUP
+#library(plyr)
+cdat <- ddply(vegLengths, "canal", summarise, Importe.mean=mean(Importe))
+#cdat
+#>      canal Importe.mean
+#1     NET     2463.759
+#2 OFICINA     3768.746
+
+p1 <- ggplot(vegLengths, aes(Importe, fill = toupper(canal))) + geom_density(alpha = 0.2) + ggtitle("Altas NET/OFI OctDic14")  + theme(plot.title = element_text(lineheight=.8, face="bold")) + scale_x_continuous(limits=c(0, 15000)) + geom_vline(data=cdat, aes(xintercept=Importe.mean,  colour=canal),linetype="dashed", size=1)
+
+
+p2 <- ggplot(vegLengths, aes(x=canal, y=as.numeric(Importe), fill=canal)) + geom_boxplot() + scale_y_continuous(limits=c(0, 20000))
+
+
+multiplot(p1, p2, cols=2)
+
+
+##OFI
+Aport_extra_OctDic14_NET_importe_SUB <- subset(Aport_extra_OctDic14_NET_importe, select = c(cclient,Concepto.de.Gestion,Importe.Homogéneo.web))
+names(Aport_extra_OctDic14_NET_importe_SUB)[3] <- "Importe"
+Aport_extra_OctDic14_NET_importe_SUB$canal <- "NET"
+Aport_extra_OctDic14_OFI_importe_SUB <- subset(Aport_extra_OctDic14_OFI_importe, select = c(cclient,Concepto.de.Gestion,Importe.Homogéneo.resto))
+names(Aport_extra_OctDic14_OFI_importe_SUB)[3] <- "Importe"
+Aport_extra_OctDic14_OFI_importe_SUB$canal <- "OFICINA"
+
+
+vegLengths <- rbind(Aport_extra_OctDic14_NET_importe_SUB, Aport_extra_OctDic14_OFI_importe_SUB)
+
+#FIND THE MEAN OF EACH GROUP
+#library(plyr)
+cdat <- ddply(vegLengths, "canal", summarise, Importe.mean=mean(Importe))
+#cdat
+#>      canal Importe.mean
+#1     NET     1803.825
+#2 OFICINA     3012.190
+
+
+p3 <- ggplot(vegLengths, aes(Importe, fill = toupper(canal))) + geom_density(alpha = 0.2)+ ggtitle("Aport extra NET/OFI OctDic14")  + theme(plot.title = element_text(lineheight=.8, face="bold")) + scale_x_continuous(limits=c(0, 13000)) + geom_vline(data=cdat, aes(xintercept=Importe.mean,  colour=canal),linetype="dashed", size=1)
+
+
+p4 <- ggplot(vegLengths, aes(x=canal, y=as.numeric(Importe), fill=canal)) + geom_boxplot() + scale_y_continuous(limits=c(0, 20000))
+
+multiplot(p3,p4, cols=2)
+
+
+`````
+
+
+
+**ALTAS**
+
+El **importe medio** de los clientes con **altas net** es de `r as.integer(mean(Altas_OctDic14_NET_importe2$Importe.Homogéneo.web))` euros. Mientras que en las **altas extra oficina** es de `r as.integer(mean(Altas_OctDic14_OFI_importe2$Importe.Homogéneo.resto))` euros.
+
+**APORTACIÓN EXTRAORDINARIA**
+
+El **importe medio** de los clientes con **aportación extra net** es de `r as.integer(mean(Aport_extra_OctDic14_NET_importe2$Importe.Homogéneo.web))` euros. Mientras que en las **aportaciones extra oficina** es de `r as.integer(mean(Aport_extra_OctDic14_OFI_importe2$Importe.Homogéneo.resto))` euros.
+
+
+
+
+
+
+
+####SALDO MEDIO PASIVO EN LOS ULTIMOS 3 MESES EN EL PLAN DE PENSIONES (ALTA o APORTACIÓN EXTRA)
+
+¿Según el canal utilizado la gente dispone de más o menos saldo medio pasivo en los últimos tres meses?
+
+
+
+```{r saldopasivo, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE,  fig.width=14, fig.height=8}
+
+### SALDO PASIVO MEDIO ULTIMOS TRES MESES
+## ERROR jinit() JAVA cuando funcion qimpala/qhive en RMD
+
+#saldos <- qimpala("select cod_persona,saldo_medio_ultimos_3_meses from clarity_elements.saldos_pasivo_particular")
+#saldoscsv <- write.csv(saldos, "/us/e042614/DATA/saldospasivo3meses.csv")
+saldoscsv <- read.csv("/us/e042614/DATA/saldospasivo3meses.csv")
+saldos <- saldoscsv
+#dim(saldos)
+saldos_POS <- subset(saldos, saldo_medio_ultimos_3_meses > 0)
+#dim(saldos_POS)
+
+names(saldos_POS)[2] <- "cclient"
+
+
+##Aport_extra_OctDic14_NET
+Aport_extra_OctDic14_NET2 <- transform(Aport_extra_OctDic14_NET, cclient= as.numeric(cclient))
+#class(Aport_extra_OctDic14_NET2$cclient)
+Aport_extra_OctDic14_NET2 <- transform(Aport_extra_OctDic14_NET, cclient= as.numeric(cclient))
+
+Aport_extra_OctDic14_NET2_saldos <- merge(saldos_POS, Aport_extra_OctDic14_NET2, by="cclient")
+##88
+
+#max(Aport_extra_OctDic14_NET2_saldos$saldo_medio_ultimos_3_meses)
+#min(Aport_extra_OctDic14_NET2_saldos$saldo_medio_ultimos_3_meses)
+#mean(Aport_extra_OctDic14_NET2_saldos$saldo_medio_ultimos_3_meses)
+
+
+Aport_extra_OctDic14_NET2_saldos$canal <- "NET"
+
+##Aport_extra_OctDic14_OFI
+Aport_extra_OctDic14_OFI2 <- transform(Aport_extra_OctDic14_OFI, cclient= as.numeric(cclient))
+#class(Aport_extra_OctDic14_OFI2$cclient)
+Aport_extra_OctDic14_OFI2_saldos <- merge(saldos_POS, Aport_extra_OctDic14_OFI2, by="cclient")
+##8366
+
+#max(Aport_extra_OctDic14_OFI2_saldos$saldo_medio_ultimos_3_meses)
+#min(Aport_extra_OctDic14_OFI2_saldos$saldo_medio_ultimos_3_meses)
+#mean(Aport_extra_OctDic14_OFI2_saldos$saldo_medio_ultimos_3_meses)
+
+
+Aport_extra_OctDic14_OFI2_saldos$canal <- "OFICINA"
+
+
+vegLengths <- rbind(Aport_extra_OctDic14_NET2_saldos[sample(1:nrow(Aport_extra_OctDic14_NET2_saldos), 100,replace=FALSE),], Aport_extra_OctDic14_OFI2_saldos[sample(1:nrow(Aport_extra_OctDic14_OFI2_saldos), 100,replace=FALSE),])
+
+
+
+p5 <- qplot(cclient, as.numeric(saldo_medio_ultimos_3_meses),data=sample(vegLengths)) + geom_point(aes(colour = canal)) +   ggtitle("Aport extra NET/OFI OctDic14 Saldo Pasivo Medio")  + theme(plot.title = element_text(lineheight=.8, face="bold")) 
+
+# ## BOXPLOT
+#  ggplot(dt.hipotecas_con_saldo, aes(y=saldo_cierre_mes, x = xti_csexof,  fill = xti_csexof)) + 
+#    geom_boxplot() + 
+#    xlab('Sexo') + ylab('Importe del préstamo PPI') +
+#    theme_bw(15) + scale_y_continuous(labels = labels_euro) 
+
+p6 <- ggplot(sample(vegLengths), aes(x=canal, y=as.numeric(saldo_medio_ultimos_3_meses), fill=canal)) + geom_boxplot() + scale_y_continuous(limits=c(0, 200000))
+
+
+multiplot(p5,p6, cols=2)
+
+
+
+
+##ALTAS_OctDic14_NET
+Altas_OctDic14_NET2 <- transform(Altas_OctDic14_NET, cclient= as.numeric(cclient))
+#class(Altas_OctDic14_NET2$cclient)
+Altas_OctDic14_NET2_saldos <- merge(saldos_POS, Altas_OctDic14_NET2, by="cclient")
+#dim(Altas_OctDic14_NET2_saldos)
+#45
+
+#max(Altas_OctDic14_NET2_saldos$saldo_medio_ultimos_3_meses)
+#min(Altas_OctDic14_NET2_saldos$saldo_medio_ultimos_3_meses)
+#mean(Altas_OctDic14_NET2_saldos$saldo_medio_ultimos_3_meses)
+
+Altas_OctDic14_NET2_saldos$canal <- "NET"
+
+##Aport_extra_OctDic14_OFI
+Altas_OctDic14_OFI2 <- transform(Altas_OctDic14_OFI, cclient= as.numeric(cclient))
+#class(Altas_OctDic14_OFI2$cclient)
+Altas_OctDic14_OFI2_saldos <- merge(saldos_POS, Altas_OctDic14_OFI2, by="cclient")
+##275
+
+#max(Altas_OctDic14_OFI2_saldos$saldo_medio_ultimos_3_meses)
+#min(Altas_OctDic14_OFI2_saldos$saldo_medio_ultimos_3_meses)
+#mean(Altas_OctDic14_OFI2_saldos$saldo_medio_ultimos_3_meses)
+
+
+Altas_OctDic14_OFI2_saldos$canal <- "OFICINA"
+
+
+vegLengths2 <- rbind(Altas_OctDic14_NET2_saldos, Altas_OctDic14_OFI2_saldos[sample(1:nrow(Altas_OctDic14_OFI2_saldos), 100,replace=FALSE),])
+
+p7 <- qplot(cclient, as.numeric(saldo_medio_ultimos_3_meses),data=sample(vegLengths2)) + geom_point(aes(colour = canal)) +   ggtitle("Altas NET/OFI OctDic14 Saldo Pasivo Medio")  + theme(plot.title = element_text(lineheight=.8, face="bold")) + scale_y_continuous(limits=c(0, 1000000))
+
+#ggplot(vegLengths, aes(saldo_medio_ultimos_3_meses, fill = toupper(canal))) + geom_density(alpha = 0.2) + 
+#  ggtitle("Altas NET/OFI OctDic14")  + theme(plot.title = element_text(lineheight=.8, face="bold"))
+
+p8 <- ggplot(sample(vegLengths2), aes(x=canal, y=as.numeric(saldo_medio_ultimos_3_meses), fill=canal)) + geom_boxplot() + scale_y_continuous(limits=c(0, 200000))
+
+multiplot(p7,p8, cols=2)
+
+# El **saldo medio ACTIVO en los 3 últimos meses** de los clientes con **aportación extra net** es de 36.022 euros. Mientras que en las **aportaciones extra oficina** es de 39.120 euros.
+# 
+# El **saldo medio ACTIVO en los 3 últimos meses** de los clientes con **altas net** es de 40.585 euros. Mientras que en las **aportaciones extra oficina** es de 42.783 euros.
+# 
+# Podemos concluir afirmando que la diferencia de saldo medio ACTIVO en los últimos 3 meses no es muy diferente entre Net y Oficina. 
+# Sin embargo, pese a disponer de las mismas cantidades de dinero, la gente que lo hace a través de oficina aporta mayores cantidades que los que lo hacen usando la net.
+
+
+
+```````
+
+
+
+**ALTAS**
+
+El **saldo medio pasivo en los 3 últimos meses** de los clientes con **altas net** es de `r as.integer(mean(Altas_OctDic14_NET2_saldos$saldo_medio_ultimos_3_meses))` euros. Mientras que en las **altas extra oficina** es de `r as.integer(mean(Altas_OctDic14_OFI2_saldos$saldo_medio_ultimos_3_meses))` euros.
+
+**APORTACIÓN EXTRAORDINARIA**
+
+El **saldo medio pasivo en los 3 últimos meses** de los clientes con **aportación extra net** es de `r as.integer(mean(Aport_extra_OctDic14_NET2_saldos$saldo_medio_ultimos_3_meses))` euros. Mientras que en las **aportaciones extra oficina** es de `r as.integer(mean(Aport_extra_OctDic14_OFI2_saldos$saldo_medio_ultimos_3_meses))` euros.
+
+
+
+
+
+
+####SALDO MEDIO ACTIVO EN LOS ULTIMOS 3 MESES EN EL PLAN DE PENSIONES (ALTA o APORTACIÓN EXTRA)
+
+¿Según el canal utilizado la gente dispone de más o menos saldo medio ACTIVO en los últimos tres meses?
+
+
+
+```{r saldoactivo, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE,  fig.width=14, fig.height=8}
+
+### SALDO ACTIVO MEDIO ULTIMOS TRES MESES
+
+#saldos <- qimpala("select cod_persona,saldo_medio_ultimos_3_meses from clarity_elements.saldos_activo_particular")
+#saldoscsv <- write.csv(saldos, "/us/e042614/DATA/saldosactivo3meses.csv")
+saldoscsv <- read.csv("/us/e042614/DATA/saldosactivo3meses.csv")
+saldos <- saldoscsv
+#dim(saldos)
+saldos_POS <- subset(saldos, saldo_medio_ultimos_3_meses > 0)
+#dim(saldos_POS)
+
+names(saldos_POS)[1] <- "cclient"
+
+
+##Aport_extra_OctDic14_NET
+Aport_extra_OctDic14_NET2 <- transform(Aport_extra_OctDic14_NET, cclient= as.numeric(cclient))
+#class(Aport_extra_OctDic14_NET2$cclient)
+Aport_extra_OctDic14_NET2_saldos <- merge(saldos_POS, Aport_extra_OctDic14_NET2, by="cclient")
+##88
+
+#max(Aport_extra_OctDic14_NET2_saldos$saldo_medio_ultimos_3_meses)
+#3697930
+#min(Aport_extra_OctDic14_NET2_saldos$saldo_medio_ultimos_3_meses)
+#0.02
+#mean(Aport_extra_OctDic14_NET2_saldos$saldo_medio_ultimos_3_meses)
+#58941.02
+
+Aport_extra_OctDic14_NET2_saldos$canal <- "NET"
+
+##Aport_extra_OctDic14_OFI
+Aport_extra_OctDic14_OFI2 <- transform(Aport_extra_OctDic14_OFI, cclient= as.numeric(cclient))
+#class(Aport_extra_OctDic14_OFI2$cclient)
+Aport_extra_OctDic14_OFI2_saldos <- merge(saldos_POS, Aport_extra_OctDic14_OFI2, by="cclient")
+##8366
+
+#max(Aport_extra_OctDic14_OFI2_saldos$saldo_medio_ultimos_3_meses)
+#3351385
+#min(Aport_extra_OctDic14_OFI2_saldos$saldo_medio_ultimos_3_meses)
+#0.02
+#mean(Aport_extra_OctDic14_OFI2_saldos$saldo_medio_ultimos_3_meses)
+#44826.83
+
+
+Aport_extra_OctDic14_OFI2_saldos$canal <- "OFICINA"
+
+
+vegLengths <- rbind(Aport_extra_OctDic14_NET2_saldos[sample(1:nrow(Aport_extra_OctDic14_NET2_saldos), 100,replace=FALSE),], Aport_extra_OctDic14_OFI2_saldos[sample(1:nrow(Aport_extra_OctDic14_OFI2_saldos), 100,replace=FALSE),]) 
+
+
+p9 <- qplot(cclient, as.numeric(saldo_medio_ultimos_3_meses),data=sample(vegLengths)) + geom_point(aes(colour = canal)) +   ggtitle("Aport extra NET/OFI OctDic14 Saldo Activo Medio")  + theme(plot.title = element_text(lineheight=.8, face="bold")) + scale_y_continuous(limits=c(0, 1000000))
+
+
+
+p10 <- ggplot(sample(vegLengths), aes(x=canal, y=as.numeric(saldo_medio_ultimos_3_meses), fill=canal)) + geom_boxplot() + scale_y_continuous(limits=c(0, 200000))
+
+
+multiplot(p9,p10, cols=2)
+
+
+##ALTAS_OctDic14_NET
+Altas_OctDic14_NET2 <- transform(Altas_OctDic14_NET, cclient= as.numeric(cclient))
+#class(Altas_OctDic14_NET2$cclient)
+Altas_OctDic14_NET2_saldos <- merge(saldos_POS, Altas_OctDic14_NET2, by="cclient")
+#dim(Altas_OctDic14_NET2_saldos)
+#45
+
+#max(Altas_OctDic14_NET2_saldos$saldo_medio_ultimos_3_meses)
+#min(Altas_OctDic14_NET2_saldos$saldo_medio_ultimos_3_meses)
+#mean(Altas_OctDic14_NET2_saldos$saldo_medio_ultimos_3_meses)
+#38349.24
+Altas_OctDic14_NET2_saldos$canal <- "NET"
+
+##Aport_extra_OctDic14_OFI
+Altas_OctDic14_OFI2 <- transform(Altas_OctDic14_OFI, cclient= as.numeric(cclient))
+#class(Altas_OctDic14_OFI2$cclient)
+Altas_OctDic14_OFI2_saldos <- merge(saldos_POS, Altas_OctDic14_OFI2, by="cclient")
+##275
+
+#max(Altas_OctDic14_OFI2_saldos$saldo_medio_ultimos_3_meses)
+#min(Altas_OctDic14_OFI2_saldos$saldo_medio_ultimos_3_meses)
+#mean(Altas_OctDic14_OFI2_saldos$saldo_medio_ultimos_3_meses)
+#46759.35
+
+Altas_OctDic14_OFI2_saldos$canal <- "OFICINA"
+
+
+vegLengths <- rbind(Altas_OctDic14_NET2_saldos, Altas_OctDic14_OFI2_saldos[sample(1:nrow(Altas_OctDic14_OFI2_saldos), 100,replace=FALSE),])
+
+p11 <- qplot(cclient, as.numeric(saldo_medio_ultimos_3_meses),data=sample(vegLengths)) + geom_point(aes(colour = canal)) +   ggtitle("Altas NET/OFI OctDic14 Saldo Pasivo Medio")  + theme(plot.title = element_text(lineheight=.8, face="bold")) + scale_y_continuous(limits=c(0, 1000000))
+
+#ggplot(vegLengths, aes(saldo_medio_ultimos_3_meses, fill = toupper(canal))) + geom_density(alpha = 0.2) + 
+#  ggtitle("Altas NET/OFI OctDic14")  + theme(plot.title = element_text(lineheight=.8, face="bold"))
+
+
+p12 <- ggplot(sample(vegLengths), aes(x=canal, y=as.numeric(saldo_medio_ultimos_3_meses), fill=canal)) + geom_boxplot()  + scale_y_continuous(limits=c(0, 200000))
+
+multiplot(p11,p12, cols=2)
+
+### LIMITS BOXPLOT Y AXIS
+### SEE LIMITS ggplot_build(p12)$panel$ranges[[1]]$x.range
+
+## OPTION 1 : p12 +  ylim(0, 80)
+## OPTION 2 : p12 + scale_y_continuous(limits=c(0, 80))
+
+````
+
+
+El **saldo medio ACTIVO en los 3 últimos meses** de los clientes con **aportación extra net** es de 58.941 euros. Mientras que en las **aportaciones extra oficina** es de 44.826 euros.
+
+El **saldo medio ACTIVO en los 3 últimos meses** de los clientes con **altas net** es de 38.349 euros. Mientras que en las **altas oficina** es de 46.759 euros.
+
+Podemos concluir afirmando que la diferencia de saldo medio ACTIVO en los últimos 3 meses no es muy diferente entre Net y Oficina. 
+Sin embargo, pese a disponer de las mismas cantidades de dinero, la gente que lo hace a través de oficina aporta mayores cantidades que los que lo hacen usando la net.
+
+
+
+
+
+####CARACTERÍSTICAS SOCIO-DEMOGRÁFICAS: 
+
+#####EDAD
+
+¿Hay diferencia de edad entre los clientes que realizan el alta/aportación extra a través de la web o de la net?
+
+Hay una diferencia de edad de 10 años entre los clientes que realizan altas a través de la NET (media de 45 años) con respecto a los que la realizan en oficina (media de 54 años).
+
+
+```{r edad, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE, results=FALSE}
+#edad <- qimpala("select * from campaigns.edad where edad < 100 and  edad > 0")
+#edadcsv <- write.csv(edad, "/us/e042614/DATA/edad.csv")
+edadcsv <- read.csv("/us/e042614/DATA/edad.csv")
+# 
+#names(edad)[1] -> "cclient"
+# 
+names(Altas_OctDic14_OFI)[15] <- "cod_persctpn"
+Altas_OctDic14_OFI <- transform(Altas_OctDic14_OFI, cod_persctpn= as.integer(cod_persctpn))
+edad_clientes_altasOFI <- merge(Altas_OctDic14_OFI, edadcsv, by="cod_persctpn")
+#mean(edad_clientes_altasOFI$edad)
+##54 media de edad alta/aport extra OFICINA
+
+names(Altas_OctDic14_NET)[15] <- "cod_persctpn"
+Altas_OctDic14_NET <- transform(Altas_OctDic14_NET, cod_persctpn= as.integer(cod_persctpn))
+edad_clientes_altasNET <- merge(Altas_OctDic14_NET, edadcsv, by="cod_persctpn")
+#mean(edad_clientes_altasNET$edad)
+##45 media de edad alta/aport extra NET
+
+#edades <- c(mean(edad_clientes_altasOFI$edad), mean(edad_clientes_altasNET$edad))
+edades <- c("54", "45")
+
+canales <- c("OFICINA", "NET")
+
+d <- data.frame(canales, edades)
+
+#plot(d)
+
+qplot(x=canales, y=edades, fill=canales,
+                     data=d, geom="bar", stat="identity",
+                     position="dodge")  + geom_text(aes(label= edades)  , vjust=1.5, colour="white") + ggtitle("Edades según canal")
+`````
+
+
+
+#####GEOGRAFÍA
+
+
+¿Cuál es la penetración de internet en España?
+
+Según la Comisión Nacional de Mercados y Valores en el sector de las comunicaciones, los siguientes representan los resultados de la penetración de las líneas de banda ancha fija en España:
+
+
+
+Las comunidades autónomas más conectadas son la de Madrid, País Vasco, Illes Balears, Catalunya, Aragón, Cantabria, Navarra y Castilla y León.
+
+**Tasa de penetración de internet en España**
+```{r mapaGeo_penetracion_internet, results='asis', tidy=FALSE, echo=FALSE,  cache=TRUE}
+
+penetracion_adsl_comunidad <- read.csv("/us/e042614/DATA/penetracion_adsl_comunidades_cmt.csv", sep=";")
+
+
+
+mapa_comunidad <- gvisGeoMap(penetracion_adsl_comunidad, locationvar='iso_code', numvar='penetracion',
+                  options=list(region="ES", resolution="provinces",
+                               width=600, height=400))
+plot(mapa_comunidad,tag="chart")
+`````
+
+
+¿Hay diferencia geógrafica entre los clientes que realizan el alta/aportación extra a través de la web?
+
+Del total de altas en la net y en la oficina, el siguiente gráfico representa el ratio de altas realizadas en la net por provincia.
+Como podemos observar las tasas de penetración de internet en España coinciden con la digitalidad más elevada de los clientes del banco (Madrid, Barcelona y País Vasco).
+
+
+
+```{r mapaGeo, results='asis', tidy=FALSE, echo=FALSE,  cache=TRUE, warning=FALSE}
+
+#ciudad <- qimpala("select cod_persctpn, cod_postal, des_ciudadg,  cod_geografi,  cod_paisodom , des_provoest FROM da_pro.clientes_domicilios where des_ciudadg is not null and  des_provoest is not null limit 10000000")
+#ciudad <- write.csv(ciudad, "/us/e042614/ciudad.csv")
+
+ciudad_csv <- read.csv("/us/e042614/ciudad.csv")
+
+
+#Altas_OctDic14_OFI_t <- transform(Altas_OctDic14_OFI, cclient = as.integer(cclient))
+#Altas_OctDic14_NET_t <- transform(Altas_OctDic14_NET, cclient = as.integer(cclient))
+
+ciudad_csv_t <- transform(ciudad_csv, cod_persctpn = as.integer(cod_persctpn))
+
+#names(ciudad_csv_t)[2] <- "cod_persctpn"
+
+Altas_OctDic14_NET_ciudad <- merge(Altas_OctDic14_NET, ciudad_csv_t, by="cod_persctpn")
+#Altas_OctDic14_NET_ciudad <- merge(Altas_OctDic14_NET, ciudad_csv_t)
+Altas_OctDic14_OFI_ciudad <- merge(Altas_OctDic14_OFI, ciudad_csv_t, by="cod_persctpn")
+#Altas_OctDic14_OFI_ciudad <- merge(Altas_OctDic14_OFI, ciudad_csv_t)
+
+
+#DT <- data.table(mydf)
+#DT[, sum(B), by = A]
+
+dt.Altas_OctDic14_NET_ciudad <- data.table(Altas_OctDic14_NET_ciudad)
+dt.Altas_OctDic14_OFI_ciudad <- data.table(Altas_OctDic14_OFI_ciudad)
+
+dt.Altas_OctDic14_NET_ciudad_group <- dt.Altas_OctDic14_NET_ciudad[, (cclient = .N), by=des_provoest]
+dt.Altas_OctDic14_OFI_ciudad_group <- dt.Altas_OctDic14_OFI_ciudad[, (cclient = .N), by=des_provoest]
+
+dt.Altas_OctDic14_NET_ciudad_group$canal <- "NET"
+names(dt.Altas_OctDic14_NET_ciudad_group)[2] <- "net"
+dt.Altas_OctDic14_OFI_ciudad_group$canal <- "OFICINA"
+names(dt.Altas_OctDic14_OFI_ciudad_group)[2] <- "oficina"
+
+dt.Altas_OctDic14_ALL_ciudad_group <- merge(dt.Altas_OctDic14_OFI_ciudad_group, dt.Altas_OctDic14_NET_ciudad_group , by="des_provoest")
+dt.Altas_OctDic14_ALL_ciudad_group$total <- dt.Altas_OctDic14_ALL_ciudad_group$oficina + dt.Altas_OctDic14_ALL_ciudad_group$net
+
+## TASA DE PENETRACION DE ALTAS NET POR PROVINCIA
+#  des_provoest         V1
+#  1:      A CORUÑA  1.1173184
+#  2:      ALICANTE  0.7987220
+#  3:         AVILA  2.3255814
+#  4:     BARCELONA  1.2201886
+#  5:       BIZKAIA  0.6042296
+dt.Altas_OctDic14_ALL_ciudad_group_penetrac_net <- dt.Altas_OctDic14_ALL_ciudad_group[, (penetrac_net = round((net/total)*100,2)), by= des_provoest]
+
+```
+
+
+
+**Ratio de altas net por provincia**
+```{r mapaGeo_net ,results='asis', tidy=FALSE, echo=FALSE,  cache=TRUE, warning=FALSE}
+
+## PROVINCIAS
+#head(dt.Altas_OctDic14_ALL_ciudad_group_penetrac_net)
+names(dt.Altas_OctDic14_ALL_ciudad_group_penetrac_net)[1] <- "provincia"
+
+mapaNET_provinc <- gvisGeoChart(dt.Altas_OctDic14_ALL_ciudad_group_penetrac_net, "provincia", "V1",
+                           options=list(title="Ciudad con altas NET entre Octubre y Diciembre 2014",
+                                        region="ES", 
+                                        displayMode = 'markers',
+                                        width=700, height=500))
+ plot(mapaNET_provinc, tag="chart")
+
+#write.csv(dt.Altas_OctDic14_NET_ciudad_group, "/us/e042614/ciudad_agroup.csv")
+dt.Altas_OctDic14_NET_ciudad_group <- read.csv("/us/e042614/ciudad_agroup.csv", sep=",")
+
+
+
+##### FICHERO CON DATOS EN CODIGO ISO de las PROVINCIAS Y REGIONES DE SPAIN (no imprime las provincias en dataMode="provinces" solo como dataMode="markers")
+
+iso <- read.csv("/us/e042614/provincias_codigoISO.csv", sep=";")
+
+iso_t <- transform(iso, provincia = toupper(provincia))
+
+join <- merge(iso_t, dt.Altas_OctDic14_ALL_ciudad_group_penetrac_net, by="provincia")
+
+
+joinDT <- data.table(join)
+joinDT_comunid <-as.data.frame(joinDT[, media:=mean(V1), by=list(comunidad)])
+
+pp <- joinDT_comunid
+## REGIONES
+
+# mapaNET_comunid <- gvisGeoMap(pp, locationvar='comunidad', numvar='media',
+#                   options=list(region="ES", resolution="provinces",
+#                                width=600, height=400))
+# plot(mapaNET_comunid,tag="chart")
+# 
+
+
+
+
+
+
+`````
+
+Si dotamos mayor o menor peso al número de altas net por comunidad teniendo en cuenta la estadística de la tasa de penetración de internet proporcionada la Comisión de Mercado de Telecomunicaciones (CMT), observamos como Madrid, Barcelona y País Vasco siguen a la cabeza.
+
+
+**Altas net por comunidad ponderadas por la penetración de internet**
+```{r mapaGeo_pesos, results='asis', tidy=FALSE, echo=FALSE,  cache=TRUE}
+
+dt.Altas_OctDic14_NET_ciudad_group <- read.csv("/us/e042614/ciudad_agroup.csv", sep=",")
+
+pesos <- merge(penetracion_adsl_comunidad, dt.Altas_OctDic14_NET_ciudad_group, by="comunidad")
+pesos$peso <- round(pesos$net/(pesos$penetracion/100),2)
+
+
+pesos_i <- data.table(pesos)
+pesos_ii <-as.data.frame(pesos_i[, media:=round(mean(peso),2), by=list(comunidad)])
+
+p <- unique(subset(pesos_ii, select=c("comunidad", "media", "iso_code")))
+
+
+
+
+mapa_comunidad_peso <- gvisGeoMap(p, locationvar='iso_code', numvar='media',
+                  options=list(region="ES", resolution="provinces",
+                               width=600, height=400))
+plot(mapa_comunidad_peso,tag="chart")
+
+````
+
+
+```{r mapaGeoOFI, results='asis', tidy=FALSE, echo=FALSE,  cache=TRUE}
+
+mapaOFI <- gvisGeoChart(dt.Altas_OctDic14_OFI_ciudad_group, "des_ciudadg", "V1",
+                        options=list(title="Ciudad con altas OFI entre Octubre y Diciembre 2014",
+                                     region="ES", 
+                                     displayMode = 'markers',
+                                     width=700, height=500))
+plot(mapaOFI,tag="chart")
+
+
+
+`````
+
+
+#####CONCLUSIONES
+
+**1) ROPO**
+
+Los resultados del Online to Store son bastante positivos pudiendo atribuir bastante peso a la Venta digital. Sería importante definir cuál es el objetivo: 
+
+¿El 9-10% de navegación por contenido PPI es demasiado vago? Idem con inicio de formulario de simulación.
+
+¿Lo correcto sería atribuirle el fin de formulario de simulación? ¿Entre un 2,5 y 3,5% de ROPO en Venta Digital?
+
+Recapitulando los resultados:
+
+Octubre-Diciembre 2014
+
+De los **51.690** clientes con aportación extraordinaria en oficina entre Octubre a Diciembre 2014:
+
+ - El **10%** ha navegado por **contenido PPI** antes de contratar en la oficina (5169)
+ - El **5%** han **iniciado la simulación** antes de contratar en oficina (2584)
+ - Un **3,5%** han **terminado la simulación**  antes de contratar en oficina (1809)
+
+De los **27.990** clientes con altas PPI en oficina entre Octubre a Diciembre 2014:
+
+ - Un **9%** ha navegado por **contenido PPI** antes de contratar en la oficina (2519)
+ - El **4%** han **iniciado la simulación** antes de contratar en oficina (1119)
+ - Un **2,5%** han **terminado la simulación**  antes de contratar en oficina (699)
+ 
+
+**2) Digitalidad**
+Tal y como esperábamos los clientes de la net son muy digitales (Net contrata) y la de Oficina muy poco (sólo usa ATM avanzado y oficina). Sin embargo, los del ROPO están entre ambas franjas, más bien inclinándose a la digitalidad alta, pues están entre Net Opera básico, pudiendo progresar rápidamente hasta Net Opera Avanzado.
+
+**3) Tiempo desde la última navegación web**
+El tiempo transcurrido desde la última navegación web hasta la contratación en oficina es de 29 días en aportaciones extraordinarias y 34 en altas.
+
+**4) Saldo pasivo y activo 3 últimos meses**
+Podemos concluir afirmando que la diferencia de saldo medio pasivo y activo en los últimos 3 meses no es muy diferente entre los clientes que contratan en la Net y en la Oficina. 
+
+**5) Importe aportado en PPI (alta/aport extra)**
+Sin embargo, pese a disponer de cantidades de dinero similares, la gente que lo hace a través de oficina aporta mayores cantidades que los que lo hacen usando la net.
+
+**6) Socio-demográficos: edad, geografía**
+
+Como era de esperar la edad de los clientes que realizan altas PPI a través es de 45 años vs 54 años de aquellos que lo realizan a través de la Net. Hay una década de diferencia entre ambos grupos.
+
+Geográficamente, tal y como era de esperar se aprecia más digitalidad en grandes ciudades. 
+Las altas o aportaciones en oficina vemos que se distribuyen equitativamente por la península.
+
+
+#####NEXT STEPS
+
+- Estudiar otras variables interesantes: clientes de valor, nb de consultas/operaciones/contrataciones NET vs OFICINA, frecuencia, sexo, estudios, etc.
+- Costes por canal
+
+
+
+```{r, echo=FALSE}
+
+
+
+# setwd("/us/e042614/bda_clarity/analytics_in_Rmd/")
+
+# Load packages
+# require(knitr)
+# require(markdown)
+# 
+# # Create .md, .html, and .pdf files
+# knit("/us/e042614/bda_clarity/analytics_in_Rmd/PPI_OnlineToStore.Rmd")
+# markdownToHTML('PPI_OnlineToStore.md', 'PPI_OnlineToStore.html', options=c("use_xhml"))
+# system("pandoc -s My_Analysis.html -o My_Analysis.pdf")
+
+
+
+# This is the last mandatory section
+
+clarity.save_analysis_metadata()
+```

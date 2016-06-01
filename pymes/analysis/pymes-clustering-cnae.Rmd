@@ -1,0 +1,594 @@
+---
+title: "Agrupación de codigos CNAE por el tipo de contratos de sus pymes"
+author: "César de Pablo"
+date: "01/06/2015"
+last_update: "02/07/2015"
+output: html_document
+---
+========================================================
+
+
+```{r, echo=FALSE}
+# This is the first mandatory section.
+
+title     <- '[Pymes] Agrupación de pymes por tipo de contrato'
+keywords  <- 'pymes, sme, valor, value, cnae, segmento_global, productos_contratados, clientes, clients' 
+```
+
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))		# This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+source('~/bda_clarity/tools/warehouse_basics.R')
+```
+
+
+```{r Importar bibliotecas, echo=FALSE, message=FALSE}
+
+library(ggplot2)
+library(grid)
+#detach("package:reshape", unload=TRUE)
+library(reshape2)
+library(dplyr)
+#library(tidyr)
+library(cluster)
+
+```
+
+
+Objetivo: __Agrupar los sectores CNAE de Pymes por el tipo de productos que consumen__
+
+Pregunta: __¿Se puede establecer una similitud entre las empresas por el tipo de productos que consumen?__
+
+  * Explora en primer lugar si los sectores CNAE se pueden agrupar en torno a los productos que consumen las empresas catalogadas.
+  * Se usa el código de contrapartida como identificador del producto contratado
+
+
+## Preparación de las tablas
+#### Contratos 
+
+Se prepara una tabla de contratos con la union de productos_contratados y los contenidos de productos_contratados_detalle que no hacen join con productos_contratados 
+
+```{r, Crea tabla de productos contratados, eval=FALSE}
+
+q.create_table_contratos <- "
+CREATE TABLE da_cdepablo.contratos
+AS
+  SELECT cod_entalfa, cod_paisoalf, cod_idcontra, NULL cod_detalcto, NULL xti_identcto, cod_pgccontr, fec_altacto, cod_pro_plat, cod_tipopd, cod_comprod, cod_prodfin
+	FROM da_pro.productos_contratados 
+	WHERE partition_id = '20150228'
+
+	UNION ALL
+
+	SELECT cd.cod_entalfa, cd.cod_paisoalf, cd.cod_idcontra, cd.cod_detalcto, cd.xti_identcto, cd.cod_pgccontr, cd.fec_altacto, cd.cod_pro_plat, cd.cod_tipopd, cd.cod_comprod, cd.cod_prodfin
+	FROM
+		(
+		SELECT *
+		FROM da_pro.productos_contratados q
+		WHERE partition_id = '20150228'
+		) c 
+	RIGHT JOIN 
+		(
+		SELECT *
+		FROM da_pro.productos_contratados_detalle 
+		WHERE partition_id = '20150228'
+		) cd
+	ON (c.cod_entalfa = cd.cod_entalfa AND c.cod_paisoalf = cd.cod_paisoalf 
+	AND c.cod_idcontra = cd.cod_idcontra)
+	WHERE c.cod_idcontra IS NULL
+"
+
+#do.hive(q.create_table_contratos)
+
+
+```
+
+#### Pymes
+
+Creamos la tabla de Pymes cruzando la información de los clientes y la segmentación global. Nos quedamos solo con los segmentados con códigos 35 (MICROPYMES) y 36 (PYMES)
+
+```{r, Crea tabla de pymes, eval=FALSE}
+
+q.create_table_pymes <- "
+CREATE TABLE da_cdepablo.pymes
+AS
+SELECT c.cod_entalfa, c.cod_paisoalf, c.cod_persctpn, c.des_nombfj, c.cod_tp_iden1, c.cod_documps1, c.cod_cnaecto, s.cod_segmsubo, fec_altapers, fec_ultmodop, c.partition_id
+FROM da_pro.clientes_corp c JOIN da_pro.segmento_global s
+ON (c.cod_entalfa = s.cod_entalfa AND c.cod_paisoalf = s.cod_paisoalf 
+AND c.cod_persctpn = s.cod_persctpn)
+WHERE c.partition_id = '20150228' AND s.partition_id = '20150228'
+AND (s.cod_segmsubo = 35 OR s.cod_segmsubo = 36)
+"
+
+#do.hive(q.create_table_pymes)
+
+```
+
+#### Contratos x Pymes 
+
+Se usa una tabla adicional para obtener los productos contratados con las pymes 
+
+```{r, Crea una tabla de contratos x pymes, eval=FALSE}
+
+q.create_table_contratos_pymes <- "
+CREATE TABLE da_cdepablo.contratos_pymes
+AS
+SELECT c.cod_persctpn, c.cod_cnaecto, 
+     i.cod_idcontra, i.cod_pgccontr, 
+       pc.fec_altacto, pc.cod_pgccontr pc_cod_pgccontr, pc.cod_pro_plat, pc.cod_tipopd, pc.cod_comprod, pc.cod_prodfin
+FROM da_cdepablo.pymes c JOIN da_pro.intervinientes_corp i  
+ON (c.cod_entalfa = i.cod_entalfa AND c.cod_paisoalf = i.cod_paisoalf AND c.cod_persctpn = i.cod_persctpn)
+JOIN da_cdepablo.contratos pc
+ON (c.cod_entalfa = pc.cod_entalfa AND c.cod_paisoalf = pc.cod_paisoalf AND i.cod_idcontra = pc.cod_idcontra)
+AND c.partition_id = '20150228' AND i.partition_id = '20150228'
+" 
+
+#do.hive(q.create_table_contratos_pymes)
+
+```
+
+#### Catálogos
+
+Cargamos los catalogos que son de utilidad - segmento_global, contrapartida, CNAE 
+
+```{r, Carga de catalogos, cache=TRUE}
+
+# Catalog with segmento global descriptions
+q.catalog.segmento_global <- "
+SELECT cod_sgmento, des_sgmento
+FROM da_catalogos.segmentacion_global
+WHERE partition_id = '20150228'
+ORDER BY cod_sgmento
+"
+
+# Catalog with contrapartida descriptions
+q.catalog.contrapartida <- "
+SELECT cod_pgccontr, des_ctrpartd
+FROM da_catalogos.contrapartida
+WHERE partition_id = '20150228'
+ORDER BY cod_pgccontr
+"
+
+# Catalog with CNAE sectors
+q.catalog.cnae <- "
+SELECT cod_cnacteco cod_cnaecto, des_cnacteco
+FROM da_catalogos.cnae 
+WHERE partition_id = '20150228'
+ORDER BY cod_cnacteco
+"
+
+df.catalog.segmento.global <- qimpala(q.catalog.segmento_global)
+df.catalog.contrapartida <- qimpala(q.catalog.contrapartida)
+df.catalog.cnae <- qimpala(q.catalog.cnae)
+
+```
+
+
+## Estadísticas para la distribucion de productos
+
+Reproducimos las estadísticas de los diferentes productos contratados (por contrapartida):
+
+ * Varias de las contrapartidas más frecuentes se refieren a la contratación de productos telemáticos (0470, 0525, ...) que son genéricas para todo el mundo. 
+ * Entre los productos específicos para pymes esrtan CONFIRMING CLIENTES (0517), FACTORING 3270 (BASICAMENTE NR Y DIVISA) (0520)
+
+
+```{r, Distribución de contrapartidas, fig.height=10, fig.width=10}
+
+q.dist.contrapartidas <- "
+SELECT cod_pgccontr, count(*) num_contratos
+FROM da_cdepablo.contratos_pymes
+GROUP BY cod_pgccontr
+ORDER BY num_contratos DESC
+"
+
+df.dist.contrapartidas <- qimpala(q.dist.contrapartidas)
+tmp.df.dist.contrapartidas <- dplyr::full_join(df.dist.contrapartidas, df.catalog.contrapartida, by="cod_pgccontr")
+tmp.df.dist.contrapartidas <- dplyr::mutate(tmp.df.dist.contrapartidas, label = paste(cod_pgccontr,des_ctrpartd, sep = "-")) 
+tmp.df.dist.contrapartidas <- dplyr::filter(tmp.df.dist.contrapartidas, num_contratos > 1000) 
+
+plot.dist_contrapartidas <- qplot(data=tmp.df.dist.contrapartidas,       
+      x=reorder(label,num_contratos), y=num_contratos, 
+      stat="identity",
+      geom="bar",
+      xlab="Contrapartida",
+      ylab="Number of contracts", 
+      main="Distribution of contrapartida code for SME clients")  
+
+plot.dist_contrapartidas + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) + coord_flip()
+
+
+```
+
+## Distribución de los clientes por codigos CNAE 
+
+Estudiamos la distribución de los clientes por sectores de actividad (CNAE). Los CNAE tienen una estructura jerárquica. 
+  * La distribución de clientes es muy desigual. Solo 9 códigos tienen más de 20.000 clientes. Muchos de los códigos apenas tienen clienties. 
+  * Aunque agregemos a los diferentes niveleS, la distribución de clientes por categorías CNAE es muy desigual. La mayor proporcion de clientes esta en los códigos 46 y 47 que se corresponden al comercio al por mayor y al por menor. 
+
+[TODO: ] A más alto nivel las categorías CNAE usan letras (A-O) que se corresponden con grupos de dos dígitos. Cargar un csv con la jerarquía y replotear el último gráfico y los colores.  
+
+
+```{r, Distribución de los códigos clientes, fig.height=5, fig.width=5}
+
+q.dist.cnaes <- "
+SELECT cod_cnaecto, COUNT(*) num 
+FROM da_cdepablo.pymes 
+GROUP BY cod_cnaecto 
+ORDER BY num DESC 
+"
+ 
+df.dist.cnaes <- qimpala(q.dist.cnaes)
+df.dist.cnaes$cod_cnaecto_3 <- substr(df.dist.cnaes$cod_cnaecto,1,3)
+df.dist.cnaes$cod_cnaecto_2 <- substr(df.dist.cnaes$cod_cnaecto,1,2)
+df.dist.cnaes$cod_cnaecto_1 <- substr(df.dist.cnaes$cod_cnaecto,1,1)
+
+plot.dist_cnaes <- qplot(data=df.dist.cnaes,       
+      x=cod_cnaecto, y=num, 
+      stat="identity",
+      geom="bar",
+      fill=cod_cnaecto_1,
+      xlab="CNAE",
+      ylab="Number of pymes", 
+      main="Distribution of pymes by their CNAE")  
+
+plot.dist_cnaes + 
+  theme(axis.text.x = element_blank()) +
+  guides(fill=FALSE)
+
+
+plot.dist_cnaes_super1 <- qplot(data=df.dist.cnaes,       
+      x=cod_cnaecto_3, y=num, 
+      stat="identity",
+      geom="bar",
+      fill=cod_cnaecto_1,
+      xlab="CNAE",
+      ylab="Number of pymes", 
+      main="Distribution of pymes by their CNAE - first level group")  
+
+plot.dist_cnaes_super1 + 
+  theme(axis.text.x = element_blank()) +
+  guides(fill=FALSE)
+
+plot.dist_cnaes_super2 <- qplot(data=df.dist.cnaes,       
+      x=cod_cnaecto_2, y=num, 
+      stat="identity",
+      geom="bar",
+      fill=cod_cnaecto_1,
+      xlab="CNAE",
+      ylab="Number of pymes", 
+      main="Distribution of pymes by their CNAE - second level group")  
+
+plot.dist_cnaes_super2 + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  guides(fill=FALSE)
+
+
+plot.dist_cnaes_super3 <- qplot(data=df.dist.cnaes,       
+      x=cod_cnaecto_1, y=num, 
+      stat="identity",
+      geom="bar",
+#      log="y",
+      fill=cod_cnaecto_1,
+      xlab="CNAE",
+      ylab="Number of pymes", 
+      main="Distribution of pymes by their CNAE - third level group")  
+
+plot.dist_cnaes_super3 + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  guides(fill=FALSE)
+
+```
+
+
+
+## Agrupación de los clientes por sector y tipo de producto contratado 
+
+Creamos una tabla agregando los valores por sector CNAE y tipo de contrato (contrapartida). El propósito es determinar si los sectores se pueden perfilar respecto al tipo de productos de los que hacen uso.  
+
+
+```{r, Matriz de productos por sector contratado, fig.height=5, fig.width=5}
+
+# Consulta inicial - si un cliente tiene varios contratos de la misma contrapartida se agregan
+# q.agg.contrapartidas_por_cnae <- "
+# SELECT cod_cnaecto, cod_pgccontr, count(*) num_contratos
+# FROM da_cdepablo.contratos_pymes
+# GROUP BY cod_cnaecto, cod_pgccontr
+# "
+
+# Numero de clientes distintos que tienen un producto (por contrapartida)
+q.agg.contrapartidas_por_cnae <- "
+SELECT cod_cnaecto, cod_pgccontr, count(cod_persctpn) num_contratos
+FROM da_cdepablo.new_contratos
+GROUP BY cod_cnaecto, cod_pgccontr
+"
+
+df.agg.contrapartidas_por_cnae <- qimpala(q.agg.contrapartidas_por_cnae)
+df.agg.contrapartidas_por_cnae$cod_cnaecto <- factor(df.agg.contrapartidas_por_cnae$cod_cnaecto)
+df.agg.contrapartidas_por_cnae$cod_pgccontr <- factor(df.agg.contrapartidas_por_cnae$cod_pgccontr)
+
+
+qplot(data=df.agg.contrapartidas_por_cnae,       
+      x=cod_cnaecto, y=cod_pgccontr, 
+      stat="identity",
+      geom="tile",
+      xlab="Codigo CNAE",
+      ylab="Contrapartida", 
+      main="Distribution of contrapartida code for different CNAE sectors")  
+
+```
+
+
+```{r, Save data in a tmp file, eval=FALSE, echo=FALSE}
+
+saveRDS(df.agg.contrapartidas_por_cnae, file="/DYA/xe48636/pymes/PlanImpulso/contrapartidas_por_cnae.Rda")
+# 
+# prueba <- readRDS("~/data/contrapartidas_por_cnae.Rda")
+
+```
+
+### Clustering de CNAEs por contrapartida usando una representación vectorial 
+
+Usa una representación vectorial métrica para cada sector:
+
+ * Cada sector CNAE se repesenta con un vector de os productos contratados que agrega los productos contratados para las empresas de este tipo
+ * La magnitud de cada dimensión se corresponde con el número de contratos de ese tipo. 
+ * El vector se normaliza entre 0 y 1 para cada sector, indicando el "uso" que se hace de ese producto en el sector. 
+
+
+```{r, CNAE clustering using a vector representation}
+ 
+df.contra_x_cnae <- dcast(df.agg.contrapartidas_por_cnae, cod_cnaecto ~ cod_pgccontr,  value.var = "num_contratos")
+df.contra_x_cnae <- replace(df.contra_x_cnae, is.na(df.contra_x_cnae), 0)
+
+# Normalize to the unit vector
+m <- t(apply(df.contra_x_cnae[,-1], 1, function(x) ((x-min(x))/(max(x)-min(x)))))
+
+```
+
+### Ajuste del número de clusters 
+
+Determinamos el número de cluster utilizando el método del codo (elbow). Parece que un valor razonable puede ser **k=20** ya que al añadir más clusters no disminuye la suma de los cuadrados respecto a los centroides.  
+
+
+```{r, Optimización del número de clusters, fig.height=5, fig.width=5}
+
+
+maxk = 50
+wss <-(nrow(m)-1) * sum(apply(m,2,var))
+for (i in 2:maxk) wss[i] <- sum(kmeans(m,centers=i)$withinss)
+
+# [TODO] - sacar la escala desde 0 , Usar ggplot? 
+plot(1:maxk,wss, type="b", xlab="Number of clusters", ylab="Within group sum of squares")
+
+```
+
+### Agrupación usando k=20 clusters
+
+```{r, Listado de los clusters, message=FALSE}
+
+set.seed(42)
+
+k = 20 # Number of clusters
+fit = kmeans(m,k, nstart=40)
+
+df.contra_x_cnae$cluster <- factor(fit$cluster)
+
+df.clusters <- df.contra_x_cnae[,c('cluster', 'cod_cnaecto')]
+df.clusters <- dplyr::inner_join(df.clusters, df.catalog.cnae)
+
+df.clusters <- df.clusters[with(df.clusters, order(cluster, cod_cnaecto)),]
+
+```
+
+### Numero de sectores para cada uno de los clusters
+
+En general son bastante homogéneos aunque un par de ellos (1 y 2) tienen bastantes más elementos que los demás. 
+
+```{r Numero de sectores por cluster}
+
+df.num_clusters <- df.clusters %>% dplyr::count(cluster)
+
+ggplot(df.num_clusters, aes(x=cluster, y=n)) + 
+  geom_bar() +
+  ggtitle("Numero de códigos CNAE por cluster")
+
+```
+
+
+### Composición de los representantes de cada cluster
+
+```{r, Representation of cluster centroids }
+
+# Generamos un dataframe con los resultados
+centroids <- data.frame(fit$centers)
+centroids$cluster <- factor(seq(1,k,1))
+
+df.dim_products <- reshape2::melt(centroids, 
+          id.vars= c('cluster'),
+          variable.name = "cod_pgccontr", 
+          value.name = "pct_contracts")
+
+df.dim_products <- df.dim_products %>% dplyr::filter(pct_contracts > 0.01)
+
+```
+
+
+```{r heatmap de productos, echo=FALSE , fig.height=15, fig.width=20}
+
+
+# Gráfico de barras con la distribución de cada producto (centroide) por cluster.
+# qplot(data=df.dim_products,
+#       x=reorder(cod_pgccontr,-pct_contracts),
+#       y=pct_contracts,
+#       xlab = "Contrapartida",
+#       ylab = "\"Porcentaje\" de uso del producto (entre 0 y 1)",
+#       main = "Representantes de los clusters (centroid)",
+#       stat="identity", geom="bar") +
+#   facet_grid(. ~ cluster ) +
+#   theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+#   coord_flip()
+
+heatmap <- ggplot(df.dim_products, aes(cluster,reorder(cod_pgccontr,pct_contracts, FUN=sum))) +
+  xlab("Cluster") +
+  ylab("Contrapartida") +
+  labs(fill = "% Uso en CNAE") +
+  ggtitle("Porcentaje de uso de un producto\nCentroides de los clusteres") +
+  geom_tile(aes(fill = df.dim_products$pct_contracts)) + 
+  scale_fill_gradient(low = "white", high = "red")
+
+heatmap <- heatmap  +
+  annotate("text", x=3, y=47, label="VENTA, MANTENIMIENTO\n, ALQUILER  VEHICULOS", size = 3, color="darkgreen") +
+  annotate("segment", x=3, xend=3, y=48, yend=50.5, arrow = arrow(), size = .1) 
+
+heatmap <- heatmap  +
+  annotate("text", x=4, y=55, label="CONSTRUCCION, OBRA HIDRAULICA,\nFARMACEUTICA", size = 3, color="darkgreen") +
+  annotate("segment", x=4, xend=4, y=56, yend=60.5, arrow = arrow(), size = .1) 
+
+heatmap <- heatmap  +
+  annotate("text", x=8, y=40, label="COMERCIO AL MAYOR,\nALQUILER MAQUINARIA", size = 3, color="darkgreen") +
+  annotate("segment", x=8, xend=8, y=41, yend=67.5, arrow = arrow(), size = .1) 
+
+heatmap <- heatmap  +
+  annotate("text", x=12, y=40, label="SERVICIOS FINANCIEROS", size = 3, color="darkgreen") +
+  annotate("segment", x=12, xend=12, y=41, yend=55.5, arrow = arrow(), size = .1) 
+
+heatmap <- heatmap  +
+  annotate("text", x=19, y=50, label="COMERCIO AL MENOR", size = 3, color="darkgreen") +
+  annotate("segment", x=19, xend=19, y=51, yend=58.5, arrow = arrow(), size = .1) 
+
+heatmap <- heatmap  +
+  annotate("text", x=19, y=50, label="COMERCIO AL MENOR", size = 3, color="darkgreen") +
+  annotate("segment", x=19, xend=19, y=51, yend=58.5, arrow = arrow(), size = .1) 
+
+heatmap
+
+```
+
+
+* Clusters que contratan de forma extensiva *Factoring (NR y Divisas)* (0510)
+    + FABRICACION DE PRODUCTOS TEXTILES (14..) 
+    + FABRICACION DE VEHICULOS DE MOTOR, APARATOS DOMÉSTICOS (27..
+
+    + FABRICACION DE PRODUCTOS ALIMENTICIOS (11..) o FABRICACIÓN DE CABLEADO (27..)
+    + se diferencian por hacer uso de 517(CONFIRMING CLIENTES) y 617 (TARJETA CREDITO SUPERCOMPRA)
+
+* Clusters con preponderancia de ACUERDOS LINEAS DE PRODUCTO (0474)
+    + Actividades relacionadas con el sector transporte, fabricacion motor
+
+
+  * Clusters que tienen una representación grande de PRESTAMOS EXBBA (0974)
+    +  COMERCIO AL POR MAYOR (4...) 
+    +  FABRICACION Y COMERCIO DE TEXTIL Y CALZADOS
+
+
+  * Clusters que tienen una representación grande de VALORES NACIONALES (VALORES DEPOSITADOS) (0930)
+    +  BANCA, ACEITES, PETROLEO
+    +  INMOBILIARIA, COMO 2 - tambien tiene PROCEDIMIENTOS JUDICIALES (905)
+
+
+* COMERCIOS TPV(618)
+    + COMERCIO AL POR MENOR 
+    + COMERCIO AL POR MENOR, OCIO, TELECOMUNICACIONES - TARJETAS DE CREDITO (O616) Y OPERACIONES DE CESION DE IMPUESTOS (404) relativamente altas 
+
+  * CONFIRMING CLIENTES (517)
+    + FABRICACION MAQUINARIA
+    + FABRICACION DE PRODUCTOS "ELECTRÓNICOS" - PERIODICOS - menor consumo de 0470
+    + FABRICACION,PROCESADO DE ALIMENTOS, COMERCIO AL POR MAYOR
+
+ * RECIBOS DOMICILIADOS (0412): 
+    + EDUCACION, ACTIVIDADES PROFESIONALES Y ASOCIACIONES
+    + SEGUROS, EDUCACION
+ 
+ * OPERACIONES DE CESION DE IMPUESTOS (404)
+    + significativo en varios clusters
+ * SERVICIOS TELEMÁTICOS. NUEVA APLICACION (525) 
+
+
+
+ * Clusters 7 Y 16 son moderados en muchos de los valores excepto en 470
+ * La unica contrapartida que aparece moderadamente relacionada con COMEX es la 0247 - especialmente en el cluster 10 
+
+ Se ha generado un dashboard de Tableau que permite explorar con más detalle los sectores agrupados y la composicion de su cesta. 
+
+
+## Conclusiones 
+
+* Se ha confirmado que existen grupos de tipos de pymes (CNAE) por el tipo de productos que consumen y que estos tienen cierta coherencia y se puede realizar una interpretación respecto al tipo de industria.
+
+* Muchos de los clusters se caracterizan por una proporción más común de lo habitual de uno o dos productos concretos.
+
+* Muchos de los clusters son estables para diferentes semillas, aunque dos o tres de ellos parece que cambian al usar semillas diferentes. Es posible que merezca la pena investigar mejor la inicialización. 
+
+* El número de contrapartidas no es particularmente alto (115) y la distribucion muy desigual por lo que realmente no hay muchos productos entre los que "recomendar" si se opta por usar la contrapartida. En cualquier caso, la agrupamiento puede resultar útil para establecer diferentes tipos de empresas, mas allá de su caracterización CNAE y la jerarquía existente.
+
+
+## Lineas futuras
+
+Sin embargo, la coherencia de los clusters tiene cierto margen de mejora.
+
+  * Podríamos tratar de reforzar la coherencia temática dentro de los clusters
+  * Determinar si otros algoritmos (eg. pam) o representaciones permiten interpretar los clusters mejor. 
+  * Complementar con otros atributos - numero de empleados medio, datos financieros promediados  de informa  
+
+
+```{r, clustering de cnaes por contrapartida de producto contratado, echo=FALSE, eval=FALSE}
+
+# k <- 20
+# cf <- 10 # Filtra productos con menos ocurrencias que cf en ese sector
+# 
+# tmp.df.agg.contrapartidas_por_cnae <- dplyr::filter(df.agg.contrapartidas_por_cnae, num_contratos > cf) 
+# tmp.df.agg.contrapartidas_por_cnae <- tmp.df.agg.contrapartidas_por_cnae[c("cod_cnaecto", "cod_pgccontr", "num_contratos")]
+# 
+# # Pivotamos el df para que sea una matriz de incidencia de productos
+# pivot.df.agg.contrapartidas_por_cnae <- dcast(tmp.df.agg.contrapartidas_por_cnae, cod_cnaecto ~ cod_pgccontr,  value.var = "num_contratos")
+# pivot.df.agg.contrapartidas_por_cnae$cod_cnaecto <- factor(pivot.df.agg.contrapartidas_por_cnae$cod_cnaecto)
+# pivot.df.agg.contrapartidas_por_cnae <- replace(pivot.df.agg.contrapartidas_por_cnae, is.na(pivot.df.agg.contrapartidas_por_cnae), 0)
+# pivot.df.agg.contrapartidas_por_cnae <- replace(pivot.df.agg.contrapartidas_por_cnae, pivot.df.agg.contrapartidas_por_cnae> 1, 1)
+# 
+# # Cluster usando PAM ( k-medioids )
+# matrix <- data.matrix(pivot.df.agg.contrapartidas_por_cnae[,-1])
+# distance_matrix <-  dist(matrix, method="binary")
+# fit <- pam(distance_matrix, k, diss = TRUE)
+# plot(fit)
+# 
+# 
+# # Muestra los productos contratados más comunes por cluster
+# pivot.df.agg.contrapartidas_por_cnae$cluster <- factor(fit$clustering)
+# 
+# # Muestra los cnaes de cada código 
+# 
+# df.clusters <- pivot.df.agg.contrapartidas_por_cnae[,c('cluster', 'cod_cnaecto')]
+# df.clusters <- dplyr::inner_join(df.clusters, df.catalog.cnae)
+# 
+# df.clusters <- df.clusters[with(df.clusters, order(cluster)),]
+# 
+# #cluster_members <- dplyr::filter(df.clusters, cluster = 1)
+
+
+```
+
+
+
+```{r Representación gráfica de los productos del clustering pam, echo=FALSE, eval=FALSE}
+
+# df.products <- reshape2::melt(pivot.df.agg.contrapartidas_por_cnae, 
+#           id.vars= c('cluster', 'cod_cnaecto'),
+#           variable.name = "cod_pgccontr", 
+#           value.name = "num_contracts")
+# 
+# 
+# p <- df.products %>% dplyr::group_by(cluster,cod_pgccontr) %>% dplyr::summarize(sum_contracts = sum(num_contracts))
+# 
+# p <- p %>% dplyr::filter(sum_contracts > 5)
+# 
+# 
+# qplot(data=p,x=cod_pgccontr,y=sum_contracts, stat="identity", geom="bar") +
+#   facet_grid(cluster ~ ., scales = "free_y") +
+#   theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+```
+
+

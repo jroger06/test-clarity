@@ -1,0 +1,510 @@
+---
+title: 'Pymes: Modelo de Valor - Comparación entre modelos'
+author: "BBVA D&A - Customer Intelligence - César de Pablo"
+date: "19/01/2016"
+output: html_document
+---
+========================================================
+
+
+```{r, echo=FALSE}
+# This is the first mandatory section.
+
+title     <- '[Pymes] Comparacion de diferentes formas de modelar valor para clientes y no clientes'
+keywords  <- 'pymes, sme, value models, valor, balances, P&L'
+
+```
+
+
+```{r load DB libraries, echo=FALSE, warning=FALSE, message=FALSE}
+
+library(DBI)
+library(rJava)
+source('~/bda_clarity/tools/warehouse_basics.R')
+
+```
+
+
+```{r load libraries, echo=FALSE, warning=FALSE, message=FALSE}
+
+source('~/bda_clarity/tools/multiplot.R') ;
+
+library(ggplot2)
+library(caret)
+library(doParallel)
+library(dplyr)
+library(reshape2)
+library(Metrics)
+
+library(knitr)
+library(gridExtra)
+library(gbm)
+
+
+
+source('~/bda_clarity/script_incubator/non_clarity_logic/PymesAnalytics/Pymes_TablonUtils.R')
+source('~/bda_clarity/script_incubator/non_clarity_logic/PymesAnalytics/Pymes_Clientes_Valor_modeloCIRBE.R')
+source('~/bda_clarity/script_incubator/non_clarity_logic/PymesAnalytics/Pymes_EvaluationMeasures.R')
+
+source('~/bda_clarity/script_incubator/non_clarity_logic/PymesAnalytics/NonClients_Value.R')
+
+```
+
+## Objetivo
+
+
+### 1. Carga de datos
+ 
+ - Seleccionamos el tablon de datos con todas las características (*tablon_clientes*)
+ - Para modelar nos quedamos con el subconjunto de los que tienen datos de balance
+
+```{r Carga de datos de tablon cliente, cache=TRUE, echo=FALSE, results='hide'}
+
+df.tablon_valor_balance <- load_tablon_clientes()
+dim(df.tablon_valor_balance)
+
+```
+
+
+```{r eval=FALSE, echo=FALSE}
+
+names(df.tablon_valor_balance)
+
+```
+
+
+```{r Nombres y subgrupos de variables, echo=FALSE}
+
+# Grupos de nombres de columnas
+names.base <-c("codigo", "cod_cnae_1", "empleados")
+names.cuenta <- grep("^cuenta_", names(df.tablon_valor_balance)) 
+names.var <- grep("^var_", names(df.tablon_valor_balance))
+names.pct <- grep("^pct_", names(df.tablon_valor_balance))
+
+
+summary(df.tablon_valor_balance$margen_a)
+
+```
+
+
+```{r}
+
+# Filtramos a un dataset más manejable 
+df.valor <- df.tablon_valor_balance %>%
+            filter(cuota_cirbe > 0.7) 
+
+#%>%
+#            select(c(codigo, nif, empleados, cod_cnae_1, margen_a, cuota_cirbe, starts_with("cuenta_"), var_40100 ))
+
+colnames(df.valor)
+ncol(df.valor)
+nrow(df.valor)
+
+```
+
+
+```{r  Generación de las variable ordinal del margen}
+
+margen_breaks = c(-Inf, 25, 1500, 3500, 7000, Inf)
+margen_labels = c("1","2","3","4","5")
+
+df.valor$valor_ordinal <- cut(df.valor$margen_a, margen_breaks, labels = margen_labels, ordered_result = T) 
+
+summary(df.valor$valor_ordinal)
+
+```
+  
+  
+```{r Visualizamos la distribucion de ejemplos}
+
+df.valor %>% 
+  ggplot() + 
+  geom_bar(aes(x=margen_a, fill = valor_ordinal), binwidth = 0.05) +
+  scale_x_log10()
+
+df.valor %>%
+  ggplot(aes(x= valor_ordinal )) + 
+  geom_bar() + 
+  geom_text(aes(y = (..count..),
+                label = scales::percent((..count..)/sum(..count..))), 
+                 stat="bin",
+                 colour="darkblue", vjust=-1) +
+  ggtitle("Proporcion de clientes para cada conjunto de valor") 
+
+```
+
+
+
+```{r Preparacion de los datos de validacion, eval=FALSE}
+
+ratioTest <- 0.2
+
+set.seed(42)
+index <- createDataPartition(df.valor$valor_ordinal, p=1-ratioTest, list=FALSE)
+
+train.valor <- df.valor[index,]                  
+test.valor  <- df.valor[-index,]                  
+
+table(train.valor$valor_ordinal)
+table(test.valor$valor_ordinal)
+
+```
+
+
+
+
+
+
+
+## ¿Podemos aplicar el mismo modelo que para los de CIRBE sustituyendo Valor por Endeudamiento financiero?
+
+Comprobamos en primer lugar como son las correlaciones de las variables de endeudamiento de los balances con las variables de CIRBE. 
+
+Trabajamos con un subconjunto (80K) del que tenemos tanto info de CIRBE como de balance. 
+
+A pesar de que tienen balance y CIRBE, hay que tener en cuenta que muchas empresas tienen un importe = 0 para muchas de las variables.
+
+
+```{r}
+
+# dd <- df.tablon_valor_balance[ df.tablon_valor_balance$ind_balance == 1 & df.tablon_valor_balance$ind_cirbe == 1, ]
+# nrow(dd)
+
+dd <- df.tablon_valor_balance %>%
+  filter(ind_balance == 1 & ind_cirbe == 1)
+
+nrow(dd)
+
+summary(dd$imp_dfinasba)
+summary(dd$imp_dridsba)
+summary(dd$ind_cirbe)
+
+```
+
+
+
+
+```{r}
+
+dd %>%
+  select(cod_persctpn, matches("imp_d.*sba")) %>%
+  melt() %>%  
+  ggplot() +
+  geom_bar(aes(x=value + 1)) +
+  geom_vline( x = 6* 10^3, color = "red" ) + 
+  facet_wrap(~ variable ) +
+  scale_x_log10(breaks = c(1, 10^3, 10^4, 10^5, 10^6) ) +
+  labs( title = "Histograma de las variables de CIRBE", x = "Importe dispuesto", y = "Numero de clientes")
+  
+```
+
+
+
+```{r Histograma de las variables de CIRBE}
+
+dd %>%
+  select(cod_persctpn, matches("imp_d.*sba")) %>%
+  filter(imp_dridsba >= 6000) %>%  
+  melt() %>%  
+  ggplot() +
+  geom_bar(aes(x=value + 1)) +
+  geom_vline( x = 6* 10^3, color = "red" ) + 
+  facet_wrap(~ variable ) +
+  scale_x_log10( limits = c(5999, 10^6), breaks = c(1, 10^3, 10^4, 10^5, 10^6) ) +
+  labs( title = "Histograma de las variables de CIRBE", x = "Importe dispuesto", y = "Numero de clientes")
+
+```
+
+
+
+```{r}
+
+
+dd %>%
+  arrange(desc(imp_dridsba)) %>%
+  select(des_nombfj, cod_documps1, imp_dridsba, fec_altapers, total_activo_i, margen_servicios_i, margen_i, cnae, empleados, cuenta_11000, cuenta_12000 ) %>%
+  head(n =  20) %>%
+  kable()
+
+```
+
+
+
+```{r}
+
+tmp <- dd %>% filter(imp_dridsba >= 6000)
+  
+plot.limits <- c(5999, 10^7)
+plot.breaks <- c(1, 10^3, 10^4, 10^5, 10^6, 10^7)
+
+
+  a <- 
+  tmp %>%  
+  ggplot(aes(x=imp_dfinasba, y=cuenta_31220)) + 
+  geom_point(alpha = 0.1) + 
+  geom_abline() +
+  scale_x_log10( limits = plot.limits, breaks = plot.breaks) + 
+  scale_y_log10( limits = plot.limits, breaks = plot.breaks) +
+  ggtitle(paste0("Correlacion: ", round(cor(tmp$imp_dfinasba, tmp$cuenta_31220, use="complete.obs"), 2))) +
+  xlab("Cirbe dispueso largo") + ylab("Activo Largo")
+
+# Deudas entidades de crédito corto (32320) 0.31
+  b <- tmp %>%
+  ggplot(aes(x=imp_dfinsba, y=cuenta_32320)) + 
+  geom_point(alpha = 0.1) +  
+  geom_abline() +
+  scale_x_log10( limits = plot.limits, breaks = plot.breaks) + 
+  scale_y_log10( limits = plot.limits, breaks = plot.breaks) +
+  ggtitle(paste0("Correlacion: ", round(cor(tmp$imp_dfinsba, tmp$cuenta_32320, use="complete.obs"), 2))) +
+  xlab("Cirbe dispueso corto") + ylab("Deudas Entidades de crédito corto") 
+# Deudas entidades de crédito corto (32320) 0.31
+
+
+  c <- tmp %>%
+  ggplot(aes(x=imp_dridsba, y=cuenta_32320 + cuenta_31220)) + 
+  geom_point(alpha = 0.1) +  
+  geom_abline() +
+  scale_x_log10( limits = plot.limits, breaks = plot.breaks) + 
+  scale_y_log10( limits = plot.limits, breaks = plot.breaks) +
+  ggtitle(paste0("Correlacion: ", round(cor(tmp$imp_dridsba, tmp$cuenta_31220 + tmp$cuenta_32320, use="complete.obs"), 2))) +
+  xlab("Cirbe dispueso") + ylab("Deudas financieras")
+
+  grid.arrange(a,b,c, ncol = 2)
+
+```
+
+
+
+### Evaluación del modelo exponencial con los valores de endeudamiento. 
+
+¿Podemos sustituir los valores de CIRBE por el endeudamiento en los balances?
+
+
+```{r Carga modelos de valor para clientes con CIRBE}
+
+model_dirpath = "/DYA/xe48636/PymesAnalytics/models/clientes/valor/"
+
+path.model.gbm <- paste0(model_dirpath, "clientes.valor.gbm.l_m.l_cce.Rda")
+path.model.exp <- paste0(model_dirpath, "clientes.valor.exp.div1000.all.Rda")
+
+model.clientes.valor.gbm <- readRDS(path.model.gbm)
+model.clientes.valor.exp <- readRDS(path.model.exp)
+
+```
+
+
+
+```{r Evaluacion de sustituir CIRBE dispuesta directa por endudamiento financiero}
+
+
+dd.endeudamiento <- dd %>% 
+  select(cod_persctpn, cirbe_sistema, cuenta_32320 , cuenta_31220, cuenta_31000, cuenta_40100, cuenta_41500, margen_a, cuota_cirbe, cod_segmsubo) %>%
+  filter(!is.na(cuenta_32320) | !is.na(cuenta_31220)) %>%
+  mutate(
+    deudas_CP              = ifelse(is.na(cuenta_32320),0,cuenta_32320),
+    deudas_LP              = ifelse(is.na(cuenta_31220),0,cuenta_31220),
+    deudas                 = deudas_CP + deudas_LP ,
+    deudas_minus_cirbe     = deudas - cirbe_sistema ,
+    deudas_LP_minus_cirbe  = deudas_LP - cirbe_sistema,
+    pct_cirbe_minus_deudas = (deudas - cirbe_sistema)/cirbe_sistema
+) 
+
+head(dd.endeudamiento)
+
+df.margen.predicted <- data.frame(
+  cirbe.exp = predict(model.clientes.valor.exp[[1]], newdata = dd.endeudamiento , na.action = na.pass)
+)
+
+
+dd.endeudamiento$cirbe_original <- dd.endeudamiento$cirbe_sistema
+dd.endeudamiento$cirbe_sistema  <- dd.endeudamiento$deudas 
+
+df.margen.predicted$endeudamiento.exp <- predict(model.clientes.valor.exp[[1]], newdata = dd.endeudamiento , na.action = na.pass)
+df.margen.predicted$diff_margen <- df.margen.predicted$endeudamiento.exp - df.margen.predicted$cirbe.exp 
+
+head(df.margen.predicted)
+nrow(df.margen.predicted)
+
+
+```
+
+
+```{r}
+
+df.results.exp <- dplyr::bind_cols(dd.endeudamiento, df.margen.predicted)
+head(df.results.exp)
+
+nrow(df.results.exp)
+
+
+df.results.exp <- df.results.exp %>% filter(cirbe_original > 6000) 
+nrow(df.results.exp)
+colnames(df.results.exp)
+
+```
+
+
+```{r Plot points - Variables de balances comparadas con cirbe sistema}
+
+df.results.exp %>%
+  select(cirbe_original, deudas, deudas_CP, deudas_LP) %>%
+  melt(id = c("cirbe_original")) %>%
+#  head()  
+  ggplot() +
+  geom_point(aes(x = cirbe_original, y = value), alpha = 0.01) +
+  geom_abline(slope = 1, color = "blue") +
+  geom_vline( x = 6000, color = "red" ) +
+  facet_wrap(~ variable) +
+  scale_x_log10() +
+  scale_y_log10()
+
+```
+
+
+```{r Heatmaps - Variables de balances comparadas con cirbe sistema}
+
+df.results.exp %>%
+  select(cirbe_original, deudas, deudas_CP, deudas_LP) %>%
+  melt(id = c("cirbe_original")) %>%
+#  head()  
+  ggplot() +
+  geom_bin2d(aes(x = cirbe_original + 1, y = value + 1, fill = log(..count.. + 1)) ) +  
+  facet_wrap(~ variable) +
+  scale_x_log10() +
+  scale_y_log10()
+
+```
+
+
+```{r}
+
+df.results.exp %>%
+  ggplot() +
+  geom_point(aes(x = cirbe.exp, y = endeudamiento.exp), alpha = 0.05) +
+  geom_abline(slope = 1, color = "blue") +
+  scale_x_log10(limits = c(100,100000)) +
+  scale_y_log10(limits = c(100,100000))
+
+
+df.results.exp %>%
+  filter(pct_cirbe_minus_deudas <= 1.0 ) %>%
+  ggplot() +
+  geom_bar(aes( x = pct_cirbe_minus_deudas )) +
+  labs(title = "Error al considerar endeudamiento en vez de CIRBE", xlab = "% Error")
+
+
+df.results.exp %>%
+  filter(pct_cirbe_minus_deudas <= 1.0 ) %>%
+  filter(diff_margen > - 100000 ) %>%
+  ggplot() +
+  geom_point(aes(x = cirbe.exp, y = abs(diff_margen) + 1, color = factor(sign(diff_margen))  ) , alpha = 0.1) +
+#  facet_wrap(~ factor(sign(diff_margen)) ) +
+  geom_abline(slope = 1, color = "blue") +
+  scale_x_log10(limits = c(1,100000)) +
+  scale_y_log10() +
+  labs(title = "Distribucion del error en funcion del importe estimado", x = "Margen estimado segun CIRBE")
+
+
+```
+
+# Modelo de valor para no clientes
+
+
+```{r Evaluacion con el modelo de no clientes, cache=TRUE}
+
+tmp <- df.tablon_valor_balance[df.tablon_valor_balance$cod_persctpn %in% df.results.exp$cod_persctpn, ] %>% filter(cuota_cirbe >= 0.7)
+
+model.no.clientes <- predict.value(tmp)
+
+```
+
+## Modelo de valor para clientes basado en CIRBE
+
+
+```{r Evaluacion con el modelo de CIRBE}
+
+path.model.cirbe ="/DYA/xe48636/PymesAnalytics/models/clientes/valor/clientes.valor.gbm.l_m.l_cce.Rda"
+model.cirbe = readRDS(path.model.cirbe) 
+
+model.clientes.cirbe <- 10^predict(model.cirbe, newdata = tmp , na.action = na.pass)
+
+```
+
+
+
+```{r Evaluacion con el modelo de clientes con endeudamiento}
+
+path.model.balance ="/DYA/xe48636/PymesAnalytics/models/clientes/valor/clientes.valor.balance.gbm.l_m.l_ceb2.Rda"
+model.balance = readRDS(path.model.balance) 
+
+model.clientes.balance <- 10^predict(model.balance, newdata = tmp , na.action = na.pass)
+
+
+```
+
+
+```{r Evaluación con el modelo de clientes con balance}
+
+path.model.sinend ="/DYA/xe48636/PymesAnalytics/models/clientes/valor/clientes.valor.sinend.gbm.l_m.l_ceb2.Rda"
+model.sinend = readRDS(path.model.sinend) 
+
+model.clientes.sinend <- 10^predict(model.sinend, newdata = tmp , na.action = na.pass)
+
+```
+
+
+
+## Evaluacion 
+
+```{r Plot de las distribuciones de las prediciones vs margen - predicciones por segmento}
+
+test.valor <- df.results.exp %>% 
+              filter(cuota_cirbe >= 0.7) %>%
+              select(margen_a, cod_segmsubo)
+
+test.predictions <- df.results.exp %>% 
+              filter(cuota_cirbe >= 0.7) %>%
+              mutate(
+                original = margen_a,
+                gastos_financieros = -1 * cuenta_41500
+                     )  %>%
+              select(original, cuenta_31000, cuenta_40100, gastos_financieros, cirbe.exp, endeudamiento.exp) 
+
+test.predictions$no_clientes      <- model.no.clientes
+test.predictions$clientes.cirbe   <- model.clientes.cirbe
+test.predictions$clientes.balance <- model.clientes.balance
+test.predictions$clientes.sinend  <- model.clientes.sinend
+
+
+head(test.predictions)
+
+# experiments.to.plot <- colnames(test.predictions)
+experiments.to.plot <- c("gastos_financieros","no_clientes", "clientes.cirbe", "clientes.balance", "clientes.sinend", "cirbe.exp", "endeudamiento.exp")
+plot.predictions.density(test.valor,test.predictions,experiments.to.plot)
+
+
+df.regression.results <- plot.regression.evaluation(test.valor$margen_a, test.predictions[experiments.to.plot])
+
+
+labels  <- c("1","2","3","4","5")
+cortes  <- c(-Inf, 25, 1500, 3500, 7000, Inf)
+
+
+test.margen.ordinal <- make.ordinal(test.valor$margen_a, cortes, labels)
+
+test.predictions.ordinal <- lapply(data.frame(test.predictions), function(predictions) {
+  make.ordinal(predictions, cortes, labels)
+}) %>% data.frame()
+
+
+df.evaluation.ordinal <- plot.ordinal_regression.evaluation(test.margen.ordinal, test.predictions.ordinal[experiments.to.plot]) 
+kable(df.evaluation.ordinal)
+
+list.confusionMatrix <- plot.confusionMatrix.evaluation(test.margen.ordinal, test.predictions.ordinal[experiments.to.plot])
+
+#experiments.to.plot <- c("cuenta_31000", "cuenta_40100" ,"gastos_financieros", "cirbe.exp",  "endeudamiento.exp", "no_clientes")
+experiments.to.plot <- c("gastos_financieros", "no_clientes", "clientes.cirbe", "clientes.balance", "clientes.sinend", "cirbe.exp",  "endeudamiento.exp")
+df.ranking <- plot.ranking.evaluation(test.valor$margen_a, test.predictions[experiments.to.plot])
+
+```
+

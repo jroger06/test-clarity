@@ -1,0 +1,508 @@
+---
+output:
+  html_document:
+    self_contained: no
+    pdf_document: default
+    theme: cerulean
+---
+
+Digital Sales: Personal Loan
+-------------------
+
+```{r title, echo=FALSE}
+# This is the first mandatory section.
+title     <- '[Digital Sales]: Personal Loan Purpose (Simulator).'
+
+# Keywords. Text separated by commas. E.g. keywords <- 'customer health, recibos' 
+# Keywords can classify the attribute in categories such as 'valor, vinculación, digitalidad', describe used tables such as 'recibos, 
+# transacciones tarjetas, segmento plan uno' or include other relevant info. Search keywords in the portal to find commonly used terms
+# and create new keywords only if justified.
+
+keywords  <- 'loan, omniture, simulator, funnel'
+```
+
+```{r loadingPackages, echo=FALSE, cache=FALSE, warning=FALSE, message=FALSE}
+fec_inicial <- "2015-06-01"
+fec_final   <- "2015-06-30"
+fec_datos   <- "2014-06-30'"
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+source('~/bda_clarity/tools/warehouse_basics.R')
+source('~/bda_clarity/tools/write.hive.R')
+suppressPackageStartupMessages(library('data.table'))
+suppressPackageStartupMessages(library('reshape2'))
+suppressPackageStartupMessages(library('ggplot2'))
+suppressPackageStartupMessages(library('plyr'))
+suppressPackageStartupMessages(library('data.table'))
+suppressPackageStartupMessages(library('googleVis'))
+suppressPackageStartupMessages(library('gdata'))
+
+op <- options(gvis.plot.tag=NULL)
+op <- options(gvis.plot.tag="chart")
+
+doit = FALSE
+
+labels_euro <- function(x) {# no rounding
+  paste0(format(x, big.mark = ",", decimal.mark = ".", trim = TRUE,
+                scientific = FALSE), " €")
+} 
+
+
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  require(grid)
+  
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+  
+  numPlots = length(plots)
+  
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                     ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+  
+  if (numPlots==1) {
+    print(plots[[1]])
+    
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+      
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+
+```
+
+```{r dpendencies, echo=FALSE , results='hide'}
+### LOADING DEPENDENCIES
+omniture.omniture_bbvamice       <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'omniture.omniture_bbvamice', '*', sqname = 'omniture_bbvamice')
+clarity.detalle_productos_saldos_cliente   <- clarity.use_table(DEPENDENCY_CLARITY_TABLE, 'clarity_intermediate.detalle_productos_saldos_cliente', '*', sqname = 'detalle_productos_saldos_cliente')
+rms.movimientos_cuentas                    <- clarity.use_table(DEPENDENCY_OTHER_TABLES,    'rms_master.movimientos_cuentas',    '*', sqname = 'movimientos_cuentas')
+mmpp.movimientos_tarjetas                  <- clarity.use_table(DEPENDENCY_OTHER_TABLES,    'mmpp_master.movimientos_tarjetas',  '*', sqname = 'movimientos_tarjetas')
+
+```
+
+#### Analysis of personal loan purpose  
+
+March - April 2015 Data (Omniture and CMC)
+
+The goal of this paper is to analyze the purpose of consumer loans and its influence on the process of granting.
+
+```{r querysOmniture, echo=FALSE , cache=TRUE, eval=FALSE}
+drop_table('omniture.omniture_cookie_persona')
+do.hive(" CREATE TABLE omniture.omniture_cookie_persona AS 
+        SELECT
+          cod_visitor_id, 
+          cod_persona 
+        FROM 
+          (
+          SELECT 
+            cod_visitor_id,
+            cod_persona, 
+            rank() over (PARTITION BY cod_visitor_id ORDER BY num_page_view DESC) as rank
+          FROM 
+            ( 
+            SELECT
+              cod_visitor_id, 
+              cod_persona, 
+              sum(num_page_views) as num_page_view
+            FROM omniture.omniture_bbvamice
+              where cod_persona!='' AND cod_persona is not null
+            GROUP BY 
+              cod_visitor_id, 
+              cod_persona 
+            ) V
+          ) R
+        WHERE rank=1" )
+
+sql_omniture <- paste0("SELECT a.*,
+                       if( a.str_hour = c.str_hour, c.cod_id_camp, NULL ) as str_campaign, 
+                       if( a.cod_persona='' or a.cod_persona is null , b.cod_persona,   a.cod_persona ) as  global_id
+                       FROM (
+                       SELECT * 
+                       FROM omniture.omniture_bbvamice
+                       WHERE partition_id between '", gsub("-","",as.Date(fec_inicial)) ,"'"," AND '", gsub("-","",fec_final) ,"'"," 
+                       ) a
+                       LEFT OUTER JOIN  
+                       omniture.omniture_cookie_persona b
+                       ON (a.cod_visitor_id = b.cod_visitor_id)
+                       LEFT OUTER JOIN 
+                       ( 
+                       SELECT 
+                       str_hour, 
+                       visitor_id, 
+                       collect_set(cod_id_camp) as cod_id_camp
+                       FROM da_omniture.finalidad_consumo_reactivo_201506 
+                       WHERE cod_id_camp regexp 'consumo reactivo:'
+                       GROUP BY str_hour, 
+                       visitor_id
+                       ) c
+                       ON (a.cod_visitor_id = c.visitor_id)
+                       WHERE c.visitor_id is not null" )
+
+drop_table("da_rafa.omniture_consumo_reactivo")
+do.hive(paste("CREATE TABLE da_rafa.omniture_consumo_reactivo AS ",sql_omniture))
+```
+
+```{r loadingCMC, echo=FALSE , cache=TRUE, eval=TRUE}
+#loading CMC data and upload to hive table
+# cmc_consumo <- read.csv("/us/xe45922/consumo/datos/cruce\ 04\ ult\ tarea\ propuestas\ únicas.csv", header=T, sep =";")
+# cmc_consumo_abril <- read.csv("/us/xe45922/consumo/datos/Resultado\ Formularios\ Consumo_20150514.csv", header=T, sep =";"  )
+# 
+# cmc_consumo_abril$Fecha.Ini <- cmc_consumo_abril$Fecha.Inicio
+# names(cmc_consumo) <- gsub("_",".", names(cmc_consumo))
+# 
+# cmc_consumo <- rbind(cmc_consumo[ , c("Cliente", "DNI.NIF.CIF.del.Cliente","Prod.Comercial","Acontecimiento", "Sub.Acontecimiento", "Fase.Tarea", "Fecha.Fin", "Fecha.Pri.Gen" , "Fecha.Ini")], 
+# cmc_consumo_abril[ , c("Cliente", "DNI.NIF.CIF.del.Cliente", "Prod.Comercial","Acontecimiento", "Sub.Acontecimiento", "Fase.Tarea", "Fecha.Fin", "Fecha.Pri.Gen" , "Fecha.Ini")] ) 
+# 
+# names(cmc_consumo) <- tolower(names(cmc_consumo))
+# saved <- write.hive(cmc_consumo , "da_rafa.propuestas_cmc_consumo") 
+cmc <- 'da_cmc.propuestas_consumo_20140801_20150729'
+cmc_consumo <- qhive(paste("select * from ", cmc ))
+```
+
+```{r preprocessingData , cache=TRUE, echo=FALSE}
+consumo_reactivo        <- qhive("SELECT * 
+                                 FROM da_rafa.omniture_consumo_reactivo 
+                                 WHERE str_campaign is not null 
+                                 or des_pages regexp 'formulario:simulador prestamos consumo reactivo' ") 
+names(consumo_reactivo) <- gsub("omniture_consumo_reactivo.","",names(consumo_reactivo))
+
+consumo_reactivo <- data.table(consumo_reactivo)
+consumo_reactivo <- consumo_reactivo[ , id := seq(1,.N)]
+setkey(consumo_reactivo, id)
+
+consumo_reactivo$str_campaign  <- gsub("\"|consumo reactivo:|\\[|\\]", "",consumo_reactivo$str_campaign)
+consumo_reactivo_id <- consumo_reactivo[, list( titulares   = as.character( strsplit( strsplit( str_campaign, 'titulares:')[[1]][2] , ",")[[1]][1] ) , 
+                                                finalidades = as.character( strsplit( strsplit( str_campaign, 'finalidades:')[[1]][2] , ",")[[1]][1] ) ,
+                                                cuotas      = as.numeric( gsub("\\.", "", sub("\\.[0-9][0-9]$","", as.character( strsplit( strsplit(str_campaign, 'cuotas:')[[1]][2] , ",")[[1]][1] )))),
+                                                ingresos    = as.numeric( gsub("\\.", "", strsplit( strsplit( str_campaign, 'ingresos:')[[1]][2] , ",")[[1]][1] ) )  ,
+                                                gastos      = as.numeric( gsub("\\.", "", strsplit( strsplit( str_campaign, 'gastos:')[[1]][2] , ",")[[1]][1] ) ) ,
+                                                importes    = as.numeric( gsub("\\.", "", strsplit( strsplit( str_campaign, 'importes:')[[1]][2] , ",")[[1]][1] ) ) ,
+                                                plazos      = as.numeric( strsplit( strsplit( str_campaign, 'plazos:')[[1]][2] , ",")[[1]][1]  ) 
+                                                ) , by = id]
+consumo_reactivo <- consumo_reactivo[consumo_reactivo_id]
+
+consumo_reactivo$cod_persona <- as.numeric(consumo_reactivo$cod_persona)
+consumo_reactivo$str_date    <- as.Date(consumo_reactivo$str_date, format="%B %e %Y")
+
+consumo_reactivo <- consumo_reactivo[ , is_client := ifelse(is.na(global_id), 'no cliente', 'cliente')]
+consumo_reactivo <- consumo_reactivo[ , global_id := as.numeric( ifelse(is.na(global_id), cod_visitor_id, global_id) ) ]
+consumo_reactivo <- consumo_reactivo[ , prestamo  := plazos*cuotas]
+consumo_reactivo <- consumo_reactivo[ , intereses := prestamo - importes]
+consumo_reactivo <- consumo_reactivo[ , apertura  := importes*0.023]
+consumo_reactivo <- consumo_reactivo[ , comisiones:= ceiling(consumo_reactivo$plazo/12*2)/2*40]
+consumo_reactivo <- consumo_reactivo[ , a_pagar   := apertura + comisiones + prestamo]
+consumo_reactivo <- consumo_reactivo[ , confirmado:=grepl('formulario:simulador prestamos consumo reactivo:4',des_pages) ]
+
+consumo_reactivo <- unique(consumo_reactivo)
+# 
+# View(consumo_reactivo[consumo_reactivo$confirmado & !is.na(consumo_reactivo$str_campaign), ][order(global_id)])
+
+consumo_reactivo2  <- consumo_reactivo[!is.na(consumo_reactivo$str_campaign),  ][order(global_id , -confirmado, -str_date, -str_hour)]
+
+#consumo_reactivo_form <- consumo_reactivo[consumo_reactivo$confirmado & !is.na(consumo_reactivo$str_campaign), ]
+#clientes_cr <- consumo_reactivo_form[ !duplicated(consumo_reactivo_form$global_id), ]
+clientes_cr <- consumo_reactivo2[ !duplicated(consumo_reactivo2$global_id), ]
+```` 
+
+```{r loadingCRM, echo=FALSE , cache=TRUE, eval=FALSE}
+# loading CRM data
+
+form_crm <-qhive("select  substr(regexp_extract(cast(cod_tipident as string) , '([^;]+)',1),20,30) as finalidad, count(distinct cod_persctpn) as total
+ from crm_master.datos_cabecera_de_formulario CRM_da 
+where cast(CRM_da.cod_formular as string) in ('CRE','PPC','PCC','PCR') 
+and trim(substr(cast(cod_user as string),4,6)) = 'MAR-15'
+group by substr(regexp_extract(cast(cod_tipident as string), '([^;]+)',1),20,30)")
+
+dt.form_crm <- data.table(form_crm)[order(-total)][-1]
+```
+
+Top purposes are housing refurbishing, car (new o used), furniture and travel.
+
+
+```{r Graphics_simulacion, echo=FALSE, cache=TRUE, results='asis', tidy=FALSE, fig.width=8, fig.height=8}
+
+finalidades <- c("reforma vivienda" , "coche nuevo","coche usado","muebles","viajes","sanidad","estudios","motocicleta","electrodomesticos","boda")
+clientes_cr$finalidades <- factor(clientes_cr$finalidades , levels=finalidades )
+consumo_reactivo$finalidades <- factor(consumo_reactivo$finalidades, levels =finalidades)
+
+dt.finalidades            <- data.frame( table(clientes_cr[!is.na(clientes_cr$finalidades), ]$finalidades) )
+dt.finalidades_confirmado <- data.frame( table(clientes_cr[!is.na(clientes_cr$finalidades) & clientes_cr$confirmado, ]$finalidades) )
+names(dt.finalidades)            <- c("loan purpose", "users simulating")
+names(dt.finalidades_confirmado) <- c("loan purpose", "users requesting")
+
+dt.finalidades <- suppressMessages( join( dt.finalidades, dt.finalidades_confirmado) ) 
+
+finalidadPrestamo <- gvisBarChart(dt.finalidades, xvar=names(dt.finalidades)[1], yvar=names(dt.finalidades)[-1], 
+                       options=list(isStacked=FALSE,
+                                    title="Personal loan simulated by clients",
+                                    width=1000,
+                                    height=500), chartid='finalidades')
+plot(finalidadPrestamo)
+
+# 
+# finalidadPrestamo_CRM <- gvisBarChart(dt.form_crm, xvar="finalidad", yvar="total", 
+#                           options=list(isStacked=FALSE,
+#                                     title="Clientes con formularios registrados en CRM por finalidad del préstamo",
+#                                     width=1000,
+#                                     height=500),  chartid='finalidadesCRM')
+# plot(finalidadPrestamo_CRM)
+
+ggplot(clientes_cr[!is.na(clientes_cr$finalidades), ], 
+                         aes(y=importes, x = finalidades,  fill = confirmado)) + 
+                    geom_boxplot() +  ylab('Loan amount') +
+                    ggtitle('Loan amount simulated/requested by purpose') + 
+                    scale_y_continuous(labels = labels_euro, limits = c(0,35000)) + 
+                    theme_bw(15) + theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+beneficios <- clientes_cr[!is.na(clientes_cr$finalidades) & clientes_cr$confirmado, list(beneficio = sum(intereses, na.rm=T)), by = finalidades][order(-beneficio)]
+
+names(beneficios) <- c('purposes', 'incomes')
+InteresesFinalidad <- gvisColumnChart(beneficios, xvar=names(beneficios)[1], yvar=names(beneficios)[-1], 
+                       options=list(isStacked=FALSE,
+                                    title="incomes by purpose of personal loan request",
+                                    width=1000,
+                                    height=500), chartid='intereses')
+plot(InteresesFinalidad)
+
+```
+
+Users trend to simulate higher loan amount of money that it is requested regardless of the purpose. 
+
+* New car is the purpose for which higher loan amount is requested followed by housing refurbishing.
+
+Based on the number of loans, amount and timing we can see revenues the bank that will receive for each purpose.
+
+```{r preprocessinCMC, cache=TRUE, echo=FALSE, eval=TRUE}
+#cmc_consumo <- qhive("select * from da_rafa.propuestas_cmc_consumo") 
+names(cmc_consumo)[names(cmc_consumo)=="cliente"] <-  "cod_persona"
+
+# formatting variables
+cmc_consumo$fasetarea <- trim(iconv( cmc_consumo$fasetarea, to='ASCII//TRANSLIT'))
+cmc_consumo$fasetarea[ cmc_consumo$fasetarea=="Cancelaci?"] <- "Cancelacion"
+
+
+#Reorder factor
+cmc_consumo$fasetarea <- factor(cmc_consumo$fasetarea, levels=c("Cancelacion","Reestudio","Gen.Propuesta","Sanc.Riesgo","Sanc.Precio","Formalizacion","Puesta en Vigor"))
+for (k in grep('fec',names(cmc_consumo))){
+  cmc_consumo[ , k] <- as.Date( cmc_consumo[ , k]  , "%d/%m/%Y")  
+}
+
+# filtering by date and ordering to deduplicate by cod_persona
+# cmc_consumo <- cmc_consumo[cmc_consumo$fechaini>=fec_inicial &  cmc_consumo$fechaini<=fec_final , ]
+cmc_consumo <- data.table(cmc_consumo)
+cmc_consumo <- cmc_consumo[order(cod_persona, -fasetarea, -fechainicio)] 
+clientesCMC <- cmc_consumo[ !duplicated(cmc_consumo$cod_persona), ]
+```
+
+```{r join_cmc_omniture, echo=FALSE, cache=TRUE, eval=TRUE}
+setkey(clientes_cr, global_id)
+setkey(clientesCMC, cod_persona)
+
+clientesCMC_cr <- clientesCMC[clientes_cr]
+```
+
+#### Personal Loan funnel
+
+```{r GeneralFunnel, echo=FALSE, cache=TRUE, results='asis', tidy=FALSE, fig.width=10, fig.height=10, eval=TRUE}
+
+funnel_general        <- c( dim(clientesCMC_cr)[1] ,  sum(clientesCMC_cr$confirmado), 
+                            sum(!is.na(clientesCMC_cr$fasetarea)), sum(clientesCMC_cr$fasetarea == "Puesta en Vigor", na.rm=T))
+names(funnel_general) <- c("Simulation", "Request", "contracting process", "Puesta en Vigor")
+funnel_general[1:3]   <- abs(diff(funnel_general))
+funnel_general        <- data.frame(funnel_general)
+funnel_general        <- cbind(row.names(funnel_general), funnel_general)
+names(funnel_general) <- c("Last state", "Clients")
+
+FunnelGeneral <- gvisPieChart( data.frame(funnel_general) ,  
+                      options   = list(
+                        width   = 700,
+                        height  = 400,
+                        title   = "Personal Loan Funnel",
+                        legend  = "{position: 'left', textStyle: {color: 'blue', fontSize: 12}}",
+                        pieHole = 0.5), chartid = "FunnelGeneral")
+plot(FunnelGeneral)
+
+# How many of this end up in OCL ? 
+tipo_prestamos <- cbind( names(data.frame(sort(table(clientesCMC_cr[!is.na(clientesCMC_cr$fasetarea), ]$prodcomercial), decreasing=TRUE))[,1]),
+                         data.frame(sort(table(clientesCMC_cr[!is.na(clientesCMC_cr$fasetarea), ]$prodcomercial), decreasing=TRUE))[,1] )
+tipo_prestamos <- data.table(tipo_prestamos)
+names(tipo_prestamos) <- c("Loan Type", "Clients")
+tipo_prestamos$Clients <- as.numeric(tipo_prestamos$Clients)
+tipo_prestamos$Pct.Clients <- round(tipo_prestamos$Clients/sum(tipo_prestamos$Clients),3) 
+
+Table <- gvisTable(data.frame(tipo_prestamos) , 
+                   formats=list(Clients="#,###",
+                                Pct.Clients='##.#%'),
+                   options=list( width=600,
+                                 height=300,
+                                 title="Propuestas CMC"))
+plot(Table)
+```
+
+<br>
+
+Approximately half loans end up in OCL although it have been requested through the personal loan request.
+
+
+```{r Graphics_funnel, echo=FALSE, cache=TRUE, results='asis', tidy=FALSE, fig.width=10, fig.height=10, eval=TRUE}
+
+df.Fases <- suppressMessages(dcast(clientesCMC_cr, finalidades ~ fasetarea))
+df.Fases <- df.Fases[!is.na(df.Fases$finalidades), ]
+
+funnelConversion <- gvisBarChart(df.Fases, xvar=names(df.Fases)[1], yvar=names(df.Fases)[c( -1, -ncol(df.Fases) ) ], 
+                       options=list(isStacked=TRUE,
+                                    title="Lead to contract funnel by personal loan purpose",
+                                    width=1000,
+                                    height=500))
+plot(funnelConversion)
+
+df.prop.Fases <- cbind(df.Fases[1], prop.table( as.matrix(df.Fases[c( -1, -ncol(df.Fases) )]) , margin = 1))
+
+funnelConversionPct <- gvisBarChart(df.prop.Fases, xvar=names(df.prop.Fases)[1], yvar=names(df.prop.Fases)[-1], 
+                       options=list(isStacked=TRUE,
+                                    hAxis="{format:'###,#%'}",
+                                    tooltip = "{text:'percentage'}",
+                                    title="Lead to contract funnel by personal loan purpose",
+                                    width=1000,
+                                    height=500))
+plot(funnelConversionPct)
+```
+
+Study, health or furniture obtains greater conversion rate from request to sale.
+On contrary, new car loans obtain lower conversión rate. 
+
+It's important to notice that canceled or newly created requests could lead to a definitive sale soon. 
+It doesn't mean request is over. 
+
+```{r saveClientesData, echo=FALSE, eval=TRUE, cache=TRUE, eval=TRUE}
+# variables <- c(13,15,16,18,26,28,29,30,35,41:50,68:81)
+# write.hive(clientesCMC_cr[with=FALSE , ,variables] , "da_ventadigital.clientes_cr_cmc_20150430")
+saved <-  write.hive(clientesCMC_cr , "da_ventadigital.clientes_cr_cmc_20150630") 
+```
+
+
+```{r join_ClientesCR, echo=FALSE, cache=TRUE, echo=FALSE, eval=TRUE }
+
+variables_clientes_cr_cmc <- names(qhive("select * from da_ventadigital.clientes_cr_cmc_20150630 limit 1"))
+variables_clientes_cr_cmc <- gsub("clientes_cr_cmc_20150630.","",variables_clientes_cr_cmc)
+#paste0(variables_clientes_cr_cmc[ variables_clientes_cr_cmc!="cod_persona"], collapse=",")
+
+variables_clarity_productos <- names(qhive("select * from clarity_intermediate.detalle_productos_saldos_cliente limit 1"))
+variables_clarity_productos <- variables_clarity_productos[1:(length(variables_clarity_productos)-1)]
+
+pscCR <- qhive(paste("SELECT * 
+                       FROM 
+                        (
+                          SELECT 
+                            ", paste0("consumo_reactivo.",variables_clientes_cr_cmc[ !(variables_clientes_cr_cmc %in% c('cod_ofialfa',"cod_persona")) ], collapse=",") ,", 
+                            ", paste0(variables_clarity_productos, collapse=","), "
+                          FROM 
+                          (
+                            SELECT *
+                            FROM da_ventadigital.clientes_cr_cmc_20150630
+                            WHERE fasetarea='Puesta en Vigor'
+                          ) consumo_reactivo
+                          INNER JOIN 
+                          ", clarity.detalle_productos_saldos_cliente, "
+                          ON ( cast(detalle_productos_saldos_cliente.cod_persona as int) = cast(consumo_reactivo.cod_persona as int) ) 
+                        ) consumo_detalle
+                       LEFT OUTER JOIN 
+                        (
+                          SELECT * 
+                          FROM ", rms.movimientos_cuentas, "
+                          WHERE   raw_timestamp >= '20150601000000'
+                        ) movimientos_cuentas
+                         ON ( trim(consumo_detalle.cod_idcontra) = trim(movimientos_cuentas.cod_idcontra) ) "))
+#                         LEFT OUTER JOIN
+#                         (
+#                           SELECT * 
+#                           FROM ", mmpp.movimientos_tarjetas, "
+#                           WHERE raw_timestamp >= '20150601000000'
+#                         ) movimientos_tarjetas
+#                         ON ( trim(consumo_detalle.cod_pan) = trim(movimientos_tarjetas.cod_pan) )" ))
+
+pscCR <- data.table(pscCR)
+pscCR$movimientos_cuentas.fec_movimien <- as.Date(pscCR$movimientos_cuentas.fec_movimien)
+names(pscCR) <- gsub("consumo_detalle.|movimientos_cuentas.|movimientos_tarjetas.", "", names(pscCR))
+
+```
+
+
+```{r Graphics_difference, echo=FALSE, cache=TRUE, results='asis', tidy=FALSE, fig.width=7, fig.height=7, eval=TRUE}
+pscAbonos <- pscCR[pscCR$des_concepto=='ABONO POR DISPOSICION DE PRESTAMO/CREDITO' & !is.na(pscCR$des_concepto) ,  ]
+
+pscAbonos <- pscAbonos[ pscAbonos$finalidades != "NA" , 
+                   list( imp_prestamo = sum(imp_mov) , 
+                         imp_solicitado = max(importes), 
+                         diferencia = sum(imp_mov) - max(importes), 
+                         finalidades = sample(finalidades,1), 
+                         fec_ingreso_prestamo = min(fec_movimien)
+                         ), by=cod_persona]
+
+pscCR <- join( pscCR, pscAbonos, by = "cod_persona")
+pscCR <- pscCR[order(cod_persona, imp_mov)]
+
+ggplot(  pscAbonos, 
+        aes(y=diferencia, x=finalidades, colour=finalidades) ) + 
+        geom_point() +  ylab('Loan amount difference') +
+        ggtitle('Loan amount requested - granted by purpose') + 
+        scale_y_continuous(labels = labels_euro, limits = c(-15000,15000)) + 
+        theme_bw(15) + theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+```
+
+In many cases there is a significant difference between the amount of borrowed money and current accounts. 
+
+It seems to be a downward rectification of loan amount requested but in some cases the effect is the opposite
+
+```{r expenses_CR, echo=FALSE, cache=TRUE, echo=FALSE, eval=TRUE }
+gastosCR <- pscCR[!is.na(imp_prestamo) , list( imp_prestamo = imp_prestamo[1] , 
+                                               imp_solicitado = imp_solicitado[1], 
+                                               diferencia = diferencia[1], 
+                                               finalidades = finalidades[1], 
+                                               gasto = abs(imp_mov[1]/imp_solicitado[1]) > 0.1,
+                                               fec_ingreso_prestamo = fec_ingreso_prestamo[1] ,
+                                               des_concepto = des_concepto[1], 
+                                               des_movimto = des_movimto[1],
+                                               imp_mov = imp_mov[1] , 
+                                               gasto2  = abs(imp_mov[2]/imp_solicitado[2]) > 0.1 ,
+                                               des_concepto2 = des_concepto[2], 
+                                               des_movimto2 = des_movimto[2],
+                                               imp_mov2 = imp_mov[2] ),
+                                          by = cod_persona] 
+
+# pscCR <- pscCR[order(cod_persona, -imp_motransa)]
+# 
+# gastosCR <- pscCR[ !is.na(imp_prestamo) , list( imp_prestamo = imp_prestamo[1] , 
+#                                                  imp_solicitado = imp_solicitado[1], 
+#                                                  diferencia = diferencia[1], 
+#                                                  finalidades = finalidades[1], 
+#                                                  gasto = abs(imp_motransa[1]/imp_solicitado[1]) > 0.1,
+#                                                  fec_ingreso_prestamo = fec_ingreso_prestamo[1] ,
+#                                                  des_sector = des_sector[1], 
+#                                                  des_ramo = des_ramo[1],
+#                                                  imp_mov = imp_motransa[1] , 
+#                                                  gasto2  = abs(imp_motransa[2]/imp_solicitado[2]) > 0.1 ,
+#                                                  des_sector2 = cod_sector[2], 
+#                                                  des_ramo2 = des_ramo[2],
+#                                                  imp_mov2 = imp_motransa[2] ),
+#                                             by = cod_persona] 
+```
+
+

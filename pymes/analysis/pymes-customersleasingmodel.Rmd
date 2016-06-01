@@ -1,0 +1,1003 @@
+---
+output:
+  html_document:
+    self_contained: no
+    theme: cerulean
+---
+---
+title: "Pymes Analytics - Modelo de Leasing Clientes"
+author: "BBVA D&A - Pymes Analytics"
+date: "5/10/2015"
+output: html_document
+---
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- '[Pymes]: Modelo de Leasing Clientes'
+keywords  <- 'customer,leasing,pymes'  
+
+library(knitr)
+knitr::opts_chunk$set(cache=TRUE, tidy=TRUE, eval=TRUE, echo=FALSE, warning=FALSE, message=FALSE, fig.width = 8, fig.height = 6 )
+
+library(R.cache)
+
+```
+
+```{r librerias_y_funciones, echo=FALSE, cache=FALSE}
+# This is the second mandatory section.
+
+#suppressMessages(library(knitr))
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(grid))
+suppressMessages(library(gridExtra))
+suppressMessages(library(hexbin))
+suppressMessages(library(lattice))
+suppressMessages(library(reshape))
+suppressMessages(library(data.table))
+suppressMessages(library(plyr))
+suppressMessages(library(caret))
+suppressMessages(library(ROCR))
+suppressMessages(library(pROC))
+suppressMessages(library(randomForest))
+suppressPackageStartupMessages(library('googleVis'))
+op <- options(gvis.plot.tag="chart")
+
+
+#options(warn=-1, scipen=3, width=120)
+source('~/bda_clarity/tools/write.hive.R') ;
+source('~/bda_clarity/tools/multiplot.R') ;
+source('~/bda_clarity/tools/methods_connect.R') ;
+source('~/bda_clarity/tools/warehouse_basics.R') ;
+source('~/bda_clarity/applications/pymes_analytics/preprocess_functions.R') ;
+source('~/bda_clarity/applications/pymes_analytics/helper_functions.R');
+```
+
+```{r dependencies, echo = FALSE}
+
+# cli <- clarity.use_table(DEPENDENCY_OTHER_TABLES,    
+#                                              'da_pymes.tablon_clientes_sinfo ',    
+#                                              '*', sqname = 'cli')
+
+```
+
+
+
+```{r functions, echo=FALSE}
+
+# plotRoc: plot a ROC curve for a train and test model
+#
+# train : training dataset 
+# subset: index for using just part of the dataset 
+# test: test dataset 
+# model: model for predictions 
+# name: Title of the graph
+plotRoc <- function (train, subset, test, model, name) {
+  
+  train.predictions <- predict(model, newdata = train[subset,], type = "prob")  
+  test.predictions   <- predict(model, newdata = test, type = "prob")
+  
+  rocobj <- plot.roc(test$Class, test.predictions[,1],
+                     main = name ,
+                     legacy.axis = TRUE,
+#                      percent=TRUE, ci = TRUE, print.auc = TRUE,
+#                      of = "thresholds", thresholds "best", print.thres = "best", 
+                     col="blue") 
+  
+  rocobj1 <- lines.roc(train$Class[subset], train.predictions[,1],
+                       percent=TRUE, 
+                       col="red")   
+}
+
+# plotMultiRoc: plot multiple ROC curves for a dataset
+#
+# data : dataset containing predictions as columns
+# class: true class
+# subset: index for using just part of the dataset 
+# name: Title of the graph
+plotMultiRoc <- function (data, class, subset, name) {
+  
+  par(mfrow=c(1,1))
+  colors <- rainbow(ncol(data))
+  legend.name <- vector()
+  
+  for (i in 1:ncol(data)){
+    pred <- prediction (data[,i], labels=class)
+    perf <- performance(pred, measure="tpr", x.measure = "fpr")
+    auc <- round(performance(pred, "auc")@y.values[[1]], 2)
+    
+    legend.name <- c(legend.name, paste(names(data)[i], "- AUC =", auc))
+    if (i==1){
+      plot(perf, col=colors[i])
+    }else
+      plot(perf, col=colors[i], add=TRUE)
+  }
+  
+  legend("bottomright", legend.name, lty=c(1,1), col=colors)
+}
+
+# plotProbHistogram: plot an histogram of the probability distribution of 
+#                    of the predictions of a dataset
+#
+# data : dataset to evaluate 
+# model: model to apply for predictions
+plotProbHistogram <- function(data, model, type = "" ) {
+  predictions   <- predict(model, newdata = data, type = "prob")
+  hist(predictions$Yes, breaks = 31, main = paste("Distribution for ",type), xlab = "Predicted probability") 
+} 
+
+
+# plotTrainTestRoc: plot a ROC curve for a train and test model
+#
+# train : training dataset 
+# subset: index for using just part of the dataset 
+# test: test dataset 
+# model: model for predictions 
+# name: Title of the graph
+plotTrainTestRoc <- function(train, subset, test, model, name ) {
+
+  test.predictions   <- predict(model, newdata = test, type = "prob")
+
+  plot.roc(test$Class, test.predictions[,1],
+                     main = name ,
+                     legacy.axes = TRUE,
+                     percent=TRUE, 
+                     print.auc = TRUE, 
+                     partial.auc = c(100,80), 
+                     partial.auc.correct = TRUE,
+                     print.auc.pattern="Corrected pAUC (100-90%% SP):\n%.1f%%", print.auc.col="#1c61b6", 
+                     auc.polygon=TRUE, auc.polygon.col="#1c61b6",
+                     thresholds = "best", 
+                     print.thres = "best", 
+                     print.auc.x=20 ,
+                     print.auc.y=40,       
+                     col="blue") 
+
+  plot.roc(test$Class, test.predictions[,1],
+                     legacy.axes = TRUE,
+                     add = TRUE,
+                     percent=TRUE,
+                     thresholds = c(.5), 
+                     print.thres = c(.5),            
+                     print.auc = TRUE, 
+                     print.auc.x=20 ,
+                     print.auc.y=20,       
+                     col="blue") 
+
+
+  train.predictions  <- predict(model, newdata = train[subset,], type = "prob")  
+  plot.roc(train$Class[subset], train.predictions[,1],
+                   legacy.axes = TRUE,
+                   percent=TRUE, 
+                   add = TRUE,  
+                   print.auc = TRUE, 
+                   print.auc.x=20 ,
+                   print.auc.y=30,
+                   col="red") 
+
+
+  legend("bottomright", legend=c("Test", "Train"),
+       col=c("blue","red"), lwd=2)
+
+}
+
+ 
+# summarizeModelResults : plot several graphics and traces to summarize a model 
+#                           - summary for the learning and parameter selection process 
+#                           - ROC (AUC) performance curve for train and test
+#                           - Partial AUC for the interesting segment - low false negatives 
+#                           - Important variables (when available)
+#                           - Predicted Probability histograms for train and test data
+summarizeModelResults <- function (name, model, train, sample, test) {  
+  par(mfrow=c(2,2))
+
+  # model performance
+  print(model) 
+  print(getTrainPerf(model))
+  plot(model, main = "Model performance")
+  
+  # variable importance and performance
+  print(summary(model))
+  var.importance <- varImp(model, scale = FALSE)
+  plot(var.importance, main = "Variable importance")
+
+  plotTrainTestRoc(train, sample, test, model, name)
+
+  plotProbHistogram(train, model, "train")
+  plotProbHistogram(test, model,  "test")
+  
+} 
+
+```
+
+### 1. Motivación de negocio
+
+Modelos analíticos de propensión a tenencia de Leasing.
+
+### 2. Objetivo
+
+Detección de Pymes propensas a tenencia de Leasing en BBVA o en otras entidades bancarias.
+
+### 3. Fuentes de datos
+
+* **da_pymes.tablon_clientes_sinfo:** Tabla con más de 200 variables de cliente (tenencia, saldos...), provenientes de SINFO.
+* **da_pymes.tablon_clientes:** Incluye , entre otros datos, el CNAE más actualizado de los balances.
+* **clarity_elements.leasing:** Indicador de si el cliente tiene leasing o lo ha tenido recientemente.
+
+### 4. Análisis
+
+
+```{r general params}
+
+## [PARAM] Number of samples to use during training 
+n.sample.train = 10000    # use 10000 for developing
+# n.sample.train = -1      # use -1 to use the  full size of the train for analysis
+
+## [PARAM] Number of folds 
+n.folds = 10 
+
+## [PARAM] Number of experiments 
+n.experiments = 1
+#n.experiments = 10 
+
+# [PARAM] Path to the directory to save models
+model_dirpath = "/DYA/Models/Pymes/deploy/"
+
+```
+
+##### 4.1 Carga de los datos
+
+Obtenemos para cada cliente sus datos (del tablón) y las variables de si tiene o no leasing y el importe, tanto en el último mes como en los dos últimos años.
+
+```{r getData, echo=FALSE, eval = TRUE}
+
+# todo: revisar porque al hacer join con tablon_clientes se pasa de 727k a 232k
+q.dataset_leasing <- "
+SELECT cli.*, l.*,  cli2.cod_cnae_1
+FROM da_pymes.tablon_clientes_sinfo cli
+join da_pymes.tablon_clientes cli2 on cli.cod_persctpn = cast(trim(cli2.cod_persctpn) as int)
+LEFT JOIN clarity_elements.leasing l ON cli.cod_persctpn = l.cod_persona
+"
+
+df.all <- qimpala(q.dataset_leasing)
+df.all$cod_persona <- NULL  # Esta columna viene duplicada de la consulta SQL 
+
+
+```
+
+
+**Preprocesamos el CNAE** 
+
+```{r Generate CNAE factor with all levels}
+
+q.cnae_factor = "
+SELECT DISTINCT(cod_cnae_1) 
+FROM da_pymes.tablon_clientes
+"
+
+tmp.factor.cnae <- qimpala(q.cnae_factor)
+tmp.factor.cnae$cod_cnae_1 <- recodeCNAE(tmp.factor.cnae$cod_cnae_1)
+
+factor.cnae_1 <- factor(sort(unique(tmp.factor.cnae$cod_cnae_1)))
+
+# Prepare cnae variable
+df.all$cod_cnae_1 <- recodeCNAE(df.all$cod_cnae_1)
+df.all$cod_cnae_1 <- factor(df.all$cod_cnae_1, levels = levels(factor.cnae_1)) 
+
+
+df.all[is.na(df.all)]<-0  
+
+```
+
+
+##### 5.2 Construimos la variable objetivo 
+
+Los clientes que observamos que tienen o han tenido leasing en los 2 últimos años los marcamos como certeza. Utilizamos para ello tanto la tenencia interna en el banco, como lo informado en cirbe, como a partir de los balances.
+
+* 100 para actualmente
+* 95 para en el pasado reciente
+* para el resto, modelo de propensión
+
+```{r}
+dd.output <- data.frame(cod_persona = df.all$cod_persctpn)
+
+#head(tmp[rowSums(tmp[-1]) != 0,])
+
+dd.output$prob_leasing <- 0
+dd.output[df.all$imp_leasing != 0 | df.all$imp_lea_ban > 0 | df.all$imp_lea_sba > 0 | df.all$total_leasing_current_n > 0 | df.all$leasing_cirbe_current_imp > 0,]$prob_leasing = 100
+
+
+# total_leasing_two_years_imp
+dd.output[df.all$total_leasing_two_years_n > 0 | df.all$leasing_balances_two_years_imp > 0, ]$prob_leasing = 95
+
+```
+
+
+La variables **leasing_balances_current_imp** esta contenida en **leasing_balances_two_years_imp**. Puesto que los balances siempre tienen un desfase temporal no se usa para construir el indicador actual. 
+
+
+
+Así queda la distribución de la varibles tras esa asignación:
+```{r, echo=FALSE}
+table(dd.output$prob_leasing)
+```
+
+
+
+##### 4.3 Preprocesamiento de los datos 
+ 
+Definimos los tipos adecuados para las variables. 
+
+```{r Define and condition types, echo=FALSE}
+
+df.all <- convert_type_tablon_sinfo(df.all)
+
+```
+
+
+Hay variables que agregan los valores de leasing y otros productos. Para evitar que contaminen la variable a predecir **creamos variables sintéticas**: 
+
+```{r preprocess Data, echo=TRUE}
+
+# nuevas variables
+df.all$imp_activo_new <- df.all$imp_activo - df.all$imp_leasing
+df.all$imp_rid_sba_new <- df.all$imp_rid_sba - df.all$imp_lea_sba
+df.all$imp_rid_ban_new <- df.all$imp_rid_ban - df.all$imp_lea_ban
+
+```
+
+
+
+
+```{r correlations, eval=FALSE}
+
+corr <- data.frame(var1=character(), var2=character(), correl = numeric())
+for (i in 1:(ncol(df.all)-1)){
+  for (j in (i+1):ncol(df.all)){
+    if (grepl('^imp', names(df.all)[i]) & grepl('^imp', names(df.all)[j]) & sd(df.all[,i]) > 0 & sd(df.all[,j]) > 0){
+      #print(paste0("Var 1: ", names(df.all)[i], ", var 2: " , names(df.all)[j]))
+      print(paste(i, j))
+      corr <- rbind.data.frame(corr, data.frame(var1=names(df.all)[i], var2=names(df.all)[j], correl=cor(df.all[,i], df.all[,j], use="complete")))
+    }
+  }
+}
+#ggplot(corr, aes(x=var1, y=var2, size=correl, label=correl)) + geom_point() + geom_text(check_overlap = TRUE, hjust=0)
+ggplot(corr, aes(x=var1, y=correl)) + geom_bar(stat="identity") + facet_wrap(~var2)
+selected <- names(df.all[,grepl('^imp', names(df.all))])
+selected <- selected[!grepl("mean", selected)]
+#pairs(df.all[,selected])
+
+```
+
+
+##### 4.4 Creamos la variable a predecir: Tenencia de Leasing
+
+Ahora asignamos la clase para entrenar. Consideramos TRUE si tiene o ha tenido leasing en los dos últimos años, FALSE en otro caso. 
+
+```{r Assign predicted class , cache=FALSE, echo=FALSE, eval = TRUE}
+
+df.all$Class <- (dd.output$prob_leasing > 0)
+
+df.all$Class <- factor(df.all$Class , levels = c("TRUE", "FALSE"))
+df.all$Class <- revalue(df.all$Class, c("TRUE"="Yes", "FALSE"="No"))
+
+#table(df$Class)
+df2 <- data.table(df.all)[,list(n=.N), by=c("Class")][,p:=n/sum(n),]
+kable(df2)
+```
+
+
+Cambiamos la representacion de las variables categóricas más importantes usando variables dummies.  
+
+```{r generate dummy vars, eval=TRUE}
+
+# Cnae (y otras vars relevantes) añadido como dummy para que entren todas sus clases en el modelo
+dummy <- dummyVars(Class ~ cod_cnae_1 + seg_planuno + seg_corporativo + cod_segmento_global, data = df.all)
+
+df.dummy <- data.frame(predict(dummy, newdata = df.all))
+df.all <- cbind(df.all, df.dummy)
+```
+
+
+##### 4.5 Generación de conjuntos de entrenamiento, validación y test.
+
+ - Reservamos el 20% del conjunto de datos para validación. 
+ - Como el ratio de positivos es bajo, hacemos subsampling sobre los negativos para dejar un ratio  de 1:1.3. Luego repartimos en train (80%) y test (20%). Ajustamos cada modelo y al final se comparar la especificity, sensitivity y AUC.
+ -  Usamos validación cruzada
+
+
+```{r generate dataset split}
+
+# Preparación de training y test
+ratioTrain <- 0.8
+ratioTest <- 1-ratioTrain
+
+# df <- df.all
+# subsampling positive class
+
+df <- subset(df.all, Class == "Yes")
+df <- rbind(df, 
+            subset(df.all, Class == "No")[sample(1:nrow(subset(df.all, Class == "No")), 
+                                                 1.3*nrow(subset(df.all, Class == "Yes")), replace=FALSE),])
+
+# table(df$Class)
+
+#set.seed(42)
+index <- createDataPartition(df$Class, p=ratioTrain, list=FALSE)
+train.leasing <- df[index,]         
+test.leasing  <- df[-index,]         
+table(train.leasing$Class)
+table(test.leasing$Class)
+
+## if negative, use all instances for training 
+if (n.sample.train < 0) { n.sample.train = nrow(train.leasing) }
+if (n.sample.train > nrow(train.leasing) ) {n.sample.train = nrow(train.leasing)}
+
+sample.train <- sample(seq(1,nrow(train.leasing)), n.sample.train )
+
+```
+
+
+##### 4.6  Selección de las características del modelo
+
+Quitamos variables que:
+
+* Se utilizan para asignar la clase
+* Tienen poca o ninguna variabilidad
+* Identificadores únicos de persona: cclien, cif...
+* Tienen una correlación altísima con la clase (falsos predictores)
+
+```{r Model Formula}
+
+exclude <- c(# identificadores
+            "cod_paisoalf", "cod_entalfa", "cod_persctpn", "cod_persona", "cod_idefisca", 
+            
+            # demasiados valores, se agrupan
+            "seccion_censal", "cod_cno",
+            
+            # dummys
+            "cod_cnae_1", "seg_planuno", "seg_corporativo", "cod_segmento_global",
+            
+            # variables sin variacion
+             "seg_ciclo_vida", "seg_corporativo", "estado_cli", "seg_sexo", 
+            "imp_pp_ben", "imp_pp_par", "imp_seg_ahorro", "imp_cesion_segsociales", "imp_unit_link", 
+            "ind_bbvanet", 
+            "imp_pp_ben_evol", "imp_pp_par_evol", "imp_seg_ahorro_evol", "imp_cesion_segsociales_evol", "imp_unit_link_evol",
+            "imp_pp_ben_mean", "imp_pp_par_mean", "imp_seg_ahorro_mean", "imp_cesion_segsociales_mean", "imp_unit_link_mean",
+            "imp_nomina", "ind_nomina", "imp_pension", "ind_pension", "imp_inem", "ind_inem", "ind_pp_ben", "ind_pp_par", 
+            "ind_seg_ahorro", "ind_cesion_segsociales", "ind_unit_link", 
+            "n_meses_antig_nompen", "n_meses_ult_nompen", "n_meses_ult_seg_ahorro", "n_meses_ult_pp_ben", "n_meses_ult_pp_part", 
+            "n_meses_ult_seg_vinculado","n_meses_ult_unit_link", 
+            "imp_prima_seg_hogar", "imp_prima_seg_vida", "ind_seg_hogar", "ind_seg_vida", "imp_prima_seg_vinculado", "ind_seg_vinculado",
+            
+            # pocos valores
+            "ind_val_rentafija", "imp_val_rentafija_evol",  "per_amortizado_csm", "n_meses_vto_csm",
+             
+            # variables de clase
+             "Class", "imp_leasing", "imp_leasing_evol", "imp_leasing_mean", "imp_lea_sba", "imp_lea_ban", "per_cir_lea", 
+            "ind_leasing", "n_meses_ult_leasing", 
+            "total_leasing_current_n", "total_leasing_current_imp", "total_leasing_two_years_n", "total_leasing_two_years_imp",
+            "leasing_balances_current_imp", "leasing_balances_two_years_n", "leasing_balances_two_years_imp", 
+            "leasing_balances_two_years_imp_avg", "leasing_cirbe_current_imp"    
+            ,
+            # correlan mucho o las queremos quitar
+            "ind_cir",
+            "imp_activo", "imp_rid_sba", "imp_rid_ban", "imp_rin_sba", "imp_rin_ban", "imp_rgar_sba", "imp_rgar_ban", "per_cir_rgar"
+    )
+
+
+# check si queda alguna excluir variables con un único valor
+for (i in 1:ncol(df)){
+  # factores
+  if (is.factor(df[,i]) & length(levels(df[,i])) == 1 ){
+    if (!(names(df)[i] %in% exclude)) cat(names(df[i]), "\n")
+    exclude <- c(exclude, names(df)[i])
+  }
+  # numericos
+  if (is.numeric(df[,i])){
+    if (min(df[,i]) == max(df[,i]) & !(names(df)[i] %in% exclude)){
+      if (!(names(df)[i] %in% exclude) ) cat(names(df[i]), "\n")
+      exclude <- c(exclude, names(df)[i])
+      
+    }
+  }
+}
+
+# excluir variables que son media o de dun
+for (i in 1:ncol(df)){
+  if (grepl('mean', names(df)[i])){
+    exclude <- c(exclude, names(df)[i])
+  }
+  if (grepl('^dun', names(df)[i])){
+    exclude <- c(exclude, names(df)[i])
+  }  
+}
+
+exclude <- unique(exclude)
+
+
+```
+
+Las variables que finalmente se usan son:
+
+```{r Variables del modelo  , echo=TRUE}
+
+names(df)[!(names(df) %in% exclude) ]
+model.formula <- formula(paste0("Class ~ ", paste(names(df)[!(names(df) %in% exclude)], collapse=" + ")))
+
+```
+
+
+
+##### 4.7 Entrenamiento de los modelos
+
+We aimed at extract Partial Area Under the Curve figures for comparison across different algorithms. Parameter model selection still uses traditional AUC as implemented in caret. 
+
+Definimos el conjunto de experimentos y usamos validacion cruzada para la seleccion. La seleccion de los hiperparámetros de los modelos usa AUC (Area under the Curve) segun está implementada en Caret. 
+
+Además en las gráficas de resultados vamos a mostrar además pAUC (Partial Area Under the Curve) para centrar la atención en la parte de la curva que seleccionaría los clientes más propensos ya que para las campañas es frecuente seleccionar los clientes en funcion de la probabilidad estimada. 
+
+
+```{r train models parameters}
+
+ctrl <- trainControl(method = "repeatedCV",
+                     number = n.folds, 
+                     repeats = n.experiments,
+                     #returnResamp = "all",
+                     classProbs = TRUE,
+                     summaryFunction = twoClassSummary,
+                     allowParallel = TRUE)
+
+```
+
+
+###### Gradient Boosting Machine model (GBM)
+
+```{r train GBM, message=FALSE, fig.width=16, fig.height=16, cache=FALSE, warning=FALSE}
+
+set.seed(42)
+# system.time(
+#   model.gbm <- train(model.formula, data = train.leasing, 
+#                     method = "gbm",
+#                     subset = sample.train,
+#                     trControl = ctrl,
+#                     verbose = FALSE,
+#                     metric = "ROC") 
+# )
+
+# model.gbm <- readRDS(paste(model_dirpath, 
+#                     "customers.leasing.gbm.Rda",
+#                     sep = ""))
+
+
+
+model.gbm <- memoizedCall(train, 
+                          model.formula,
+                          data = train.leasing, 
+                          method = "gbm",
+                          subset = sample.train,
+                          trControl = ctrl,
+                          verbose = FALSE,
+                          metric = "ROC" ) 
+
+
+
+varImp(model.gbm)
+summarizeModelResults("Propensity Leasing - GBM", model.gbm,  train.leasing, sample.train, test.leasing)
+
+```
+
+
+##### Random Forest (RF)
+
+```{r train random forest, message=FALSE, fig.width=16, fig.height=16, cache=FALSE}
+
+set.seed(42)
+# system.time(
+#   model.rf <- train(model.formula, data = train.leasing, 
+#                   method = "rf",
+#                   subset = sample.train,
+#                   trControl = ctrl,
+#                   verbose = FALSE,
+#                   metric = "ROC") 
+# )
+
+model.rf <- memoizedCall(train, 
+                  model.formula, 
+                  data = train.leasing, 
+                  method = "rf",
+                  subset = sample.train,
+                  trControl = ctrl,
+                  verbose = FALSE,
+                  metric = "ROC") 
+
+
+
+
+# model.rf <- readRDS(paste(model_dirpath, 
+#                     "customers.leasing.rf.Rda",
+#                     sep = ""))
+
+
+
+
+varImp(model.rf)
+summarizeModelResults("Propension Leasing - Random Forest", model.rf,  train.leasing, sample.train, test.leasing)
+
+```
+
+En el caso de este modelo, obtenenos un AUC perfecto lo que puede indicar que estaríamos sobreentrenando el modelo, al menos en el caso con los hiperparámetros óptimos. Sin embargo los resultados en el conjunto de test son razonablemente altos y comparables a los de otros modelos.  
+
+
+###### Logistic Regression 
+
+Usamos el paquete *glm* (Generalized Linear Models) usando la familia binomial como función de enlace. 
+Además en este caso se realiza centrado y escalado del conjunto de datos. 
+
+```{r train glm, message=FALSE, fig.width=16, fig.height=16, cache=FALSE, warning=FALSE}
+
+set.seed(42)
+# system.time(
+#   model.glm <- train(model.formula, data = train.leasing, preProcess = c("center", "scale"),
+#                   method = "glm", family="binomial",
+#                   subset = sample.train,
+#                   trControl = ctrl,
+#                   metric = "ROC") 
+# )
+
+
+
+# model.glm <- readRDS(paste(model_dirpath, 
+#                     "customers.leasing.glm.Rda",
+#                     sep = ""))
+
+model.glm <- memoizedCall(
+                  train, 
+                  model.formula, 
+                  data = train.leasing, 
+                  preProcess = c("center", "scale"),
+                  method = "glm", family="binomial",
+                  subset = sample.train,
+                  trControl = ctrl,
+                  metric = "ROC") 
+
+
+model.glm$finalModel
+varImp(model.glm)
+#summarizeModelResults("Propension Leasing - GLM", model.glm,  train.leasing, sample.train, test.leasing)
+
+```
+
+
+#### 5. Analisis de los resultados de los modelos
+
+##### Análsis de la Importancia de las variables
+
+Vemos qué variables son las importantes con cada uno de los modelos entrenados. Obtenemos las 20 más importantes con cada modelo.
+
+```{r compareImportance}
+
+top = 20
+
+imp.gbm <- varImp(model.gbm)$importance
+names(imp.gbm) <- "imp"
+imp.gbm$var <- rownames(imp.gbm)
+imp.gbm <- head(imp.gbm[order(imp.gbm$imp, decreasing = TRUE),], top)
+
+imp.rf <- varImp(model.rf)$importance
+names(imp.rf) <- "imp"
+imp.rf$var <- rownames(imp.rf)
+imp.rf <- head(imp.rf[order(imp.rf$imp, decreasing = TRUE),], top)
+
+imp.glm <- varImp(model.glm)$importance
+names(imp.glm) <- "imp"
+imp.glm$var <- rownames(imp.glm)
+imp.glm <- head(imp.glm[order(imp.glm$imp, decreasing = TRUE),], top)
+
+
+importance <- rbind(data.frame(modelo="gbm", imp.gbm),
+                    data.frame(modelo="glm", imp.glm)
+                    #data.frame(modelo="rf", imp.rf)
+                    )
+
+ggplot(importance, aes(x=reorder(var, imp, max), y=imp, fill=modelo)) + 
+  geom_bar(stat="identity", position="dodge", width=0.7) +
+  xlab("Variable") + ylab("Relative Importance") + coord_flip() + 
+  theme(axis.text.y = element_text(size=14))
+
+
+```
+
+ Las variables seleccionadas por cada una de los tipos de modelos es diferente, en algunos casos como el que se muestra entre GLM y GBM las diferencias son notables.
+ 
+ Entre las variables comunes encontramos: 
+    
+  - **imp_activo_new**: Importe de los activos en el banco (en el balance de la empresa se reflejan como pasivo). Esta es una variable sintética que ya resta el importe de los productos de leasing. 
+  - **facturacion**:
+  - **CNAE** : Aunque cada técnica selecciona diferentes variables de las que se transformaron en el dummy encoding. Por ejemplo:        
+    
+    - RF usa el hecho de que no conozcamos el CNAE (**cod_cnae_1..**)
+    - GLM selecciona los CNAEs **H** (Transporte y almacenamiento), **Q** (Actividades sanitarias y de servicios sociales). 
+  
+
+
+```{r, eval=FALSE}
+
+varImp(model.glm)$importance
+
+par(mfrow=c(1,1))
+plot(coefficients(model.glm$finalModel))
+
+coef <- coefficients(model.glm$finalModel)
+plot(coef[abs(coef) < 10])
+coef[abs(coef) > 2]
+
+```
+
+##### Análisis de la probabilidad de cada uno de los datasets
+
+Estimamos la probabilidad para los datos de test.
+
+```{r}
+results <- data.frame(cod_documps1=test.leasing$cod_idefisca,Class = test.leasing$Class)
+results$GBM <- predict(model.gbm, 
+                       newdata = test.leasing, 
+                       type = "prob")[, 'Yes']
+
+results$RF <- predict(model.rf, 
+                       newdata = test.leasing, 
+                       type = "prob")[, 'Yes']
+
+results$GLM <- predict(model.glm, 
+                       newdata = test.leasing, 
+                       type = "prob")[, 'Yes']
+
+```
+
+
+Plot ROC curves.
+```{r}
+plotMultiRoc(data.frame(results[,c("GBM", "RF","GLM")]), results$Class, 0, "ROC curves for Several Models")
+```
+
+ - En todos los casos las curvas ROC que se obtienen son muy buenas 
+ - Los modelos con GBM y RF obtienen resultados similares. 
+ - En este punto parece preferible usar el modelo GBM, ya que: 
+ 
+    - es ligeramente superior tanto en AUC como en la tasa de true positive en la parte izquierda.  
+    - no hemos visto el comportamiento de overfitting. 
+ 
+
+##### Distribución de la probabilidad estimada en función de la clase. 
+
+
+```{r, fig.width=10, fig.height=8}
+
+prob.gbm.plot <- ggplot(results, aes(x=GBM, color=Class)) + geom_density() + xlab("Estimated Probability") + ggtitle("Gradient Boosting Machine")
+
+prob.rf.plot <- ggplot(results, aes(x=RF, color=Class)) + geom_density() + xlab("Estimated Probability") + ggtitle("Random Forest")
+
+prob.glm.plot <- ggplot(results, aes(x=GLM, color=Class)) + geom_density() + xlab("Estimated Probability") + ggtitle("Logistic Regression")
+
+
+grid.arrange(prob.gbm.plot , prob.rf.plot , prob.glm.plot, ncol = 2  )
+
+```
+
+Para todo el conjunto de datos
+
+
+```{r}
+
+results.all <- data.frame(cod_documps1=df.all$cod_idefisca, Class = df.all$Class)
+results.all$GBM <- predict(model.gbm, newdata = df.all, type = "prob")[, 'Yes']
+results.all$RF <- predict(model.rf, newdata = df.all, type = "prob")[, 'Yes']
+results.all$GLM <- predict(model.glm, newdata = df.all, type = "prob")[, 'Yes']
+
+ggplot(results.all, aes(x=GBM, color=Class)) + geom_density() + xlab("Estimated Probability") + ggtitle("Gradient Boosting Machine")
+ggplot(results.all, aes(x=RF, color=Class)) + geom_density() + xlab("Estimated Probability") + ggtitle("Random Forest")
+ggplot(results.all, aes(x=GLM, color=Class)) + geom_density() + xlab("Estimated Probability") + ggtitle("Generalized Linear Model")
+
+
+```
+
+
+
+##### Algunas estadísticas 
+
+Dependiendo de la probabilidad de corte que consideremos positica, vamos a encontrar clientes que no tienen leasing actualmente pero con una alta probabilidad. Calculamos precision y cobertura (recall) para diferentes puntos de corte. 
+
+
+```{r, fig.width=12, fig.height=4}
+
+
+
+cut <- seq(0, 1, by=0.05)
+
+res <- data.frame()
+for (c in cut){
+  res <- rbind(res, 
+               data.frame(prob = c,
+                          n = nrow(subset(results.all, GBM > c)),
+                          n_nueva = nrow(subset(results.all, GBM > c & Class == 'No')),
+                          precision = nrow(subset(results.all, GBM > c & Class == 'Yes'))/nrow(subset(results.all, GBM > c)),
+                          recall = nrow(subset(results.all, GBM > c & Class == 'Yes'))/nrow(subset(results.all, Class == 'Yes'))                          
+                          ))
+}
+
+# Precision y Recall en el mismo gráfico
+pr.gbm.plot <-  ggplot(res, aes(x=prob, y=precision, colour="precision")) + geom_line() +
+  geom_line(aes(x=prob, y=recall, colour="recall")) + 
+  scale_colour_manual(name="Metric", values = c(recall = "black", precision = "blue")) + ylab("Metric") + ggtitle("GBM")
+
+clientdist.gbm.plot <- ggplot(res, aes(x=prob, y=n_nueva, label=n_nueva)) + geom_point() + geom_text(angle=45, hjust=0, vjust=0) + ggtitle("GBM")
+
+
+cut <- seq(0, 1, by=0.05)
+
+res <- data.frame()
+for (c in cut){
+  res <- rbind(res, 
+               data.frame(prob = c,
+                          n = nrow(subset(results.all, RF > c)),
+                          n_nueva = nrow(subset(results.all, RF > c & Class == 'No')),
+                          precision = nrow(subset(results.all, RF > c & Class == 'Yes'))/nrow(subset(results.all, RF > c)),
+                          recall = nrow(subset(results.all, RF > c & Class == 'Yes'))/nrow(subset(results.all, Class == 'Yes'))                          
+                          ))
+}
+
+# Precision y Recall en el mismo gráfico
+pr.rf.plot <- ggplot(res, aes(x=prob, y=precision, colour="precision")) + geom_line() +
+  geom_line(aes(x=prob, y=recall, colour="recall")) + 
+  scale_colour_manual(name="Metric", values = c(recall = "black", precision = "blue")) + ylab("Metric") + ggtitle("RF")
+
+clientdist.rf.plot <-  ggplot(res, aes(x=prob, y=n_nueva, label=n_nueva)) + geom_point() + geom_text(angle=45, hjust=0, vjust=0) + ggtitle("RF")
+
+
+cut <- seq(0, 1, by=0.05)
+
+res <- data.frame()
+for (c in cut){
+  res <- rbind(res, 
+               data.frame(prob = c,
+                          n = nrow(subset(results.all, GLM > c)),
+                          n_nueva = nrow(subset(results.all, GLM > c & Class == 'No')),
+                          precision = nrow(subset(results.all, GLM > c & Class == 'Yes'))/nrow(subset(results.all, GLM > c)),
+                          recall = nrow(subset(results.all, GLM > c & Class == 'Yes'))/nrow(subset(results.all, Class == 'Yes'))                          
+                          ))
+}
+
+# Precision y Recall en el mismo gráfico
+pr.glm.plot <- ggplot(res, aes(x=prob, y=precision, colour="precision")) + geom_line() +
+  geom_line(aes(x=prob, y=recall, colour="recall")) + 
+  scale_colour_manual(name="Metric", values = c(recall = "black", precision = "blue")) + ylab("Metric") + ggtitle("GLM")
+
+clientdist.glm.plot <- ggplot(res, aes(x=prob, y=n_nueva, label=n_nueva)) + geom_point() + geom_text(angle=45, hjust=0, vjust=0) + ggtitle("GLM")
+
+
+grid.arrange(pr.gbm.plot, pr.rf.plot, pr.glm.plot, ncol = 3)
+
+grid.arrange(clientdist.gbm.plot, clientdist.rf.plot, clientdist.glm.plot, ncol = 3)
+
+```
+
+
+##### ¿Cómo es la probabilidad según el CNAE? 
+
+```{r probByCnae}
+# por cnae
+df.cnae <- results.all
+df.cnae$cnae <- as.factor(as.character(df.all$cod_cno))
+
+df.cnae <- subset(df.cnae, cnae %in% head(data.table(df.cnae)[,list(n=.N), by=c("cnae")][order(-n)], 100)$cnae)
+
+# por grupo de cnae
+df.cnae.g <- results.all
+df.cnae.g$cod_cnae_1 <- df.all$cod_cnae_1
+
+
+# GBM
+median <- data.table(df.cnae)[,list(median = median(GBM)), by=c("cnae")][order(-median)]
+
+df.cnae$cnae <- factor(df.cnae$cnae, levels=median$cnae)
+
+
+```
+
+
+
+```{r Probabilidad by CNAE plot for GBM , fig.width=6, fig.height=6 }
+
+ggplot(df.cnae, aes(x=reorder(cnae, GBM, FUN=mean) , y=GBM)) + geom_boxplot() + theme(axis.text.x  = element_text(angle=90)) + ggtitle("GBM") + coord_flip() 
+ggplot(df.cnae, aes(x=cnae, fill=Class)) + geom_bar(position="fill") + coord_flip() + ggtitle("GBM")
+ggplot(df.cnae, aes(x=cnae, y=GBM)) + geom_boxplot() + facet_wrap(~Class, nrow=2) + theme(axis.text.x  = element_text(angle=90)) + ggtitle("GBM")
+
+ggplot(df.cnae.g, aes(x=reorder(cod_cnae_1, -GBM, FUN=mean), y=GBM)) + geom_boxplot() + ggtitle("GBM") + xlab("CNAE primer nivel")
+ggplot(df.cnae.g, aes(x=reorder(cod_cnae_1, -GBM, FUN=mean), y=GBM)) + geom_boxplot() + facet_wrap(~Class, nrow=2) + ggtitle("GBM")
+ggplot(df.cnae.g, aes(x=cod_cnae_1, fill=Class)) + geom_bar(position="fill") + coord_flip() + ggtitle("GBM")
+
+```
+
+Los sectores con mayor probabilidad media son:  
+
+ - 4941 Transporte de mercancías por carretera
+ - 3519 Producción de energía eléctrica de otros tipos 
+ - 4674 Comercio al por mayor de ferretería, fontanería y calefacción
+ - 2599 Fabricación de otros productos metálicos n.c.o.p.
+  
+Agregando a primer nivel de CNAE tenemos:    
+  
+ - H Transporte y almacenamiento
+ - T Actividades de los hogares como empleadores de personal doméstico; actividades de los hogares como productores de bienes y servicios para uso propio
+ - C Industria manufacturera
+ - E Suministro de agua, actividades de saneamiento, gestión de residuos y descontaminación
+ - D Suministro de energía eléctrica, gas, vapor y aire acondicionado
+ - Q Actividades sanitarias y de servicios sociales
+
+En general se trata de actividades que parecen tener sentido con el conocimiento de dominio. 
+   
+
+```{r Probabilidad by CNAE plot for RF,  fig.width=6, fig.height=6 }
+
+# RF
+median <- data.table(df.cnae)[,list(median = median(RF)), by=c("cnae")][order(-median)]
+
+df.cnae$cnae <- factor(df.cnae$cnae, levels=median$cnae)
+
+ggplot(df.cnae, aes(x=reorder(cnae, RF, FUN=mean), y=RF)) + geom_boxplot() + theme(axis.text.x  = element_text(angle=90)) + ggtitle("RF") + coord_flip()
+ggplot(df.cnae, aes(x=cnae, fill=Class)) + geom_bar(position="fill") + coord_flip() + ggtitle("RF")
+ggplot(df.cnae, aes(x=cnae, y=RF)) + geom_boxplot() + facet_wrap(~Class, nrow=2) + theme(axis.text.x  = element_text(angle=90)) + ggtitle("RF")
+
+ggplot(df.cnae.g, aes(x=reorder(cod_cnae_1, -RF, FUN=mean), y=RF)) + geom_boxplot() + ggtitle("RF") + xlab("CNAE primer nivel")
+ggplot(df.cnae.g, aes(x=reorder(cod_cnae_1, -RF, FUN=mean), y=RF)) + geom_boxplot() + facet_wrap(~Class, nrow=2) + ggtitle("RF")
+ggplot(df.cnae.g, aes(x=cod_cnae_1, fill=Class)) + geom_bar(position="fill") + coord_flip() + ggtitle("RF")
+
+```
+
+ - Obtenemos resultados muy similares a los de GBM 
+
+
+```{r}
+# GLM
+median <- data.table(df.cnae)[,list(median = median(GLM)), by=c("cnae")][order(-median)]
+
+df.cnae$cnae <- factor(df.cnae$cnae, levels=median$cnae)
+
+ggplot(df.cnae, aes(x=reorder(cnae, GLM, FUN=mean), y=GLM)) + geom_boxplot() + theme(axis.text.x  = element_text(angle=90)) + ggtitle("GLM") + coord_flip()
+ggplot(df.cnae, aes(x=cnae, fill=Class)) + geom_bar(position="fill") + coord_flip() + ggtitle("GLM")
+ggplot(df.cnae, aes(x=cnae, y=GLM)) + geom_boxplot() + facet_wrap(~Class, nrow=2) + theme(axis.text.x  = element_text(angle=90)) + ggtitle("GLM")
+
+ggplot(df.cnae.g, aes(x=reorder(cod_cnae_1, -GLM, FUN=mean), y=GLM)) + geom_boxplot() + ggtitle("GLM") + xlab("CNAE primer nivel")
+ggplot(df.cnae.g, aes(x=reorder(cod_cnae_1, -GLM, FUN=mean), y=GLM)) + geom_boxplot() + facet_wrap(~Class, nrow=2) + ggtitle("GLM")
+ggplot(df.cnae.g, aes(x=cod_cnae_1, fill=Class)) + geom_bar(position="fill") + coord_flip() + ggtitle("GLM")
+```
+
+### 5. Conclusiones
+
+ - Se ha construido un modelo de propension a tenencia de **leasing** para clientes. El modelo es complementario a la información interna del banco y por tanto serviría para caracterizar a los clientes de los que no vemos tenencia de leasing (banco, CIRBE o balances) pero que cumple características similares a las de otros clientes en los que si lo detectamos. 
+ 
+ - Entre los modelos elegidos seleccionamos los construidos con Gradient Boosted Machines (GBM) ya que proporcionan el AUC mayor. 
+ - Los resultados del resto de modelos son comparables.
+ - Entre las variables más significativas tenemos el importe activo, facturacion, CNAE, dispuesto en sistema, empleados etc. 
+      
+ - Por último, el estudio de la propension en función de CNAE (sector de actividad) parece tener sentido, sacando en primer lugar sectores donde el producto tiene sentido
+    - H Transporte y almacenamiento (leasing autos)
+    - C Industria manufacturera  (Agroleasing)
+    
+ 
+Por último, almacenamos el modelo seleccionado. 
+
+```{r save Models, eval=FALSE}
+
+saveModel(model.gbm, "customers.leasing.gbm") # model_dirpath = model_dirpath si queremos cambiar el directorio de guardado del modelo
+
+#saveModel(model.rf, "customers.leasing.rf")
+
+#saveModel(model.glm, "customers.leasing.glm")
+
+```
+    
+ 

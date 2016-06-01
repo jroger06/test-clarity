@@ -1,0 +1,132 @@
+---
+title: "Hipotecas"
+output: html_document
+author: "Susana M."
+date: 19/01/2016
+---
+```{r titlekeys, echo=FALSE}
+# This is the first mandatory section.
+
+title <- "[Advisory and Predictive Models]: Hipotecas desde rms"
+
+# Keywords. Text separated by commas. E.g. keywords <- 'customer health, recibos' 
+# Keywords can classify the attribute in categories such as 'valor, vinculación, digitalidad', describe used tables such as 'recibos, 
+# transacciones tarjetas, segmento plan uno' or include other relevant info. Search keywords in the portal to find commonly used terms
+# and create new keywords only if justified.
+
+keywords  <- 'rms, hipotecas,categorizador'  
+```
+
+``` {r init, echo=FALSE,eval=TRUE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))  	# This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(grid))
+suppressMessages(library(hexbin))
+suppressMessages(library(lattice))
+`%ni%` <- Negate(`%in%`)
+options(warn=-1, scipen=3, width=450)
+source('~/bda_clarity/tools/warehouse_basics.R')
+source('~/bda_clarity/tools/methods_connect.R')
+```
+
+```{r dependencies, cache=TRUE, echo=FALSE}
+
+mc <- clarity.use_table(DEPENDENCY_OTHER_TABLES,
+                                'rms_master.movimientos_cuentas',
+                                select = '*',
+                                sqname = 'mc')
+
+mk <- clarity.use_table(DEPENDENCY_OTHER_TABLES,
+                                'pi_master.pi_vkidsczy',
+                                select = '*',
+                                sqname = 'mk')
+pro <- clarity.use_table(DEPENDENCY_OTHER_TABLES,
+                                'pi_master.pi_vkidshiu',
+                                select = '*',
+                                sqname = 'pro')
+
+hipo <- clarity.use_table(DEPENDENCY_OTHER_TABLES,
+                                'pi_master.pi_vkidseme',
+                                select = '*',
+                                sqname = 'hipo')
+cat <- clarity.use_table(DEPENDENCY_OTHER_TABLES,
+                                'da_categorizacion.categorizados_rms_historico',
+                                select = '*',
+                                sqname = 'cat')
+
+
+q<-"select count(*) from rms_master.movimientos_cuentas where raw_timestamp>'2015' and cast(qnu_conmovto as int)=379"
+creditos_total<-qhive(q)
+
+q<-"select count(*) from rms_master.movimientos_cuentas where raw_timestamp>'2015' "
+total_rms<-qhive(q)
+p_creditos_total<-round((as.integer(creditos_total )*100/total_rms),digits=2)
+
+```
+## Contexto
+
+El *cod_talon* 379 indica un movimiento por CARGO POR AMORTIZACION DE PRESTAMO/CREDITO, actualmente categorizado como **Banco y servicios financieros,  Amortización préstamo o crédito**. El objetivo, es averiguar si ese movimiento está relacionado con una hipoteca, para que se recategorice como gasto de Hogar y posiblemente crear una nueva subcategoría.
+
+Este tipo de movimientos supone un `r p_creditos_total`% del total de movimientos de cuentas del 2015.
+
+
+En la descripción de los movimientos de este tipo suele venir información relacionada con la máscara del producto que permitiría enlazar el movimiento de cuentas con el producto contratado y averiguar si es de tipo hipoteca.
+
+ 
+## ¿Es una hipoteca?
+La información sobre productos de gestión se encuentan en PI. Para poder saber si detrás de un movimiento de tipo 379 hay una hipoteca y no un crédito es necesario realizar los siguientes pasos:
+
+1. Cruzar la máscara que aparece en la descripción del movimiento de cuentas, con la tabla *pi_master.pi_vkidsczy* para conseguir el **cod_idcontra** del producto asociado.
+
+2. Cruzar el **cod_idcontra** con la tabla *pi_master.pi_vkidshiu* para conseguir el **cod_prodgest** (código del producto)
+
+3. Cruzar el **cod_prodgest** con la tabla *pi_master.pi_vkidseme* para saber si ese producto se encuentra dentro del epígrafe *120, Préstamos Hipotecarios*. 
+
+
+Ejemplo de query:
+```
+select distinct mas.cod_idcontra,pro.cod_prodgest from pi_master.pi_vkidsczy mas
+join pi_master.pi_vkidshiu pro on mas.cod_idcontra=pro.cod_idcontra
+join pi_master.pi_vkidseme hipo on hipo.cod_prodct=pro.cod_prodgest   
+where mas.cod_masccntr like '%089500000011475931' and cast(mas.cod_dependac as int)=cast('0' as int) and cast(hipo.cod_prtda as int)=120
+```
+
+## Tipos de máscara
+
+Explorando los movimientos de este tipo, se ha visto que en la descripción no siempre aparece la máscara del producto de manera correcta y es necesario transformarla antes de intentar cruzar con la tabla *pi_master.pi_vkidsczy*.
+
+La máscara tiene que tener 26 digitos formado por la siguiente información:
+
+* BBBB - Banco (0182) (4 digitos)
+* OOOO - Oficina (4 digitos)
+* CCCC - Contrapartida (4 digitos)
+* FFFFFFFFFFFFFF - Folio (14 digitos)
+
+A continuación se muestra un ejemplo de cada caso ( máscara en cuentas vs máscara en productos): 
+
+* Patrón 1: contiene directamente 26 digitos correspondientes con la máscara: '01827518008300000000002371'.
+* Patrón 2: se corresponden a los préstamos de contrapartida 895, y contiene solo 11 digitos del campo folio: '00018197416'. Es necesario añadirle la contrapartida '0895' y '000'al campo folio. La oficina de la cuenta no tiene porque ser la misma donde se hizo la hipoteca. Con ello obtenemos una máscara que tiene que terminar en '089500000018197416'.
+* Patrón 3: contiene 20 digitos: '01826167930830009600'. Banco + Oficina (8 digitos) están correctos. En la contrapartida hay que cambiar el primer digito por un '0'. Al folio le faltan 9 digitos '0'
+* Patrón 4: contiene 23 digitos: '07601095670002334002334' y se corresponde con los préstamos que están gestionados con la contarpartida 974 y suelen tener asociados varios productos. En este caso faltan los digitos del Banco (0182), entre el digito 5:9 está la oficina, después hay que concatenar la contrapartida '0974' y entre las posiciones 9:17 se encuentra el folio que necesita un relleno de '000000'. Las últimas 6 posiciones se encuentra el dependiente, necesario para seleccionar el producto correcto. En el resto de casos es '0'.
+
+Debido a esta casuística, es necesario crear una UDF para hacer la transformación de cuentas a mascara de producto.
+
+[UDF mascara](http://lcm-repositorio-fuentes.igrupobbva/projects/KVBD/repos/da_categorizacion_udfs/browse)
+
+## Comprobaciones
+```{r  cache=TRUE, echo=FALSE}
+q <-'select count(*) from (
+select cod_idcontra  from rms_master.movimientos_cuentas_categorizador rms
+where cast(qnu_conmovto as int)=379 group by cod_idcontra) r'
+num_cuentas_creditos<-qhive(q)
+
+```
+¿Cuántas cuentas tienen un recibo 379?: `r num_cuentas_creditos`
+
+
+Podemos saber cuantos clientes tienen una hipoteca??
+
+

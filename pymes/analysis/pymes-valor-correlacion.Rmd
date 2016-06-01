@@ -1,0 +1,724 @@
+---
+title: "[Pymes] Modelo de valor - Estimacion de modelos lineales"
+author: "IC & BBVA D&A: Begoña Martín, César de Pablo, María Hernández"
+date: "19/11/2015"
+output: html_document
+---========================================================
+
+
+```{r, echo=FALSE}
+# This is the first mandatory section.
+
+title     <- '[Pymes] Modelo de valor - Estimacion de modelos lineales'
+keywords  <- 'pymes, sme, value, valor, no clientes, non clients'
+```
+
+
+```{r, echo=FALSE, message=FALSE}
+# This is the second mandatory section.
+library(DBI)  	# This avoids loading messages and warnings showing up
+library(rJava)
+
+options(warn=-1)
+
+source('~/bda_clarity/tools/warehouse_basics.R')
+source('~/bda_clarity/tools/write.hive.R')
+
+library(ggplot2)
+library(stringr)
+library(reshape2)
+library(caret)
+library(dplyr)
+
+```
+
+## Objetivo
+
+El objetivo de este análisis es determinar si hay una correlación entre los gastos financieros, los gastos de divisa y la facturación de una PYME con el margen que deja en el banco. 
+
+Como siguiente paso se desea encontrar los coeficientes que caracterizen esa correlación para definir un modelo lineal sencillo que permita calcular el valor de los no clientes para el banco y priorizar su gestión y futuras acciones comerciales.  
+
+
+### 1. Pregunta: ¿Hay una correlacion entre el margen y los gastos ginancieros?
+
+Para determinar la correlación que hay entre el margen y el resto de variables se usan los clientes del banco más vinculados ( *cuota CIRBE* > 90% ) para que la relacion sea lo más exacta. Se entiende que para estos clientes somos su banco principal, y casi único, y por lo tanto sus gastos financieros son casi exclusivamente con nosotros. 
+
+#### Calculo del margen a partir de las tablas de rentabilidad
+
+La definicion de margen seleccionada es y se toma de la ficha de rentabilidad de PYMES: 
+
+$margen = margen_{activo} + margen_{servicios}$
+ 
+  - $margen_{activo}$ : Suma del total de activo de productos financieros 
+  - $margen_{servicios}$ : Suma del total del margen de servicios contratados. Se considera que algunos servicios no deberían contabilizarse pero para simplificar su cálculo se eligió simplificar y despreciar su efecto. 
+  
+Se disponen de los balances a fecha de fin de 2014 (gastos financieros, divisas y facturación) y por lo tanto se decidió calcular el margen usando datos de rentabilidad a la misma fecha. Para aquellos de los que no tenemos datos disponibles a fecha de 2014 se usa el balance del año anterior. 
+
+```{r Cargar datos de CIRBE para pymes}
+
+q.clientes="
+SELECT *
+FROM da_pymes.clientes c LEFT JOIN da_pymes.cirbe s
+ON  c.cod_entalfa = s.cod_entalfa AND c.cod_paisoalf = s.cod_paisoalf AND c.cod_persctpn = s.cod_persctpn
+"
+
+df.clientes <-qhive(q.clientes)
+
+```
+
+
+
+```{r Cargar info de Rentabilidad i }
+q.rentabilidad="
+SELECT s.*
+FROM da_pymes.clientes c INNER JOIN da_pymes.rentabilidad s
+ON c.cod_entalfa = s.cod_entalfa AND c.cod_paisoalf = s.cod_paisoalf AND c.cod_persctpn = s.cod_persctpn
+"
+
+df.rentabilidad <-qhive(q.rentabilidad)
+
+```
+
+
+```{r tablon balance traspuesto, results='hide'}
+
+q.tablon_balance <- "
+SELECT *
+FROM da_pymes.tablon_balances
+"
+
+df.tablon_balance <- qhive(q.tablon_balance)
+dim(df.tablon_balance)
+
+codigo<-df.tablon_balance$codigo[duplicated(df.tablon_balance$codigo)]
+codigo<-unique(codigo)
+
+df.dup_balance<-data.frame(codigo)
+df.tablon_balance <- df.tablon_balance[!(df.tablon_balance$codigo %in% df.dup_balance$codigo),]
+
+
+```
+
+
+```{r Carga de cabeceras, results='hide'}
+
+q.cabeceras <- "
+SELECT * FROM
+(
+SELECT *, row_number() over (partition by codigo, strright(trim(nif),8) ORDER BY fecha_incoporacionbbdd DESC ) rango
+FROM da_pymes.cabeceras
+) c
+WHERE rango = 1
+"
+
+df.cabeceras <- qimpala(q.cabeceras)
+names(df.cabeceras) <- sub("^c\\.", "", names(df.cabeceras))
+
+
+dim(df.cabeceras)
+anyDuplicated(df.cabeceras$codigo)
+head(df.cabeceras)
+
+df.dup_cabeceras <- df.cabeceras %>% group_by(codigo) %>% count(codigo) %>% filter(n > 1) %>% inner_join(df.cabeceras)
+df.cabeceras <- df.cabeceras[!(df.cabeceras$codigo %in% df.dup_cabeceras$codigo),]
+
+```
+
+
+```{r Cruce de balance con cabeceras a traves de la variable codigo, message=FALSE}
+df.balances_codigo <- merge(df.tablon_balance, df.cabeceras, by="codigo", all.x=TRUE)
+```
+
+
+#### Calculo de la cuota CIRBE 
+
+Los clientes para el análisis se calculan mediante su cuota CIRBE. Para aquellos clientes que tienen más de 6.000 euros de deuda disponemos información de la deuda: 
+
+   - que tienen en el banco ( *imp_dridban* )
+   - que tienen en el sistema bancario ( *imp_dridsba* )
+   - que tienen en el grupo ( *imp_dridreg* )
+   
+La deuda en el sistema es el máximo de las tres y la cuora CIRBE la defininos como el ratio entre la deuda en el banco y la deuda total en el sistema. 
+
+```{r Calculo de la cuota CIRBE}
+q.clientes="
+SELECT c.*,s.imp_dridban,s.imp_dridsba,s.imp_dridreg
+FROM da_pymes.clientes c LEFT JOIN da_pymes.cirbe s
+ON  c.cod_entalfa = s.cod_entalfa AND c.cod_paisoalf = s.cod_paisoalf AND c.cod_persctpn = s.cod_persctpn
+"
+
+df.clientes <-qhive(q.clientes)
+
+
+df.clientes$cirbe_banco<-df.clientes$imp_dridban
+df.clientes$cirbe_sistema<-pmax(df.clientes$imp_dridban,
+                                df.clientes$imp_dridsba,
+                                df.clientes$imp_dridreg)
+
+df.clientes[is.na(df.clientes$cirbe_sistema),]$cirbe_sistema<-0
+
+df.clientes$cuota_cirbe<-ifelse(df.clientes$cirbe_sistema>0, 
+                                df.clientes$cirbe_banco/df.clientes$cirbe_sistema, 0 ) 
+
+
+
+
+
+```
+
+Comprobamos el cálculo y la distribución de la cuota CIRBE 
+
+```{r Detalle de la cuota CIRBE}
+
+# df.clientes$cuota_cirbe
+summary(df.clientes$cuota_cirbe)
+
+# a<-sample(df.clientes,100)
+# 
+# View(a[,c('cirbe_sistema','cirbe_banco','cuota_cirbe')])
+# ?sample
+
+```
+
+
+```{r Cargar info de Rentabilidad}
+
+q.rentabilidad="
+SELECT *
+FROM da_pymes.rentabilidad 
+"
+
+df.rentabilidad <-qhive(q.rentabilidad)
+
+#df.rentabilidad$cod_persona<-as.numeric(df.rentabilidad$cod_persctpn)
+
+
+```
+
+```{r Cruce de balance con clientes a traves de nif y cruce de rentabilidad con clientes balance a traves de cod_persona}
+
+df.clientes_balance <- merge(df.clientes, df.balances_codigo, by.x = "cod_documps1", by.y = "nif",all.x=TRUE)
+df.clientes_all <- merge(df.clientes_balance, df.rentabilidad,  "cod_persctpn", all.x=TRUE)
+
+rm(df.clientes_balance)
+rm(df.clientes)
+
+```
+
+
+### 2. Correlación entre margen y gastos financieros
+
+Se cambia de signo a los gastos financieros y divisa para que tengan el mismo sentido que la variable de margen (para que tengan el punto de vista del banco)
+
+```{r Variables predictoras correlacion}
+df.clientes_all$gastos_financieros<-df.clientes_all$cuenta_41500*-1
+df.clientes_all$balance_divisa<-df.clientes_all$cuenta_41700*-1
+df.clientes_all$balance_facturacion<-df.clientes_all$cuenta_40100
+df.clientes_all$ind_gastosfinancieros<-ifelse(df.clientes_all$gastos_financieros==0,0,1)
+```
+
+
+Se seleccionan los siguientes clientes: 
+  - **CIRBE alta** Cuota CIRBE > 90% 
+  - Con datos de CIRBE en el banco
+  - Elimininamos los clientes con un margen muy bajo. 
+
+```{r Seleccion de clientes con CIRBE alta}
+
+df.cirberalta<-subset(df.clientes_all,ind_gastosfinancieros==1  & 
+                                      margen_a>100 &                                        
+                                      cirbe_banco>6000 &
+                                      cuota_cirbe>0.9  )
+dim(df.cirberalta)
+
+```
+
+
+La muestra de clientes de trabajo tiene `r nrow(df.cirberalta)` pymes. Exploramos además su distribución entre los dos segmentos que nos ocupan (35 y 36). 
+
+```{r Clientes por segmento para CIRBE alta}
+
+df.cirberalta[is.na(df.cirberalta)]<-0
+
+
+freqsegmento<- prop.table(table(df.cirberalta$cod_segmsubo))
+freqsegmento
+
+freqsegmento<- prop.table(table(df.clientes_all$cod_segmsubo))
+freqsegmento
+
+```
+
+Vamos a ver cual es la correlación para los clientes más vinculados:  
+
+```{r Correlacion para CIRBE alta}
+
+#calculamos correlación entre las variables. Method= pearson, spearman or kendall.
+vbles<-c('margen_a','gastos_financieros', 'balance_divisa', 'balance_facturacion','var_40100')
+
+m.corr<-df.cirberalta[,vbles]
+cor(m.corr, use="complete.obs",method="pearson")
+
+```
+
+
+Inicialmente al hacer la correlacion entre margen y gastos financieros se observaba una correlacion de 0.4 que se consideró demasiado baja. Si se analizaban los datos por separado entre aquellos clientes que aumentan facturacion entre 2013 y 2014 y los que disminuyen, se ha encontrado una correlacion más alta. 
+
+Los datos que podían estar distorsionando la correlacion son: 
+
+  - no informan facturacion 
+  - no se puede calcular la variación en la facturacion
+
+
+Exploramos cuál es la correlación para los diferentes tipos de clientes en funcion de si:
+
+  - Aumenta su facturación: 
+
+```{r Correlacion para los que aumentan facturacion}
+
+#separamos y hacemos dos tablones: uno para los que aumentan facturación y otro para los 
+#que disminuyen facturación
+df.cirberalta_aumfact<-df.cirberalta[df.cirberalta$var_40100>0,]  
+df.cirberalta_aumfact[is.na(df.cirberalta_aumfact)]<-0
+
+m.corr.aum<-df.cirberalta[df.cirberalta$var_40100>0,vbles]
+cor(m.corr.aum, use="complete.obs",method="pearson")
+
+
+```
+
+  - Disminuye su facturación: 
+
+```{r Correlacion para los que disminuyen facturacion}
+
+df.cirberalta_dismfact<-df.cirberalta[df.cirberalta$var_40100<0, ]
+df.cirberalta_dismfact[is.na(df.cirberalta_dismfact)]<-0
+
+m.corr.dism<-df.cirberalta[df.cirberalta$var_40100<0,vbles]
+cor(m.corr.dism, use="complete.obs",method="pearson")
+
+```
+
+  - O su facturación no varía. 
+
+```{r Correlacion para los que no varía su facturacion}
+
+m.corr.igual<-df.cirberalta[df.cirberalta$var_40100==0,vbles]
+cor(m.corr.igual, use="complete.obs",method="pearson")
+
+```
+
+La correlación para los que aumentan y disminuyen la facturacion es en estos casos más alta, en particular para los gastos financieros, en torno al 0.6.
+
+Vemos en las diferentes matrices que los clientes sin facturación hacen disminuir mucho la correlación entre margen y gastos financieros, esto se puede deber a que los clientes sin facturación no tengan bien informada la variable de gastos financieros.
+
+Calculamos las matrices de correlación para clientes que tengan gastos financieros y balances asi podemos asegurar mejor la correlación entre las diferentes variables. 
+
+
+```{r Filtro adicional, facturacion informada}
+
+m.corr<-df.cirberalta[df.cirberalta$balance_facturacion !=0,vbles]
+cor(m.corr, use="complete.obs",method="pearson")
+
+m.corr.aum<-df.cirberalta[df.cirberalta$var_40100>0 &  
+                          df.cirberalta$balance_facturacion !=0,vbles]
+cor(m.corr.aum, use="complete.obs",method="pearson")
+
+
+m.corr.dism<-df.cirberalta[df.cirberalta$var_40100<0 &  
+                          df.cirberalta$balance_facturacion !=0,vbles]
+cor(m.corr.dism, use="complete.obs",method="pearson")
+
+m.corr.igual<-df.cirberalta[df.cirberalta$var_40100==0 &  
+                          df.cirberalta$balance_facturacion !=0,vbles]
+cor(m.corr.igual, use="complete.obs",method="pearson")
+
+```
+
+#### Conclusion: 
+
+Como conclusión vamos a analizar unicamente a los clientes que les varie la facturación asi aseguramos que los datos sean fiables.
+
+```{r}
+m.corr<-df.cirberalta[df.cirberalta$var_40100 !=0 & 
+                        df.cirberalta$balance_facturacion !=0,vbles]
+cor(m.corr, use="complete.obs",method="pearson")
+
+```
+
+### 3. Pregunta: ¿Cuál es la relacion del margen con las otras dos variables: gastos en divisa y facturacion?
+
+Analizamos de manera independiente la correlación de margen con divisa
+
+```{r Correlacion margen con gastos en divisa}
+
+
+
+m.corr<-df.cirberalta[df.cirberalta$balance_divisa !=0 &
+                        df.cirberalta$var_40100 != 0 &  
+                          df.cirberalta$balance_facturacion !=0,vbles]
+cor(m.corr, use="complete.obs",method="pearson")
+
+```
+
+
+Analizamos de manera independiente la correlación de facturación
+
+```{r Correlacion margen con facturacion}
+
+m.corr<-df.cirberalta[df.cirberalta$var_40100 != 0 &  
+                          df.cirberalta$balance_facturacion !=0,vbles]
+cor(m.corr, use="complete.obs",method="pearson")
+
+
+```
+
+
+#### Graficos de dispersión
+
+```{r Dispersion - margen vs gastos financieros }
+
+a<-df.cirberalta[ df.cirberalta$gastos_financieros<100000 &
+                   df.cirberalta$margen_a<100000 & 
+                      df.cirberalta$var_40100 !=0 & 
+                        df.cirberalta$balance_facturacion !=0,
+                    c('margen_a' ,'gastos_financieros')]
+
+a$margen_log<-log10(a$margen_a)
+a$gastos_log<-log10(a$gastos_financieros)
+
+#plot(a$margen_a,a$gastos_financieros)
+plot(a$margen_log,a$gastos_log)
+
+
+```
+
+
+```{r Dispersion - margen vs facturacion}
+
+a<-df.cirberalta[df.cirberalta$margen_a<100000 & 
+                   df.cirberalta$balance_facturacion<20000000 &
+                    df.cirberalta$balance_facturacion>1000 ,
+                    c('margen_a' ,'balance_facturacion')]
+
+a$margen_log<-log10(a$margen_a)
+a$facturacion_log<-log10(a$balance_facturacion)
+
+#plot(a$margen_a,a$balance_facturacion)
+plot(a$margen_log,a$facturacion_log)
+
+
+
+```
+
+### 4. Cálculo del Modelo lineal del margen en función de las variables de balance: gastos financieros, gastos divisa y facturacion. 
+
+Tras el análisis anterior se decide usar dos modelos, uno para los que aumentan facturacion y otro para los que disminuyen. 
+
+```{r Forma 1: para categorizar la variable}
+
+
+df.cirberalta$ind_var_40100 <- vector(length=length(df.cirberalta$var_40100))
+ for (i in 1:length(df.cirberalta$var_40100)) {
+   df.cirberalta$ind_var_40100[i] <- if (df.cirberalta$var_40100[i] > 0) 'SI'
+                                     else if (df.cirberalta$var_40100[i] < 0) 'NO' 
+                                     else '1'
+ }
+
+
+
+
+
+```
+
+Gneramos una nueva variable que permita seleccionar los que aumentan/disminuyen facturacion
+
+```{r Forma 2: para categorizar la variable}
+
+category <- function(x) if(x > 0) 'SI' else if (x < 0) 'NO' else '1'
+df.cirberalta$ind_var_40100 <- sapply(df.cirberalta$var_40100,category)
+
+freqsegmento<- prop.table(table(df.cirberalta$ind_var_40100))
+freqsegmento
+
+```
+
+
+Generar el corrector: uno para los que aumentan y otro para los que disminuyen la facturación hacemos dos ajustes uno muy simple solo con margen vs facturación para ver la relación de esta variable y un segundo añadiendo gastos y divisa.
+
+```{r Corrector para los que aumentan facturacion}
+
+fit.aumfact1 <- lm(margen_a ~ balance_facturacion, 
+                  data=df.cirberalta_aumfact)
+
+fit.aumfact2 <- lm(margen_a ~ gastos_financieros + balance_divisa + balance_facturacion, 
+                  data=df.cirberalta_aumfact)
+
+summary(fit.aumfact1)
+summary(fit.aumfact2)
+coefficients(fit.aumfact1)
+coefficients(fit.aumfact2)
+AIC(fit.aumfact1)
+AIC(fit.aumfact2)
+anova(fit.aumfact1, fit.aumfact2)
+
+```
+
+
+```{r Corrector para los que disminuyen facturacion}
+
+fit.dismfact1 <- lm(margen_a ~ balance_facturacion, 
+                  data=df.cirberalta_dismfact)
+fit.dismfact2 <- lm(margen_a ~ gastos_financieros + balance_divisa + balance_facturacion, 
+                  data=df.cirberalta_dismfact)
+
+summary(fit.dismfact1)
+summary(fit.dismfact2)
+coefficients(fit.dismfact1)
+coefficients(fit.dismfact2)
+anova(fit.dismfact1, fit.dismfact2)
+AIC(fit.dismfact1)
+AIC(fit.dismfact2)
+
+```
+
+
+```{r Plot de los resultados del modelo}
+
+df<-data.frame(x=1:nobs(fit.aumfact2),res=residuals(fit.aumfact2))
+ggplot(df, aes(x,res))+geom_line()
+
+df<-data.frame(x=1:nobs(fit.dismfact2),res=residuals(fit.dismfact2))
+ggplot(df, aes(x,res))+geom_line()
+
+plot(fitted(fit.aumfact2), resid(fit.aumfact2))
+
+```
+
+
+
+```{r Guarda los modelos para su uso en predicción, eval=FALSE}
+
+modelo_valor_path = "/DYA/xe48636/PymesAnalytics/models/valor/"
+modelo_valor_incfact = "valor.lm.incfact.Rda"
+modelo_valor_decfact = "valor.lm.decfact.Rda"
+
+saveRDS(fit.aumfact2, file = paste0(modelo_valor_path, modelo_valor_incfact))
+saveRDS(fit.dismfact2, file = paste0(modelo_valor_path, modelo_valor_decfact))
+
+```
+
+
+### 5. Pregunta: ¿Mejora la predicción con un modelo único si introducimos la evolución de la facturación como variable predictiva?
+
+  - Se introduce la variacion en la facturación (var_40100) como variable predictiva 
+  - Se normalizan las variables
+
+```{r Save the data temporally, eval=FALSE, echo=FALSE}
+
+
+getwd()
+setwd("/us/u516371")
+
+write.table(df.cirberalta,file="prueba.csv",sep=";",row.names=FALSE)
+
+```
+
+
+```{r}
+
+#la primera tabla que utilicé para haer los modelos
+df.prueba<-df.cirberalta[df.cirberalta$ind_var_40100 == 'SI'|
+                        df.cirberalta$ind_var_40100 == 'NO' ,
+                        c("gastos_financieros","balance_divisa",
+                            "balance_facturacion","margen_a","var_40100","ind_var_40100")]
+
+
+df.prueba$log_margen_a<-log(df.prueba$margen_a +1)
+df.prueba$log_gastos_financieros<-log(df.prueba$gastos_financieros+1)
+df.prueba$log_balance_divisa<-log(df.prueba$balance_divisa+1)
+df.prueba$log_balance_facturacion<-log(df.prueba$balance_facturacion+1)
+
+#generamos la sigiente tabla con las transformaciones de las variables.
+df.prueba_ini<-df.cirberalta[,c("gastos_financieros","balance_divisa",
+                            "balance_facturacion","margen_a","var_40100") ]
+
+prueba_norm<- preProcess(df.prueba_ini, method=c("center", "scale"))
+df.prueba_predict<-predict(prueba_norm,df.prueba_ini)
+
+ind_var_40100<-df.cirberalta[,"ind_var_40100" ]
+df.prueba_resto<-as.data.frame(ind_var_40100)
+df.prueba_final<-cbind(df.prueba_predict,df.prueba_resto)
+
+df.prueba_final<-df.prueba_final[df.prueba_final$ind_var_40100 == 'SI'|
+                        df.prueba_final$ind_var_40100 == 'NO' ,
+                        ]
+
+
+df.prueba_final$log_margen_a<-log(df.prueba_final$margen_a +1)
+df.prueba_final$log_gastos_financieros<-log(df.prueba_final$gastos_financieros+1)
+df.prueba_final$log_balance_divisa<-log(df.prueba_final$balance_divisa+1)
+df.prueba_final$log_balance_facturacion<-log(df.prueba_final$balance_facturacion+1)
+
+
+
+fit.fact.ind1 <- lm(margen_a ~ var_40100, 
+                  data=df.prueba)
+fit.fact.ind1 <- lm(margen_a ~ ind_var_40100, 
+                  data=df.prueba)
+fit.fact.ind1 <- lm(margen_a ~ var_40100, 
+                  data=df.prueba_final)
+fit.fact.ind1 <- lm(margen_a ~ ind_var_40100, 
+                  data=df.prueba_final)
+
+fit.fact.ind2 <- lm(margen_a ~ gastos_financieros + balance_divisa + balance_facturacion+ind_var_40100,           data=df.prueba)
+
+fit.fact.ind3 <- lm(log_margen_a ~ log_gastos_financieros + balance_divisa + log_balance_facturacion+ind_var_40100,           data=df.prueba)
+
+fit.fact.ind4 <- lm(margen_a ~ gastos_financieros + balance_divisa + balance_facturacion+ind_var_40100,           data=df.prueba_final)
+
+fit.fact.ind5 <- lm(margen_a ~ log_gastos_financieros + balance_divisa + log_balance_facturacion+ind_var_40100,           data=df.prueba_final)
+
+fit.fact.ind6 <- lm(margen_a ~ log_gastos_financieros +  log_balance_facturacion+ind_var_40100,           data=df.prueba_final)
+
+
+
+
+
+summary(fit.fact.ind1)
+summary(fit.fact.ind2)
+summary(fit.fact.ind3)
+summary(fit.fact.ind4)
+summary(fit.fact.ind5)
+summary(fit.fact.ind6)
+coefficients(fit.fact.ind1)
+coefficients(fit.fact.ind2)
+AIC(fit.fact.ind1)
+AIC(fit.fact.ind2)
+anova(fit.fact.ind1, fit.fact.ind2)
+
+
+#df<-data.frame(x=1:nobs(fit.fact2),res=residuals(fit.fact2))
+#ggplot(df, aes(x,res))+geom_line()
+
+df<-data.frame(x=1:nobs(fit.fact.ind2),res=residuals(fit.fact.ind2))
+ggplot(df, aes(x,res))+geom_line()
+
+```
+
+#### Conclusión
+
+Esta forma de modelar no parece prometedora porque está saliendo un indice negativo para los que aumentan facturacion
+
+
+```{r}
+
+#Dividimos la muestra en dos partes
+
+df.prueba_final.si<-df.prueba_final[df.prueba_final$ind_var_40100 == 'SI',]
+df.prueba_final.no<-df.prueba_final[df.prueba_final$ind_var_40100 == 'NO',]
+
+fit.fact.ind.si1 <- lm(margen_a ~ gastos_financieros + balance_divisa + balance_facturacion,           data=df.prueba_final.si)
+
+fit.fact.ind.no1 <- lm(margen_a ~ gastos_financieros + balance_divisa + balance_facturacion,         data=df.prueba_final.no)
+
+fit.fact.ind.si2 <- lm(margen_a ~ balance_facturacion,    data=df.prueba_final.si)
+fit.fact.ind.no2 <- lm(margen_a ~balance_facturacion,     data=df.prueba_final.no)
+
+plot(df.prueba_final.si$var_40100, df.prueba_final.si$margen_a)
+abline(fit.fact.ind.si2 )
+
+plot(df.prueba_final.no$var_40100, df.prueba_final.no$margen_a)
+abline(fit.fact.ind.no2 )
+
+summary(fit.fact.ind.si1)
+summary(fit.fact.ind.no1)
+coefficients(fit.fact.ind.si1)
+coefficients(fit.fact.ind.no1)
+AIC(fit.fact.ind.si1)
+AIC(fit.fact.ind.no1)
+anova(fit.fact.ind.si1, fit.fact.ind.si2)
+
+plot(df.prueba_final.si$margen_a,df.prueba_final.si$balance_facturacion)
+
+plot(a$margen_log,a$facturacion_log)
+
+#calculo de variable respuesta
+#df.clientes_all$vble_respuesta<-df.clientes_all$gastos_financieros+df.clientes_all$balance_divisa+df.clientes_all$corrector*df.clientes_all$balance_facturacion
+
+```
+
+
+### 6. Pregunta: ¿Mejora la predicción del valor si usamos varios tramos para la variable de variación de la facturación?
+
+  - Realizamos tres tramos para la evolucion de facturacion 
+    
+     - disminuyen facturacion : var_40100 < 0 
+     - Aumentan facturacion hasta Doblar  :  var_40100 < 1
+     - aumentan mucho su facturacion : 1 < var_40100 < 3
+     - aumentan su facturacion mucho -posiblemente casos particulares: var_40100 > 4
+
+```{r Puntos de Cortes en la evaluacion de facturacion}
+
+df.cirberalta$ind2_var_40100 <- vector(length=length(df.cirberalta$var_40100))
+for (i in 1:length(df.cirberalta$var_40100)) {
+  df.cirberalta$ind2_var_40100[i] <- if (df.cirberalta$var_40100[i] < 0) '1. <0'
+                                    else if (df.cirberalta$var_40100[i] < 1) '2. <1' 
+                                    else if (df.cirberalta$var_40100[i] < 3) '3. <3' 
+                                    else '4. >3'
+}
+
+
+```
+
+
+
+```{r}
+
+df.prueba<-df.cirberalta[df.cirberalta$var_40100 != 0 ,
+                         c("gastos_financieros","balance_divisa",
+                           "balance_facturacion","margen_a","var_40100","ind2_var_40100")]
+
+
+df.prueba$log_margen_a<-log(df.prueba$margen_a +1)
+df.prueba$log_gastos_financieros<-log(df.prueba$gastos_financieros+1)
+df.prueba$log_balance_divisa<-log(df.prueba$balance_divisa+1)
+df.prueba$log_balance_facturacion<-log(df.prueba$balance_facturacion+1)
+
+#generamos la sigiente tabla con las transformaciones de las variables.
+df.prueba_ini<-df.cirberalta[,c("gastos_financieros","balance_divisa",
+                                "balance_facturacion","margen_a","var_40100") ]
+
+prueba_norm<- preProcess(df.prueba_ini, method=c("center", "scale"))
+df.prueba_predict<-predict(prueba_norm,df.prueba_ini)
+
+ind2_var_40100<-df.cirberalta[,"ind2_var_40100" ]
+df.prueba_resto<-as.data.frame(ind2_var_40100)
+df.prueba_final<-cbind(df.prueba_predict,df.prueba_resto)
+
+df.prueba_final<-df.prueba_final[df.cirberalta$var_40100 != 0 ,]
+
+
+df.prueba_final$log_margen_a<-log(df.prueba_final$margen_a +1)
+df.prueba_final$log_gastos_financieros<-log(df.prueba_final$gastos_financieros+1)
+df.prueba_final$log_balance_divisa<-log(df.prueba_final$balance_divisa+1)
+df.prueba_final$log_balance_facturacion<-log(df.prueba_final$balance_facturacion+1)
+
+
+fit.fact.ind1 <- aov(margen_a ~ ind2_var_40100, data=df.prueba_final)
+
+summary(fit.fact.ind1)
+coefficients(fit.fact.ind1)
+
+```
+
+#### Conclusion
+
+[TODO] Creo que este experimento está incompleto
+
+
+### 7. Conclusión 
+
+  - Es necesario considerar la evolución de la facturacion pues parece que influye claramente en la correlación. Solo considerando esta variable se obtienen unos resultados como los que se esperan con los clientes muy vinculados, que sus gastos financieros correlen razonablemente con el margen que obtenemos en el banco. 
+  
+  - Se han realizado diversos experimentos para modelar y ajustar el margen. Se elige la opción de construir dos modelos lineales, para los que aumentan y disminuyen facturacion.

@@ -1,0 +1,179 @@
+Digital clients - How to account for them when estimating potential revenues assigned to physical branches
+========================================================
+
+This is an script that tries to answer the following question: ¿How should we deal with digital clients when accounting for the total potential revenue of a certain branch? 
+
+In a nutshell, it is believed that there is a portion of the business assigned to a certain branch that shouldn´t be taken into account when estimating potential branch revenue. In particular, "digital clients" do most of their business remotely, thus, the location of the branch is irrelevant. The question that arises is: how can we quantify the impact of those remote clients when estimating potential revenue?  
+
+```{r, echo=FALSE}
+
+title     <- '[Human Touchpoints]: How to account for digitality when estimating branch potential revenue'
+keywords  <- 'oficina, digital, remoto, bbvacontigo, human-touchpoints'
+```
+
+```{r, echo=FALSE}
+
+suppressMessages(library(DBI))  	# This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+source('~/bda_clarity/tools/warehouse_basics.R')
+```
+
+¿What´s the branch channel use for those clients that the bank considers as "Digitals"?
+--------------------------------------------------------
+
+We use our internally developed Behavioral Segmentation to answer this question. We do not want Engagement to be an issue so we are going to restrict out analysis to those clients very attached to the bank ("*Vinculados* according to Plan UNO Segmentation")
+
+```{r getClientMetrics, cache = TRUE}
+
+segmento <- clarity.use_table(DEPENDENCY_LASTPART_PRO_TABLE, 
+                              'segmento_plan_uno', 
+                              select = c('cod_persctpn', 'cod_paisoalf', 'cod_entalfa', 'cod_segpref'),
+                              sqname = 'segmento')
+
+segmento0182 <- subq.where ('*', segmento, 'cast(segmento.cod_entalfa as int) = 182 and segmento.cod_segpref <> "NULL"', sqname = 'segmento0182')
+
+segComportamental <- clarity.use_table (DEPENDENCY_OTHER_TABLES,
+                                       'da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20140831', 
+                                        select = c('cod_cliente','pais', 'entidad', 'segmento_comportamental', 
+                                                 'perfil_digital', 'n_op_net_tot','n_op_net_opr','n_op_net_opr_avanz', 
+                                                 'frecuencia', 'mix_actividad', 'n_op_ofi_tot', 'n_op_ofi_tra'), 
+                                        sqname = 'segComportamental')
+
+joinTable <- subq.join ('segComportamental.*, segmento0182.cod_segpref', segComportamental, segmento0182, 'cast(segComportamental.cod_cliente as INT) = cast(segmento0182.cod_persctpn as INT)', 'segmento0182.cod_segpref in ("BP","CP","PP", "NP")', sqname = 'joinTable')
+qq <- paste('select * from', joinTable) 
+d <- qimpala(qq)
+```
+
+We start by comparing two populations: those clients with certain digital activity (at least queries) and the rest (zero digital activity). ¿What is the difference between these two groups in terms of visits to the branch?
+
+```{r, cache = TRUE}
+summary(d[d$mix_actividad=="Other",c("n_op_net_tot", "n_op_ofi_tot")])
+summary(d[d$mix_actividad!="Other",c("n_op_net_tot", "n_op_ofi_tot")])
+
+avg_dig = mean(d[d$mix_actividad!="Other","n_op_ofi_tot"])
+avg_nodig = mean(d[d$mix_actividad=="Other","n_op_ofi_tot"])
+ 
+```
+
+Suprisingly, digital clients go to the branch **more** than non-digital clients, at least in terms of the segments creates using the bank´s Behavioral Analytics criteria. In particular, on average, a digital client has **`r avg_dig-avg_nodig`** more visits per year than a non-digital client
+
+We can also check this boxplotting the Nº visits to the branch for the different segments
+
+```{r, fig.width=9, fig.height=6, cache = TRUE}
+library(ggplot2)
+d$mix_actividad2 = ordered(d$mix_actividad, levels = c("Other", "Consultivo", "Transaccional basico", "Transaccional avanzado", "Compra"))
+
+ggplot(d, aes(x = d$mix_actividad2, y = d$n_op_ofi_tot)) + geom_boxplot() + xlab("") + ylab("Nº Ops Branch") + 
+       coord_cartesian(ylim = c(0, 100)) 
+
+````
+
+In general, we observe that the higher the *digital level*, the higher the Nº visits to the branch. The exception is the *T. Basico* group which does make sense as, by construction, only clients with a low net-to-branch Op ratio belong to this segment. Under this result it is hard to justify the current practice of discounting the impact of digital clients when estimating the potential revenue of a certain area: for now, at least, **digital clients seem to be more prone to go to the branch than non-digital clients**.
+
+Forget Behavioural Segmentation: let´s check the numbers straight
+--------------------------------------------------------
+Until now, we´ve focused on the Behavioral Segmentation groups which may not be the best idea; in some cases the construction of the groups is arbitraty: for example a person that makes one net-transaction per year is "more" digital that those that perform zero operations but 10,000 inquiries. Let´s take a look to the ops values themselves.
+
+```{r, fig.width=7, fig.height=6, cache = TRUE}
+bins <- 10
+cutpoints <- quantile(d$n_op_net_tot,(0:bins)/bins)
+d$n_op_net_tot_quantile = cut(d$n_op_net_tot,cutpoints[4:length(cutpoints)],include.lowest=TRUE)
+# boxplot(d$n_op_ofi_tot~d$n_op_net_tot_quantile, ylim = c(0,200), xlab = "Nº Net Ops", ylab = 'Nº Branch Ops')
+
+ggplot(d, aes(x = d$n_op_net_tot_quantile, y = d$n_op_ofi_tot)) + geom_boxplot() + xlab("Nº Ops Net") + ylab("Nº Ops Branch") + 
+        coord_cartesian(ylim = c(0, 125)) 
+
+```
+
+If we look at the Nº of Ops, the picture doesn´t change much. However, here we are looking to the **Total** Nº of ops, including inquiries (which a type of operation that *works* different in the physical and the digital world: digital clients tend to check the status of their financials way more often than non-digital clients, for obvious reasons). What happens if we only take a look to real Tx (and exclude all inquiries)?
+
+```{r, fig.width=7, fig.height=6, cache = TRUE}
+bins<-10
+d$n_op_net_ops <- d$n_op_net_opr + d$n_op_net_opr_avanz
+cutpoints <- quantile(d$n_op_net_ops,(0:bins)/bins)
+d$n_op_net_ops_quantile = cut(d$n_op_net_ops,cutpoints[7:length(cutpoints)],include.lowest=TRUE)
+# boxplot(d$n_op_ofi_tot~d$n_op_net_ops_quantile, ylim = c(0,100), xlab = "Nº Net Ops (only Tx)", ylab = 'Nº Branch Ops')
+
+ggplot(d, aes(x = d$n_op_net_ops_quantile, y = d$n_op_ofi_tot)) + geom_boxplot() + xlab("Nº Ops Net (only Tx)") + ylab("Nº Ops Branch") + 
+        coord_cartesian(ylim = c(0, 100)) 
+
+```
+
+Again, results do not change much: the higher the number of net-ops the higher the number of branch-ops. The assumption here is two-fold. On one side very digital clients may be (on average) more engaged with the bank than non-digital clients. Although we´ve tried to control for this effect using only *Vinculados* there might be hidden effects that the Plan UNO segmentation is not taking into account. The second assumption is that right now there is no alternative for many operations that can only be executed on the physical branch. In other words, digital clients go to the branch because they have no choice. The distribution of the number of visits to the brach does not change much depending on the digital behaviour:
+
+```{r, fig.width=10, fig.height=6, cache = TRUE}
+d.dig = d[d$mix_actividad!="Other",]
+d.ofi = d[d$mix_actividad=="Other",]  
+d.sdig = d[(d$mix_actividad == "Transaccional avanzado") | (d$mix_actividad == "Compra") ,]
+d.msdig = d[(d$mix_actividad == "Compra") ,]
+
+a1 <- d.ofi$n_op_ofi_tot[d.ofi$n_op_ofi_tot < 200]
+a2 <- d.dig$n_op_ofi_tot[d.dig$n_op_ofi_tot < 200]
+a3 <- d.sdig$n_op_ofi_tot[d.sdig$n_op_ofi_tot < 200]
+a4<-  d.msdig$n_op_ofi_tot[d.msdig$n_op_ofi_tot < 200]
+
+df <- data.frame(No.BranchOps = c( a1, a2, a3, a4), 
+                 lines = c( rep ("Net (All)", length(a1)),
+                            rep ("Branch", length(a2)),
+                            rep ("Net (Adv)", length(a3)),
+                            rep ("Net(Purchase)", length(a4)) 
+                          ))
+                          
+
+ggplot(df, aes(x = No.BranchOps, fill = lines)) + geom_density(alpha = 0.5)
+```
+
+The corresponding scatter plot confirms the suspicion
+
+```{r, fig.width=7, fig.height=6, cache = TRUE}
+daux = d[sample(1:nrow(d), 10000),]
+ggplot(daux, aes(x=n_op_ofi_tot, y = n_op_net_tot)) + geom_point(shape = 1, size = 3)
+```
+
+
+Perhaps Net usage is not a good measure of remoticity. What about BBVA Contigo? Can we *discard* those clients? 
+--------------------------------------------------------
+```{r, cache = TRUE}
+# d2 <- read.csv("contigo.csv", header = T)
+# # Reading Sample of BBVA Contigo people and their channel use
+contigo <- clarity.use_table (DEPENDENCY_OTHER_TABLES,
+                             'bbvacontigo.bbvacontigo_indicador', 
+                              select = c('cod_persona_ic', 'frec_ofi', 'frec_bbvacontigo', 'frec_bbvacontigo_linea', 'frec_atm', 'frec_net'), 
+                              sqname = 'contigo')
+
+qq2 <- paste('select * from', contigo) 
+d2 <- qimpala(qq2)
+d2 <- na.omit(d2)
+summary(d2[,c("frec_ofi", "frec_bbvacontigo", "frec_bbvacontigo_linea")])
+
+```
+
+The question we are trying to answer is do BBVA Contigo clients still go to the branch? can we eliminate those clients from the puicture? 
+
+```{r, cache = TRUE}
+d.contigo <- d2[ (d2$frec_bbvacontigo == "Recurrente") | (d2$frec_bbvacontigo_linea == "Recurrente"), ]
+table(d.contigo$frec_ofi)
+ 
+```
+Out of `r nrow(d.contigo)` clients that use BBVA contigo recurringly, only **`r nrow(d.contigo[d.contigo$frec_ofi == "Sin Uso",])`** clients do not use the physical branches at all. Once again closing a branch for a client in this area would have a significant impact even if the client is under the BBVA Contigo program.
+
+Let´s focus on Ops that are already migrated. ¿What portion of digital clientes do not transfer money at all through the physical channel?
+--------------------------------------------------------
+
+The rationale here is the following: it is difficult to estimate which clients are truly remote in the sense that "they do not use the branch at all". Why? Because right now most Ops cannot be executed on any other channel than the branch right now. So the real question that we´re trying to answer is: In a world where all possible Ops have been migrated to the remote channels (Net, Mobile) which portion of the digital clients would migrate to a totally digital lifestyle so that the location of the branch is irrelevant?
+
+For that we are going to focus on a type of Op that has already migrated: A regular money transfer. The new question (proxy for the one that we really want to answer but we can´t) is: What portion of the clients that we currently consider digital **DO NOT** perform any Op (money transfer) in the branch as of now? 
+
+Let´s start by keeping the clients that we consider very digital: transact more than twice per month and of course are Vinculados. How often do this guys Transfer money through the branch? That would give us some perspective over who is really moving into the digital realm (and abandoning the branch)
+
+```{r, results = 'hide', cache = TRUE}
+d.very.digital = d[ (d$n_op_net_opr + d$n_op_net_opr_avanz) > 24,]
+
+total <- nrow(d.very.digital)
+total_tx <- nrow( d.very.digital[d.very.digital$n_op_ofi_tra == 0,] )
+total_ofi <- nrow( d.very.digital[d.very.digital$n_op_ofi_tot == 0,] )
+```
+
+Out of **`r total`** very digital clients, most of them, **`r total_tx`** do not go to the branch at all to perform money trasfers. Extrapolating a little bit we could say that **`r round( total_tx/total, 2) *100`%** of digital clients are really digital (in the sense of not going to the branch)  
+

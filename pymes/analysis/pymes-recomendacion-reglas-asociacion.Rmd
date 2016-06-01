@@ -1,0 +1,307 @@
+---
+title: "Extracción de reglas de asociación entre productos de pymes"
+author: "César de Pablo"
+date: "18/06/2015"
+last_update: "08/07/2014"
+output: html_document
+---
+========================================================
+
+
+```{r, echo=FALSE}
+# This is the first mandatory section.
+title     <- '[Pymes] Extracción de reglas de asociación entre productos para pymes'
+keywords  <- 'pymes, sme, producto_contratado, clientes, product recommender, recomendacion de productos'
+```
+
+## Objetivo
+
+Estudiar la viabilidad de un recomendador de productos para pymes. La estrategia del recomendador es, dada una pyme P, determinar pymes similares y seleccionar los productos que estas han contratado pero que P aun no tiene. 
+
+Se analizaran los datos de productos contratados para todas las pymes del banco para determinar reglas de asociación entre productos. Se pretende evaluar si las reglas de asociación así extraidas: 
+ * tienen sentido desde el punto de vista de negocio (Evaluación cualitativa)
+ * pueden predecir el comportamiento futuro de pymes (Evaluación cuantitativa). Para ello se utilizará un slice de datos que no se haya visto en la construcción de las reglas y se evaluará cómo de bien explican las reglas de asociación las nuevas contrataciones. 
+
+### Alcance:
+
+Se abordan determinados elementos del enfoque: 
+  * ¿Cómo construir la cesta de productos? - a) todos, b) realizando una agrupación previa, ¿qué info usar? 
+  * Medidas de similitud entre pymes
+  * Algoritmos para extraccion de reglas de asociación
+  * Medidas intrínsecas para la ordenación de las reglas, sugerencias
+  * Construccion del conjunto de evaluación 
+  * Medidas para la evaluación
+  
+Otros aspectos que se dejan deliberadamente fuera: 
+  * Valor de los productos recomendados para BBVA - por el momento se ignora la recomendación 
+  * Aspectos temporales - ¿es el momento adecuado? ¿Debemos especificar las reglas como secuencias?
+  * Detalle del producto - se ignora productos específicos, se recomienda un producto genérico (contrapartida)
+
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+suppressMessages(library(DBI))  	# This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+source('~/bda_clarity/tools/warehouse_basics.R')
+
+library(arules)
+library(arulesViz)
+library(dplyr)
+library(reshape2)
+
+```
+
+
+```{r Carga de los catálogos}
+
+# Catalog with contrapartida descriptions
+q.catalog.contrapartida <- "
+SELECT cod_pgccontr, des_ctrpartd
+FROM da_catalogos.contrapartida
+WHERE partition_id = '20150228'
+ORDER BY cod_pgccontr
+"
+
+df.catalog.contrapartida <- qimpala(q.catalog.contrapartida)
+
+```
+
+
+## Construcción de la cesta de productos
+
+Construimos la cesta de productos de productos contratados (contrapartida) por cliente.
+
+```{r Carga la cesta de productos}
+
+q.productos_pyme <- "
+SELECT cod_persctpn, cod_pgccontr, count(*) num_contracts
+FROM da_cdepablo.contratos_pymes 
+GROUP BY cod_persctpn, cod_pgccontr
+ORDER BY num_contracts DESC
+"
+
+df.productos_pyme <- qimpala(q.productos_pyme)
+
+df.productos_pyme$cod_persctpn <- factor(df.productos_pyme$cod_persctpn)
+df.productos_pyme$cod_pgccontr <- factor(df.productos_pyme$cod_pgccontr)
+
+dim(df.productos_pyme)
+df.productos_pyme <- df.productos_pyme[(df.productos_pyme$cod_pgccontr != "0020" &
+                                        df.productos_pyme$cod_pgccontr != "0470" &
+                                        df.productos_pyme$cod_pgccontr != "0525" ),]
+dim(df.productos_pyme)
+
+# TODO: Revisar si es posible construir la cesta a partir de las transacciones sin pasar por la matriz de incidencia
+
+pivot.df <- dcast(df.productos_pyme, cod_persctpn ~ cod_pgccontr,  value.var = "num_contracts")
+pivot.df <- replace(pivot.df, is.na(pivot.df), 0)
+pivot.df <- replace(pivot.df, pivot.df > 1, 1)
+
+head(pivot.df)
+
+matrix <- as.matrix(pivot.df[,-1])
+basket <- as(matrix, "transactions")
+#rm(matrix)
+
+summary(matrix)
+
+```
+
+
+### Estadísticas descriptivas de la cesta de productos
+
+Productos más frecuentes: 
+ * 0525 - SERVICIOS TELEMATICOS. NUEVA APLICACION
+ * 0020 - CUENTAS PERSONALES
+ * 0517 - CONFIRMING CLIENTES
+ * 0470 - PROPUESTAS ELECTRONICAS
+ * 0404 - OPERACIONES DE CESION DE IMPUESTOS
+
+Usamos la información de más de 735.000 clientes, si bien cerca de 273 clientes solo tienen un producto contratado, en media 3.319 productos por cliente.
+
+
+```{r Estadísticas caracteristicas de la cesta de productos, echo=FALSE}
+
+summary(basket)
+
+```
+
+Mostramos una muestra de la cesta de productos. Tiene 3 franjas bastante diferenciadas donde se concentran los productos contratados. La primera, que practicamente se corresponde con una línea se correponde con la contrapartida 0020 (CUENTAS PERSONALES), la segunda a 04.. (CESION DE IMPUESTOS, RECIBOS, etc) y la tercera 05..  (CONFIRMING Y SERVICIOS TELEMÁTICOS). En el caso de las dos últimas franjas, aunque los productos más frecuentes son significativos, la franja es más abierta - lo que parece indicar que se trata de productos que se contratan juntos o bien como alternativa.
+
+
+```{r Sample de la matriz de incidencia de pymes y productos, echo=FALSE}
+
+image(sample(basket, 100))
+
+itemFrequencyPlot(basket, support = 0.01)
+  
+```
+
+## Extracción de reglas de asociacion para todos los clientes 
+
+```{r}
+
+rules <- apriori(basket, 
+                 parameter = list(support = 0.0001, confidence = 0.6, arem = "chi2", aval=TRUE , minlen = 1)
+                 )
+
+df.rules <- as(rules, "data.frame")
+summary(rules)
+
+
+rules.sorted <- sort(rules, by = "lift")
+subset.matrix <- is.subset(rules.sorted,rules.sorted)
+subset.matrix[lower.tri(subset.matrix, diag=T)] <- NA
+redundant <- colSums(subset.matrix, na.rm =T) > 1
+
+rules.pruned <- rules.sorted[!redundant]
+
+summary(rules.pruned)
+
+plot(rules.pruned,"grouped", measure="chi2", control = list(main="Reglas de asociacion para productos de pymes"), shading = "support")
+
+plot(rules.pruned,"paracoord")
+
+```
+
+```{r Association mining with eclat, echo=FALSE}
+
+# rules <- eclat(basket, parameter = list(support = 0.01, minlen = 2)
+# 
+# summary(rules)
+# 
+# df.rules <- as(rules, "data.frame")
+
+```
+
+### Experimentos con la recomendación de productos 
+
+```{r Initial experiments with recommenderlab package}
+library(recommenderlab)
+
+# examples_params <-  c(10000, 100000, 200000, 300000)
+examples_params <-  c(100000)
+
+# par(mfrow= c(ceiling(examples_params/2),2))
+
+for (num_examples in examples_params) {
+
+  m <- as(matrix[0:num_examples, ], "binaryRatingMatrix")
+  m <- m[rowCounts(m)>2]
+
+  dim(m)
+
+  scheme <- evaluationScheme(m, 
+                           method="split", 
+                           train=0.9, 
+                           k=1, 
+                           given=2)
+
+  algorithms <- list(
+    "random items" = list(name="RANDOM", param=NULL),
+    "popular items" = list(name="POPULAR", param=NULL),
+    "user-based CF" = list(name="UBCF" , 
+                           param = list( method = "Jaccard" , nn = 25)),
+    "item-based CF" = list(name="IBCF" , 
+                           param = list( method = "Jaccard" , k = 30, normalize_sim_matrix = FALSE, alpha = 0.5)),
+    "association rules" = list(name="AR" , 
+                           param = list( support = 0.1, confidence = 0.5, maxlen = 3 , measure = "confidence" , verbose=FALSE, decreasing = TRUE ))    
+    )
+
+  results <- evaluate(scheme, algorithms, n = c(1,3,5,10,15,20))
+  plot(results, "prec/rec", annotate = c(1,2,3), legend=c(x = 100, y = 0) )
+
+}
+
+
+```
+
+
+## Extracción de reglas de asociación por grupos de clientes
+
+## Construcción de un conjunto de evaluación de la recomendacion
+
+
+```{r, Crea tabla de productos contratados, eval=FALSE}
+
+q.create_table_contratos <- "
+CREATE TABLE da_cdepablo.contratos_20150331
+AS
+  SELECT cod_entalfa, cod_paisoalf, cod_idcontra, NULL cod_detalcto, NULL xti_identcto, cod_pgccontr, fec_altacto, cod_pro_plat, cod_tipopd, cod_comprod, cod_prodfin
+  FROM da_pro.productos_contratados 
+	WHERE partition_id = '20150331'
+
+	UNION ALL
+
+	SELECT cd.cod_entalfa, cd.cod_paisoalf, cd.cod_idcontra, cd.cod_detalcto, cd.xti_identcto, cd.cod_pgccontr, cd.fec_altacto, cd.cod_pro_plat, cd.cod_tipopd, cd.cod_comprod, cd.cod_prodfin
+	FROM
+		(
+		SELECT *
+		FROM da_pro.productos_contratados q
+		WHERE partition_id = '20150331'
+		) c 
+	RIGHT JOIN 
+		(
+		SELECT *
+		FROM da_pro.productos_contratados_detalle 
+		WHERE partition_id = '20150331'
+		) cd
+	ON (c.cod_entalfa = cd.cod_entalfa AND c.cod_paisoalf = cd.cod_paisoalf 
+	AND c.cod_idcontra = cd.cod_idcontra)
+	WHERE c.cod_idcontra IS NULL
+"
+
+do.hive(q.create_table_contratos)
+
+
+```
+
+
+
+```{r, Crea tabla de pymes, eval=FALSE}
+
+q.create_table_pymes <- "
+CREATE TABLE da_cdepablo.pymes_20150331
+AS
+SELECT c.cod_entalfa, c.cod_paisoalf, c.cod_persctpn, c.des_nombfj, c.cod_tp_iden1, c.cod_documps1, c.cod_cnaecto, s.cod_segmsubo, fec_altapers, fec_ultmodop, c.partition_id
+FROM da_pro.clientes_corp c JOIN da_pro.segmento_global s
+ON (c.cod_entalfa = s.cod_entalfa AND c.cod_paisoalf = s.cod_paisoalf 
+AND c.cod_persctpn = s.cod_persctpn)
+WHERE c.partition_id = '20150331' AND s.partition_id = '20150331'
+AND (s.cod_segmsubo = 35 OR s.cod_segmsubo = 36)
+"
+
+do.hive(q.create_table_pymes)
+
+```
+
+
+#### Contratos x Pymes 
+
+Se usa una tabla adicional para obtener los productos contratados con las pymes 
+
+```{r, Crea una tabla de contratos x pymes, eval=FALSE}
+
+q.create_table_contratos_pymes <- "
+CREATE TABLE da_cdepablo.contratos_pymes_20150331
+AS
+SELECT c.cod_persctpn, c.cod_cnaecto, 
+     i.cod_idcontra, i.cod_pgccontr, 
+       pc.fec_altacto, pc.cod_pgccontr pc_cod_pgccontr, pc.cod_pro_plat, pc.cod_tipopd, pc.cod_comprod, pc.cod_prodfin
+FROM da_cdepablo.pymes_20150331 c JOIN da_pro.intervinientes_corp i  
+ON (c.cod_entalfa = i.cod_entalfa AND c.cod_paisoalf = i.cod_paisoalf AND c.cod_persctpn = i.cod_persctpn)
+JOIN da_cdepablo.contratos_20150331 pc
+ON (c.cod_entalfa = pc.cod_entalfa AND c.cod_paisoalf = pc.cod_paisoalf AND i.cod_idcontra = pc.cod_idcontra)
+AND c.partition_id = '20150331' AND i.partition_id = '20150331'
+" 
+
+do.hive(q.create_table_contratos_pymes)
+
+```
+
+
+## Evaluación
+
+## Conclusiones 
+

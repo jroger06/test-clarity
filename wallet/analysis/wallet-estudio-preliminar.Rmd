@@ -1,0 +1,1220 @@
+---
+title: "Estudio preliminar del dato disponible de BBVA Wallet"
+---
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- '[Wallet]: Estudio preliminar del dato disponible de BBVA Wallet'
+
+keywords  <- 'wallet, digital, online, bbva.es, transaccionalidad, txc, navegacion, mailing, sumidero, acciones comerciales'  
+```
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(grid))
+suppressMessages(library(hexbin))
+suppressMessages(library(lattice))
+suppressMessages(library(reshape))
+suppressMessages(library(plyr))
+
+options(warn=-1, scipen=3, width=180)
+source('~/bda_clarity/tools/warehouse_basics.R') ;
+source('~/bda_clarity/tools/write.hive.R') ;
+
+chname <- function(df)
+{
+  rex <- '^[[:alnum:]_]+\\.([[:alnum:]_]+)$'
+  nam <- colnames(df)
+  ix  <- which(grepl(rex, nam))
+  
+  nam[ix] <- gsub(rex, '\\1', nam[ix])
+  
+  colnames(df) <- nam
+  
+  df
+};
+
+```
+
+
+**Transaccionalidad por canal** donde la variable cod_serv_dv tome los siguientes valores:
+
+| cod_serv_dv |   des_serv_dv  | 
+|:-----------:| :-------------:|
+|     0101    | WALLET IPHONE  | 
+|     0102    | WALLET ANDROID | 
+
+Extraemos el evento, detalle del evento, producto y transacción para esos dos valores de servicio:
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_cod_serv_dv as
+select fec_soli_trn,
+cod_anno_ej,
+cod_mes_ej,
+cod_trnfims,
+cod_canal_dv,
+cod_medio_dv,
+cod_serv_dv,
+cod_pan,
+imp_trans,
+cod_idcontra,
+cod_pers_trs,
+cod_eve_trn,
+cod_deve_trn,
+cod_pmit_trn,
+partition_id
+from da_pro.transacciones_por_canal
+where cast(cod_serv_dv as int) in (101,102)")
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_cod_trnfims as
+select fec_soli_trn,
+cod_anno_ej,
+cod_mes_ej,
+cod_trnfims,
+cod_canal_dv,
+cod_medio_dv,
+cod_serv_dv,
+cod_pan,
+imp_trans,
+cod_idcontra,
+cod_pers_trs,
+cod_eve_trn,
+cod_deve_trn,
+cod_pmit_trn,
+partition_id
+from da_pro.transacciones_por_canal
+where trim(cod_trnfims) in ('00001492',
+'00001493',
+'00001494',
+'00001663',
+'00001684',
+'ADCTT007',
+'TCTFTW35',
+'TCTFTYYJ',
+'TCTFTYYK',
+'TCTFTYYL')")
+
+qhive("select fec_soli_trn,
+cod_anno_ej,
+cod_mes_ej,
+cod_trnfims,
+cod_canal_dv,
+cod_medio_dv,
+cod_serv_dv,
+cod_pan,
+imp_trans,
+cod_idcontra,
+cod_pers_trs,
+cod_eve_trn,
+cod_deve_trn,
+cod_pmit_trn,
+partition_id
+from da_martalamela.wallet_cod_serv_dv LIMIT 10")
+
+qhive("select fec_soli_trn,
+cod_anno_ej,
+cod_mes_ej,
+cod_trnfims,
+cod_canal_dv,
+cod_medio_dv,
+cod_serv_dv,
+cod_pan,
+imp_trans,
+cod_idcontra,
+cod_pers_trs,
+cod_eve_trn,
+cod_deve_trn,
+cod_pmit_trn,
+partition_id
+from da_martalamela.wallet_cod_trnfims LIMIT 10")
+```
+
+**wallet_cod_serv_dv**
+
+Tenemos asociados a cada código de servicio Wallet el siguiente número de clientes distintos:
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+cod_serv_dv <- qhive("select cod_serv_dv,
+                     count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+                     from da_martalamela.wallet_cod_serv_dv
+                     group by cod_serv_dv")
+
+graph_cod_serv_dv <- ggplot(cod_serv_dv, aes(x = factor(cod_serv_dv), y = count_distinct_cod_pers_trs, fill = cod_serv_dv, label=count_distinct_cod_pers_trs, ymax = max(count_distinct_cod_pers_trs))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# clientes distintos") + ggtitle("# Clientes x cod_serv_dv")  + theme(legend.position="none") + geom_text(aes(y = count_distinct_cod_pers_trs), position = "stack", size = 3.5)
+graph_cod_serv_dv
+```
+
+Mes a mes podemos ver cómo se distribuye ese número de transacciones asociadas a cada servicio Wallet:
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+cod_serv_dv_partition <- qhive("select cod_serv_dv, partition_id, count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+                              from da_martalamela.wallet_cod_serv_dv
+                              group by cod_serv_dv, partition_id
+                              order by cod_serv_dv, partition_id")
+
+graph_cod_serv_dv_partition <- ggplot(data=cod_serv_dv_partition, aes(x=partition_id, y=count_distinct_cod_pers_trs, group=cod_serv_dv, colour=cod_serv_dv, ymax = max(count_distinct_cod_pers_trs))) + geom_line() + geom_point() + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + ylab("# clientes distintos") + ggtitle("# Clientes mensual x cod_serv_dv") + theme(legend.title=element_blank())
+graph_cod_serv_dv_partition
+```
+
++ ¿Qué tipo de eventos (cod_eve_trn) son los asociados a estos cod_serv_dv?
+```{r eval=TRUE, echo=FALSE, cache=TRUE, fig.width=10, fig.height=7}
+cod_serv_dv_evento <- qhive("select a.cod_serv_dv as cod_serv_dv,
+                            a.cod_eve_trn as cod_eve_trn,
+                            eventos.des_evento_trn as des_evento_trn,
+                            a.count_distinct_cod_pers_trs as count_distinct_cod_pers_trs
+                            from (
+                              select cod_serv_dv,
+                              cod_eve_trn,
+                              count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+                              from da_martalamela.wallet_cod_serv_dv
+                              where cod_eve_trn not like '%@%'
+                              group by cod_serv_dv, cod_eve_trn
+                            ) a
+                            left join
+                            (
+                              select distinct trim(cod_evento_trn) as cod_evento_trn, des_evento_trn
+                              from da_catalogos.evento_trn
+                            ) eventos
+                            on trim(a.cod_eve_trn)=trim(eventos.cod_evento_trn)")
+
+
+# Get the levels for type in the required order
+cod_serv_dv_evento$cod_eve_trn = factor(cod_serv_dv_evento$cod_eve_trn)
+cod_serv_dv_evento = arrange(cod_serv_dv_evento, cod_serv_dv, cod_eve_trn)
+
+# Calculate the percentages
+cod_serv_dv_evento = ddply(cod_serv_dv_evento, .(cod_serv_dv), transform, percent_distinct_cod_pers_trs = count_distinct_cod_pers_trs/sum(count_distinct_cod_pers_trs) * 100)
+cod_serv_dv_evento$label_percent_distinct_cod_pers_trs = paste0(sprintf("%.0f", cod_serv_dv_evento$percent_distinct_cod_pers_trs), "%")
+
+# Description
+cod_serv_dv_evento$cod_eve_trn_des_evento_trn <- paste0(cod_serv_dv_evento$cod_eve_trn,"-",cod_serv_dv_evento$des_evento_trn)
+
+# Order
+cod_serv_dv_evento = cod_serv_dv_evento[order(cod_serv_dv_evento$percent_distinct_cod_pers_trs),]
+
+graph_cod_serv_dv_evento <- ggplot(cod_serv_dv_evento, aes(x = factor(cod_serv_dv), y = percent_distinct_cod_pers_trs, fill = cod_eve_trn_des_evento_trn, label=label_percent_distinct_cod_pers_trs, ymax=max(percent_distinct_cod_pers_trs))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("% clientes distintos") + ggtitle("% cod_eve_trn x cod_serv_dv") + geom_text(aes(y = percent_distinct_cod_pers_trs, label = label_percent_distinct_cod_pers_trs), position = "stack", size = 3.5)
+graph_cod_serv_dv_evento
+```
+
++ ¿Qué tipo de detalle de eventos (cod_deve_trn) son los asociados a estos cod_serv_dv? (en el gráfico se muestran sólo aquellas que ocurren con más frecuencia):
+```{r eval=TRUE, echo=FALSE, cache=TRUE, fig.width=10, fig.height=7}
+cod_serv_dv_detalle_evento <- qhive("select a.cod_serv_dv as cod_serv_dv,
+                            a.cod_deve_trn as cod_deve_trn,
+                            detalle_evento.des_detalle_evento_trn as des_detalle_evento_trn,
+                            a.count_distinct_cod_pers_trs as count_distinct_cod_pers_trs
+                            from (
+                              select cod_serv_dv,
+                              cod_deve_trn,
+                              count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+                              from da_martalamela.wallet_cod_serv_dv
+                              where cod_deve_trn not like '%@%'
+                              group by cod_serv_dv, cod_deve_trn
+                            ) a
+                            left join
+                            (
+                              select distinct cod_detalle_evento_trn, des_detalle_evento_trn
+                              from da_catalogos.detalle_evento_trn
+                            ) detalle_evento
+                            on trim(a.cod_deve_trn)=trim(detalle_evento.cod_detalle_evento_trn)")
+
+
+# Get the levels for type in the required order
+cod_serv_dv_detalle_evento$cod_deve_trn = factor(cod_serv_dv_detalle_evento$cod_deve_trn)
+cod_serv_dv_detalle_evento = arrange(cod_serv_dv_detalle_evento, cod_serv_dv, cod_deve_trn)
+
+# Calculate the percentages
+cod_serv_dv_detalle_evento = ddply(cod_serv_dv_detalle_evento, .(cod_serv_dv), transform, percent_distinct_cod_pers_trs = count_distinct_cod_pers_trs/sum(count_distinct_cod_pers_trs) * 100)
+cod_serv_dv_detalle_evento$label_percent_distinct_cod_pers_trs = paste0(sprintf("%.0f", cod_serv_dv_detalle_evento$percent_distinct_cod_pers_trs), "%")
+
+# Description
+cod_serv_dv_detalle_evento$cod_deve_trn_des_detalle_evento_trn <- paste0(cod_serv_dv_detalle_evento$cod_deve_trn,"-",cod_serv_dv_detalle_evento$des_detalle_evento_trn)
+
+# Order
+cod_serv_dv_detalle_evento = cod_serv_dv_detalle_evento[order(cod_serv_dv_detalle_evento$percent_distinct_cod_pers_trs),]
+
+# Frequency
+cod_serv_dv_detalle_evento_top <- cod_serv_dv_detalle_evento[cod_serv_dv_detalle_evento$percent_distinct_cod_pers_trs>=5,]
+
+graph_cod_serv_dv_detalle_evento <- ggplot(cod_serv_dv_detalle_evento_top, aes(x = factor(cod_serv_dv), y = percent_distinct_cod_pers_trs, fill = cod_deve_trn_des_detalle_evento_trn, label=label_percent_distinct_cod_pers_trs, ymax=max(percent_distinct_cod_pers_trs))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("% clientes distintos") + ggtitle("% cod_deve_trn x cod_serv_dv") + geom_text(aes(y = percent_distinct_cod_pers_trs, label = label_percent_distinct_cod_pers_trs), position = "stack", size = 3.5)
+graph_cod_serv_dv_detalle_evento
+
+values <- data.frame(col1=unique(cod_serv_dv_detalle_evento$des_detalle_evento_trn)[1:(length(unique(cod_serv_dv_detalle_evento$des_detalle_evento_trn))/3)],col2=unique(cod_serv_dv_detalle_evento$des_detalle_evento_trn)[(length(unique(cod_serv_dv_detalle_evento$des_detalle_evento_trn))/3+1):(length(unique(cod_serv_dv_detalle_evento$des_detalle_evento_trn))*2/3)],col3=unique(cod_serv_dv_detalle_evento$des_detalle_evento_trn)[(length(unique(cod_serv_dv_detalle_evento$des_detalle_evento_trn))*2/3+1):length(unique(cod_serv_dv_detalle_evento$des_detalle_evento_trn))])
+setNames(values,rep(" ",length(values)))
+```
+
++ ¿Qué transacciones cod_trnfims se asocian a los servicios cod_serv_dv = '0101' o '0102'? (en el gráfico se muestran sólo aquellas que ocurren con más frecuencia):
+```{r eval=TRUE, echo=FALSE, cache=TRUE, fig.width=12, fig.height=7}
+cod_serv_dv_transaccion <- qhive("select a.cod_serv_dv as cod_serv_dv,
+                                 a.cod_trnfims as cod_trnfims,
+                                 transaccion.des_transaccion_txc as des_transaccion_txc,
+                                 a.count_distinct_cod_pers_trs as count_distinct_cod_pers_trs
+                                 from
+                                 (
+                                   select cod_serv_dv,
+                                   cod_trnfims,
+                                   count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+                                   from da_martalamela.wallet_cod_serv_dv
+                                   group by cod_serv_dv, cod_trnfims
+                                 ) a
+                                left join
+                                 (
+                                   select distinct trim(cod_transaccion_txc) as cod_transaccion_txc, des_transaccion_txc
+                                   from da_catalogos.transaccion_txc
+                                 ) transaccion
+                                 on trim(a.cod_trnfims)=trim(transaccion.cod_transaccion_txc)")
+
+
+# Get the levels for type in the required order
+cod_serv_dv_transaccion$cod_trnfims = factor(cod_serv_dv_transaccion$cod_trnfims)
+cod_serv_dv_transaccion = arrange(cod_serv_dv_transaccion, cod_serv_dv, cod_trnfims)
+
+# Calculate the percentages
+cod_serv_dv_transaccion = ddply(cod_serv_dv_transaccion, .(cod_serv_dv), transform, percent_distinct_cod_pers_trs = count_distinct_cod_pers_trs/sum(count_distinct_cod_pers_trs) * 100)
+cod_serv_dv_transaccion$label_percent_distinct_cod_pers_trs = paste0(sprintf("%.0f", cod_serv_dv_transaccion$percent_distinct_cod_pers_trs), "%")
+
+# Description
+cod_serv_dv_transaccion$cod_trnfims_des_transaccion_txc <- paste0(cod_serv_dv_transaccion$cod_trnfims,"-",cod_serv_dv_transaccion$des_transaccion_txc)
+
+# Order
+cod_serv_dv_transaccion = cod_serv_dv_transaccion[order(cod_serv_dv_transaccion$percent_distinct_cod_pers_trs),]
+
+# Frequency
+cod_serv_dv_transaccion_top <- cod_serv_dv_transaccion[cod_serv_dv_transaccion$percent_distinct_cod_pers_trs>=3,]
+
+graph_cod_serv_dv_transaccion <- ggplot(cod_serv_dv_transaccion_top, aes(x = factor(cod_serv_dv), y = percent_distinct_cod_pers_trs, fill = cod_trnfims_des_transaccion_txc, label=label_percent_distinct_cod_pers_trs, ymax=max(percent_distinct_cod_pers_trs))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("% clientes distintos") + ggtitle("% cod_trnfims x cod_serv_dv") + geom_text(aes(y = percent_distinct_cod_pers_trs, label = label_percent_distinct_cod_pers_trs), position = "stack", size = 3.5)
+graph_cod_serv_dv_transaccion
+
+values <- data.frame(col1=unique(substr(cod_serv_dv_transaccion$des_transaccion_txc,1,39))[1:(length(unique(cod_serv_dv_transaccion$des_transaccion_txc))/3)],col2=unique(substr(cod_serv_dv_transaccion$des_transaccion_txc,1,39))[(length(unique(cod_serv_dv_transaccion$des_transaccion_txc))/3+1):(length(unique(cod_serv_dv_transaccion$des_transaccion_txc))*2/3)],col3=unique(substr(cod_serv_dv_transaccion$des_transaccion_txc,1,39))[(length(unique(cod_serv_dv_transaccion$des_transaccion_txc))*2/3+1):length(unique(cod_serv_dv_transaccion$des_transaccion_txc))])
+setNames(values,rep(" ",length(values)))
+```
+
++ ¿Qué productos se asocian a los servicios cod_serv_dv = '0101' o '0102'?:
+```{r eval=TRUE, echo=FALSE, cache=TRUE, fig.width=12, fig.height=7}
+cod_serv_dv_producto <- qhive("select a.cod_serv_dv as cod_serv_dv,
+                                 a.cod_pmit_trn as cod_pmit_trn,
+                                 producto.des_producto as des_producto,
+                                 a.count_distinct_cod_pers_trs as count_distinct_cod_pers_trs
+                                 from
+                                 (
+                                   select cod_serv_dv,
+                                   trim(cod_pmit_trn) as cod_pmit_trn,
+                                   count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+                                   from da_martalamela.wallet_cod_serv_dv
+                                   group by cod_serv_dv, trim(cod_pmit_trn)
+                                 ) a
+                                left join
+                                 (
+                                   select distinct cod_producto, des_producto
+                                   from da_catalogos.producto
+                                 ) producto
+                                 on trim(a.cod_pmit_trn)=trim(producto.cod_producto)")
+
+
+# Get the levels for type in the required order
+cod_serv_dv_producto$cod_pmit_trn = factor(cod_serv_dv_producto$cod_pmit_trn)
+cod_serv_dv_producto = arrange(cod_serv_dv_producto, cod_serv_dv, cod_pmit_trn)
+
+# Calculate the percentages
+cod_serv_dv_producto = ddply(cod_serv_dv_producto, .(cod_serv_dv), transform, percent_distinct_cod_pers_trs = count_distinct_cod_pers_trs/sum(count_distinct_cod_pers_trs) * 100)
+cod_serv_dv_producto$label_percent_distinct_cod_pers_trs = paste0(sprintf("%.0f", cod_serv_dv_producto$percent_distinct_cod_pers_trs), "%")
+
+# Description
+cod_serv_dv_producto$cod_pmit_trn_des_producto <- paste0(cod_serv_dv_producto$cod_pmit_trn,"-",cod_serv_dv_producto$des_producto)
+
+# Order
+cod_serv_dv_producto = cod_serv_dv_producto[order(cod_serv_dv_producto$percent_distinct_cod_pers_trs),]
+
+graph_cod_serv_dv_producto <- ggplot(cod_serv_dv_producto, aes(x = factor(cod_serv_dv), y = percent_distinct_cod_pers_trs, fill = cod_pmit_trn_des_producto, label=label_percent_distinct_cod_pers_trs, ymax=max(percent_distinct_cod_pers_trs))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("% clientes distintos") + ggtitle("% cod_pmit_trn x cod_serv_dv") + geom_text(aes(y = percent_distinct_cod_pers_trs, label = label_percent_distinct_cod_pers_trs), position = "stack", size = 3.5)
+graph_cod_serv_dv_producto
+```
+
+
+**wallet_cod_trnfims**
+
+Dejamos a un lado los códigos de servicio WALLET por el momento y buscamos en el catálogo de TRANSACCIONES (cod_trnfims) cuáles de ellas hacen referencia directa a Wallet:
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select cod_transaccion_txc, des_transaccion_txc
+      from da_catalogos.transaccion_txc
+      where upper(des_transaccion_txc) like '%WALL%'
+      group by cod_transaccion_txc,des_transaccion_txc
+      order by cod_transaccion_txc")
+```
+
+Y calculamos cuántas personas obtenemos en TxC asociadas a cada una de esos códigos de transacción:
+```{r eval=TRUE, echo=FALSE, cache=TRUE, fig.width=12, fig.height=7}
+wallet_txc_cod_trnfims_partition <- qhive("select a.cod_trnfims as cod_trnfims,
+                            transaccion.des_transaccion_txc as des_transaccion_txc,
+                            a.partition_id as partition_id,
+                            a.count_distinct_cod_pers_trs as count_distinct_cod_pers_trs
+                            from (
+                              select cod_trnfims,
+                              partition_id,
+                              count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+                              from da_martalamela.wallet_cod_trnfims
+                              where cast(partition_id as int) >= 20130930
+                              group by cod_trnfims, partition_id
+                            ) a
+                            left join
+                            (
+                              select distinct trim(cod_transaccion_txc) as cod_transaccion_txc, des_transaccion_txc
+                              from da_catalogos.transaccion_txc
+                            ) transaccion
+                            on trim(a.cod_trnfims)=trim(transaccion.cod_transaccion_txc)")
+
+wallet_txc_cod_trnfims_partition$cod_trnfims_des_transaccion_txc <- paste0(wallet_txc_cod_trnfims_partition$cod_trnfims,"-",wallet_txc_cod_trnfims_partition$des_transaccion_txc)
+
+cast(wallet_txc_cod_trnfims_partition, partition_id ~ cod_trnfims, fun.aggregate=sum, value="count_distinct_cod_pers_trs")
+
+graph_wallet_txc_cod_trnfims_partition <- ggplot(data=wallet_txc_cod_trnfims_partition, aes(x=partition_id, y=count_distinct_cod_pers_trs, group=cod_trnfims_des_transaccion_txc, colour=cod_trnfims_des_transaccion_txc, ymax = max(count_distinct_cod_pers_trs))) + geom_line() + geom_point() + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + ylab("# clientes distintos") + ggtitle("# Clientes mensual x cod_trnfims") + theme(legend.title=element_blank())
+graph_wallet_txc_cod_trnfims_partition
+```
+
++ ¿Qué servicios cod_serv_dv se asocian a estas transacciones marcadas como WALLET?
+```{r eval=TRUE, echo=FALSE, cache=TRUE, fig.width=12, fig.height=7}
+cod_trnfims_servicio <- qhive("select a.cod_trnfims as cod_trnfims,
+                                 a.cod_serv_dv as cod_serv_dv,
+                                 servicio.des_servicio as des_servicio,
+                                 a.count_distinct_cod_pers_trs as count_distinct_cod_pers_trs
+                                 from
+                                 (
+                                   select cod_trnfims,
+                                   cod_serv_dv,
+                                   count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+                                   from da_martalamela.wallet_cod_trnfims
+                                   group by cod_trnfims, cod_serv_dv
+                                 ) a
+                                 left join
+                                 (
+                                   select distinct cod_servicio, des_servicio
+                                   from da_catalogos.servicio
+                                 ) servicio
+                                 on trim(a.cod_serv_dv)=trim(servicio.cod_servicio)")
+
+
+# Get the levels for type in the required order
+cod_trnfims_servicio$cod_serv_dv = factor(cod_trnfims_servicio$cod_serv_dv)
+cod_trnfims_servicio = arrange(cod_trnfims_servicio, cod_trnfims, cod_serv_dv)
+
+# Calculate the percentages
+cod_trnfims_servicio = ddply(cod_trnfims_servicio, .(cod_trnfims), transform, percent_distinct_cod_pers_trs = count_distinct_cod_pers_trs/sum(count_distinct_cod_pers_trs) * 100)
+cod_trnfims_servicio$label_percent_distinct_cod_pers_trs = paste0(sprintf("%.0f", cod_trnfims_servicio$percent_distinct_cod_pers_trs), "%")
+
+# Description
+cod_trnfims_servicio$cod_serv_dv_des_servicio <- paste0(cod_trnfims_servicio$cod_serv_dv,"-",cod_trnfims_servicio$des_servicio)
+
+# Order
+cod_trnfims_servicio = cod_trnfims_servicio[order(cod_trnfims_servicio$percent_distinct_cod_pers_trs),]
+
+graph_cod_trnfims_servicio <- ggplot(cod_trnfims_servicio, aes(x = factor(cod_trnfims), y = percent_distinct_cod_pers_trs, fill = cod_serv_dv_des_servicio, label=label_percent_distinct_cod_pers_trs, ymax=max(percent_distinct_cod_pers_trs))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + ylab("% clientes distintos") + ggtitle("% cod_trnfims x cod_serv_dv") + geom_text(aes(y = percent_distinct_cod_pers_trs, label = label_percent_distinct_cod_pers_trs), position = "stack", size = 3.5)
+graph_cod_trnfims_servicio
+```
+
++ ¿Qué eventos se asocian a estas transacciones marcadas como WALLET?
+```{r eval=TRUE, echo=FALSE, cache=TRUE, fig.width=12, fig.height=7}
+cod_trnfims_eventos <- qhive("select a.cod_trnfims as cod_trnfims,
+                                 a.cod_eve_trn as cod_eve_trn,
+                                 eventos.des_evento_trn as des_evento_trn,
+                                 a.count_distinct_cod_pers_trs as count_distinct_cod_pers_trs
+                                 from
+                                 (
+                                   select cod_trnfims,
+                                   trim(cod_eve_trn) as cod_eve_trn,
+                                   count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+                                   from da_martalamela.wallet_cod_trnfims
+                                   group by cod_trnfims, trim(cod_eve_trn)
+                                 ) a
+                                 left join
+                                 (
+                                   select distinct trim(cod_evento_trn) as cod_evento_trn, des_evento_trn
+                                   from da_catalogos.evento_trn
+                                 ) eventos
+                                 on trim(a.cod_eve_trn)=trim(eventos.cod_evento_trn)")
+
+
+# Get the levels for type in the required order
+cod_trnfims_eventos$cod_eve_trn = factor(cod_trnfims_eventos$cod_eve_trn)
+cod_trnfims_eventos = arrange(cod_trnfims_eventos, cod_trnfims, cod_eve_trn)
+
+# Calculate the percentages
+cod_trnfims_eventos = ddply(cod_trnfims_eventos, .(cod_trnfims), transform, percent_distinct_cod_pers_trs = count_distinct_cod_pers_trs/sum(count_distinct_cod_pers_trs) * 100)
+cod_trnfims_eventos$label_percent_distinct_cod_pers_trs = paste0(sprintf("%.0f", cod_trnfims_eventos$percent_distinct_cod_pers_trs), "%")
+
+# Description
+cod_trnfims_eventos$cod_serv_dv_des_evento_trn <- paste0(cod_trnfims_eventos$cod_eve_trn,"-",cod_trnfims_eventos$des_evento_trn)
+
+# Order
+cod_trnfims_eventos = cod_trnfims_eventos[order(cod_trnfims_eventos$percent_distinct_cod_pers_trs),]
+
+graph_cod_trnfims_eventos <- ggplot(cod_trnfims_eventos, aes(x = factor(cod_trnfims), y = percent_distinct_cod_pers_trs, fill = cod_serv_dv_des_evento_trn, label=label_percent_distinct_cod_pers_trs, ymax=max(percent_distinct_cod_pers_trs))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + ylab("% clientes distintos") + ggtitle("% cod_trnfims x cod_eve_trn") + geom_text(aes(y = percent_distinct_cod_pers_trs, label = label_percent_distinct_cod_pers_trs), position = "stack", size = 3.5)
+graph_cod_trnfims_eventos
+```
+
++ ¿Qué detalles de evento se asocian a estas transacciones marcadas como WALLET?
+```{r eval=TRUE, echo=FALSE, cache=TRUE, fig.width=12, fig.height=7}
+cod_trnfims_detalle_evento <- qhive("select a.cod_trnfims as cod_trnfims,
+                                 a.cod_deve_trn as cod_deve_trn,
+                                 detalle_evento.des_detalle_evento_trn as des_detalle_evento_trn,
+                                 a.count_distinct_cod_pers_trs as count_distinct_cod_pers_trs
+                                 from
+                                 (
+                                   select cod_trnfims,
+                                   trim(cod_deve_trn) as cod_deve_trn,
+                                   count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+                                   from da_martalamela.wallet_cod_trnfims
+                                   group by cod_trnfims, trim(cod_deve_trn)
+                                 ) a
+                                 left join
+                                 (
+                                   select distinct cod_detalle_evento_trn, des_detalle_evento_trn
+                                   from da_catalogos.detalle_evento_trn
+                                 ) detalle_evento
+                                 on trim(a.cod_deve_trn)=trim(detalle_evento.cod_detalle_evento_trn)")
+
+
+# Get the levels for type in the required order
+cod_trnfims_detalle_evento$cod_deve_trn = factor(cod_trnfims_detalle_evento$cod_deve_trn)
+cod_trnfims_detalle_evento = arrange(cod_trnfims_detalle_evento, cod_trnfims, cod_deve_trn)
+
+# Calculate the percentages
+cod_trnfims_detalle_evento = ddply(cod_trnfims_detalle_evento, .(cod_trnfims), transform, percent_distinct_cod_pers_trs = count_distinct_cod_pers_trs/sum(count_distinct_cod_pers_trs) * 100)
+cod_trnfims_detalle_evento$label_percent_distinct_cod_pers_trs = paste0(sprintf("%.0f", cod_trnfims_detalle_evento$percent_distinct_cod_pers_trs), "%")
+
+# Description
+cod_trnfims_detalle_evento$cod_serv_dv_des_detalle_evento_trn <- paste0(cod_trnfims_detalle_evento$cod_deve_trn,"-",cod_trnfims_detalle_evento$des_detalle_evento_trn)
+
+# Order
+cod_trnfims_detalle_evento = cod_trnfims_detalle_evento[order(cod_trnfims_detalle_evento$percent_distinct_cod_pers_trs),]
+
+graph_cod_trnfims_detalle_evento <- ggplot(cod_trnfims_detalle_evento, aes(x = factor(cod_trnfims), y = percent_distinct_cod_pers_trs, fill = cod_serv_dv_des_detalle_evento_trn, label=label_percent_distinct_cod_pers_trs, ymax=max(percent_distinct_cod_pers_trs))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + ylab("% clientes distintos") + ggtitle("% cod_trnfims x cod_deve_trn") + geom_text(aes(y = percent_distinct_cod_pers_trs, label = label_percent_distinct_cod_pers_trs), position = "stack", size = 3.5)
+graph_cod_trnfims_detalle_evento
+```
+
+**¡OJO!**: En el atributo num.wallet de CLARITY se puede ver que el único filtro que se utiliza para el conteo de clientes WALLET es cod_trnfims='ADCTT007', obteniendo aproximadamente 49.000 clientes catalogados como tal (últimos 6 meses, periodo ago14-dic14). Sin embargo vemos que hay más códigos asociados a WALLET que podrían sernos de utilidad y mejorando la información de la que se dispone en CLARITY.
+
++ ¿Cuántos clientes hay asociados a ese código de transacción cod_trnfims='ADCTT007'? ¿cómo se distribuyen a lo largo del tiempo?:
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select count(distinct cod_pers_trs)
+       from da_martalamela.wallet_cod_trnfims
+       where trim(cod_trnfims) like 'ADCTT007'")
+```
+
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+ADCTT007 <- qhive("select partition_id,
+       count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+       from da_martalamela.wallet_cod_trnfims
+       where trim(cod_trnfims) like 'ADCTT007'
+       and cast(partition_id as int) >= 20130930
+       group by partition_id
+       order by partition_id")
+
+graph_ADCTT007 <- ggplot(data=ADCTT007, aes(x=partition_id, y=count_distinct_cod_pers_trs, ymax = max(count_distinct_cod_pers_trs), label=count_distinct_cod_pers_trs)) + geom_line(aes(group=1), colour="#66CC99") + geom_point(colour="#66CC99") + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + ylab("# clientes distintos") + ggtitle("# Clientes cod_trnfims='ADCTT007' - ALTA TARJETA WALLET") + geom_text(aes(y = count_distinct_cod_pers_trs, vjust=-1), position = "stack", size = 3.5, colour="#66CC99")
+graph_ADCTT007
+```
+
++ ¿Cuántas tarjetas hay asociados a ese código de transacción cod_trnfims='ADCTT007'?
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select count(distinct cod_pan) as count_distinct_cod_pan
+       from da_martalamela.wallet_cod_trnfims
+       where trim(cod_trnfims) like 'ADCTT007'")
+```
+
++ ¿Hay algún tipo de transacción de las que estudiamos que tenga el cod_pan de la tarjeta informado?
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select cod_trnfims, count(distinct cod_pan) as count_distinct_cod_pan
+      from da_martalamela.wallet_cod_trnfims
+      group by cod_trnfims")
+```
+
++ ¿Y el código de contrato?
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select cod_trnfims, count(distinct cod_idcontra) as count_distinct_cod_idcontra
+      from da_martalamela.wallet_cod_trnfims
+      group by cod_trnfims")
+```
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+ADCTT007_cod_idcontra <- qhive("select partition_id,
+       count(distinct cod_idcontra) as count_distinct_cod_idcontra
+       from da_martalamela.wallet_cod_trnfims
+       where trim(cod_trnfims) like 'ADCTT007'
+       and cast(partition_id as int) >= 20130930
+       group by partition_id
+       order by partition_id")
+
+graph_ADCTT007_cod_idcontra <- ggplot(data=ADCTT007_cod_idcontra, aes(x=partition_id, y=count_distinct_cod_idcontra, ymax = max(count_distinct_cod_idcontra), label=count_distinct_cod_idcontra)) + geom_line(aes(group=1), colour="#66CC99") + geom_point(colour="#66CC99") + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + ylab("# tarjetas distintas (cod_idcontra)") + ggtitle("# Tarjetas cod_trnfims='ADCTT007' - ALTA TARJETA WALLET") + geom_text(aes(y = count_distinct_cod_idcontra, vjust=-1), position = "stack", size = 3.5, colour="#66CC99")
+graph_ADCTT007_cod_idcontra
+```
+
+
++ ¿Y si partieramos del filtro cod_serv_dv IN (101, 102) tendríamos PAN asociado a alguna transacción?
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select a.cod_trnfims as cod_trnfims,
+      transaccion.des_transaccion_txc as des_transaccion_txc,
+      a.count_distinct_cod_pan as count_distinct_cod_pan
+      from
+      (
+      select cod_trnfims, count(distinct cod_pan) as count_distinct_cod_pan
+      from da_martalamela.wallet_cod_serv_dv
+      group by cod_trnfims
+      ) a
+      left join
+      (
+        select distinct trim(cod_transaccion_txc) as cod_transaccion_txc, des_transaccion_txc
+        from da_catalogos.transaccion_txc
+      ) transaccion
+      on trim(a.cod_trnfims)=trim(transaccion.cod_transaccion_txc)
+      where count_distinct_cod_pan > 10
+      order by count_distinct_cod_pan desc")
+```
+
++ ¿Y código de contrato asociado a alguna transacción?
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select a.cod_trnfims as cod_trnfims,
+      transaccion.des_transaccion_txc as des_transaccion_txc,
+      a.count_distinct_cod_idcontra as count_distinct_cod_idcontra
+      from
+      (
+      select cod_trnfims, count(distinct cod_idcontra) as count_distinct_cod_idcontra
+      from da_martalamela.wallet_cod_serv_dv
+      group by cod_trnfims
+      ) a
+      left join
+      (
+        select distinct trim(cod_transaccion_txc) as cod_transaccion_txc, des_transaccion_txc
+        from da_catalogos.transaccion_txc
+      ) transaccion
+      on trim(a.cod_trnfims)=trim(transaccion.cod_transaccion_txc)
+      where count_distinct_cod_idcontra > 10
+      order by count_distinct_cod_idcontra desc")
+```
+
+Si volvemos al gráfico general de transacciones asociadas a Wallet, vemos que a lo largo de varios meses los registros asociados a los códigos de transacción cod_trnfims='ADCTT007' y '00001494' toman los mismos valores y tienen un descriptivo similar. ¿Hacen referencia a la misma transacción? ¿Pertenecen a los mismos clientes? ¿Qué debemos considerar como evento de **ALTA TARJETA WALLET**?
+
+Si hacemos el gráfico evolutivo de ambos códigos de transacción tenemos que:
+
+```{r eval=TRUE, echo=FALSE, cache=TRUE, fig.width=12, fig.height=7}
+alta_tarjeta_wallet <- qhive("select a.cod_trnfims as cod_trnfims,
+                            transaccion.des_transaccion_txc as des_transaccion_txc,
+                            a.partition_id as partition_id,
+                            a.count_distinct_cod_pers_trs as count_distinct_cod_pers_trs
+                            from (
+                              select cod_trnfims,
+                              partition_id,
+                              count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+                              from da_martalamela.wallet_cod_trnfims
+                              where cast(partition_id as int) >= 20130930
+                              and (trim(cod_trnfims) like '00001494'
+                              or trim(cod_trnfims) like 'ADCTT007')
+                              group by cod_trnfims, partition_id
+                            ) a
+                            left join
+                            (
+                              select distinct trim(cod_transaccion_txc) as cod_transaccion_txc, des_transaccion_txc
+                              from da_catalogos.transaccion_txc
+                            ) transaccion
+                            on trim(a.cod_trnfims)=trim(transaccion.cod_transaccion_txc)")
+
+alta_tarjeta_wallet$cod_trnfims_des_transaccion_txc <- paste0(alta_tarjeta_wallet$cod_trnfims,"-",alta_tarjeta_wallet$des_transaccion_txc)
+
+graph_alta_tarjeta_wallet <- ggplot(data=alta_tarjeta_wallet, aes(x=partition_id, y=count_distinct_cod_pers_trs, group=cod_trnfims_des_transaccion_txc, colour=cod_trnfims_des_transaccion_txc, ymax = max(count_distinct_cod_pers_trs), label=count_distinct_cod_pers_trs)) + geom_line() + geom_point() + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + ylab("# clientes distintos") + ggtitle("# Clientes mensual - Alta Tarjeta WALLET") + theme(legend.title=element_blank())
+graph_alta_tarjeta_wallet
+```
+
+Decidimos que la transacción "Alta tarjeta Wallet" será la asociada al código 'ADCTT007'. Comprobamos cómo podríamos realizar correctamente el conteo de las altas (conteo a nivel de cliente? a nivel de PAN de tarjeta? count(*) nos daría el total de tarjetas?):
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select cod_pers_trs, count(*) as count_cod_trnfims
+from da_martalamela.wallet_cod_trnfims
+where trim(cod_trnfims) like 'ADCTT007'
+and cod_pers_trs not like '%@%'
+group by cod_pers_trs
+order by count_cod_trnfims desc
+LIMIT 10")
+```
+
+Vemos que hay clientes que tienen muchos registros catalogados como "Alta tarjeta Wallet".
+Por ejemplo el cliente 032211315 tiene registros duplicados para altas de tarjeta WALLET en el mismo día (cambia su HH:MM:SS), todos ellos asociados a un mismo contrato, pero el código PAN de la tarjeta no viene informado para este tipo de transacción:
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select fec_soli_trn,hms_soli_trn,cod_trnfims,cod_serv_dv,cod_idcontra,cod_pers_trs,partition_id
+from da_pro.transacciones_por_canal
+where cod_pers_trs = '032211315'
+and trim(cod_trnfims) like 'ADCTT007'
+and cast(partition_id as int)=20140331
+order by fec_soli_trn
+LIMIT 10")
+```
+
++ ¿Tenemos captada toda la información relativa a WALLET con los valores de cod_serv_dv y cod_trnfims que hemos seleccionado? Tendríamos por ejemplo que ser capaces de distinguir entre los tipos de tarjeta WALLET (HCE contracts/virtual cards/Stickers) y actualmente no podemos.
+Estudiamos en los catálogos de TxC qué otros valores podríamos estar perdiendo:
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select distinct cod_detalle_evento_trn, des_detalle_evento_trn
+from da_catalogos.detalle_evento_trn
+where des_detalle_evento_trn like '%HCE%'")
+
+qhive("select distinct trim(cod_transaccion_txc) as cod_transaccion_txc, des_transaccion_txc
+from da_catalogos.transaccion_txc
+where des_transaccion_txc like '%HCE%'")
+
+qhive("select distinct cod_detalle_evento_trn, des_detalle_evento_trn
+from da_catalogos.detalle_evento_trn
+where des_detalle_evento_trn like '%VIRTUAL%'")
+
+qhive("select * from da_martalamela.wallet_cod_trnfims
+where cast(cod_serv_dv as int) = 117
+or cast(cod_serv_dv as int) = 60 LIMIT 5")
+
+qhive("select distinct trim(cod_transaccion_txc) as cod_transaccion_txc, des_transaccion_txc
+from da_catalogos.transaccion_txc
+where des_transaccion_txc like '%VIRTUAL%'")
+
+qhive("select * from da_martalamela.wallet_cod_serv_dv
+where cod_trnfims like 'ADCTT009'
+or cod_trnfims like 'TCTFT971' LIMIT 5")
+
+qhive("select distinct cod_detalle_evento_trn, des_detalle_evento_trn
+from da_catalogos.detalle_evento_trn
+where des_detalle_evento_trn like '%STICK%'")
+
+qhive("select * from da_martalamela.wallet_cod_trnfims
+where cast(cod_deve_trn as int) = 869 LIMIT 5")
+
+qhive("select * from da_martalamela.wallet_cod_serv_dv
+where cast(cod_deve_trn as int) = 869 LIMIT 5")
+
+qhive("select distinct trim(cod_transaccion_txc) as cod_transaccion_txc, des_transaccion_txc
+from da_catalogos.transaccion_txc
+where des_transaccion_txc like '%STICK%'")
+
+qhive("select distinct cod_producto, des_producto
+from da_catalogos.producto
+where des_producto like '%STICK%'")
+```
+
++ ¿Cómo se distribuyen los códigos de transacción "TRANSACCION MANTENIMIENTO" a lo largo del tiempo?
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+TCTFTYYJ <- qhive("select partition_id,
+       count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+       from da_martalamela.wallet_cod_trnfims
+       where trim(cod_trnfims) like 'TCTFTYYJ'
+       and cast(partition_id as int) >= 20130930
+       group by partition_id
+       order by partition_id")
+
+TCTFTYYK <- qhive("select partition_id,
+       count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+       from da_martalamela.wallet_cod_trnfims
+       where trim(cod_trnfims) like 'TCTFTYYK'
+       and cast(partition_id as int) >= 20130930
+       group by partition_id
+       order by partition_id")
+
+TCTFTYYL <- qhive("select partition_id,
+       count(distinct cod_pers_trs) as count_distinct_cod_pers_trs
+       from da_martalamela.wallet_cod_trnfims
+       where trim(cod_trnfims) like 'TCTFTYYL'
+       and cast(partition_id as int) >= 20130930
+       group by partition_id
+       order by partition_id")
+
+graph_TCTFTYYJ <- ggplot(data=TCTFTYYJ, aes(x=partition_id, y=count_distinct_cod_pers_trs, ymax = max(count_distinct_cod_pers_trs), label=count_distinct_cod_pers_trs)) + geom_line(aes(group=1), colour="#9900FF") + geom_point(colour="#9900FF") + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + ylab("# clientes distintos") + ggtitle("# Clientes cod_trnfims='TCTFTYYJ' Trans Mant NFC Wallet") + geom_text(aes(y = count_distinct_cod_pers_trs, vjust=-1), position = "stack", size = 3.5, colour="#9900FF")
+graph_TCTFTYYJ
+
+graph_TCTFTYYK <- ggplot(data=TCTFTYYK, aes(x=partition_id, y=count_distinct_cod_pers_trs, ymax = max(count_distinct_cod_pers_trs), label=count_distinct_cod_pers_trs)) + geom_line(aes(group=1), colour="#CC00CC") + geom_point(colour="#CC00CC") + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + ylab("# clientes distintos") + ggtitle("# Clientes cod_trnfims='TCTFTYYK' Trans Mant MMPP Wallet") + geom_text(aes(y = count_distinct_cod_pers_trs, vjust=-1), position = "stack", size = 3.5, colour="#CC00CC")
+graph_TCTFTYYK
+
+graph_TCTFTYYL <- ggplot(data=TCTFTYYL, aes(x=partition_id, y=count_distinct_cod_pers_trs, ymax = max(count_distinct_cod_pers_trs), label=count_distinct_cod_pers_trs)) + geom_line(aes(group=1), colour="#FF00CC") + geom_point(colour="#FF00CC") + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + ylab("# clientes distintos") + ggtitle("# Clientes cod_trnfims='TCTFTYYL' Trans Mant CUPONING Wallet") + geom_text(aes(y = count_distinct_cod_pers_trs, vjust=-1), position = "stack", size = 3.5, colour="#FF00CC")
+graph_TCTFTYYL
+```
+
++ ¿Existe importe asociado a alguna de las transacciones seleccionadas como WALLET?
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select cod_trnfims, sum(imp_trans) as sum_imp_trans
+      from da_martalamela.wallet_cod_trnfims
+      group by cod_trnfims
+      order by cod_trnfims")
+```
+
++ ¿Y en las transacciones asociadas a servicios WALLET (101,102) tenemos importe asociado informado?
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select a.cod_trnfims as cod_trnfims,
+      transaccion.des_transaccion_txc as des_transaccion_txc,
+      a.sum_imp_trans as sum_imp_trans
+      from
+      (
+      select cod_trnfims, sum(imp_trans) as sum_imp_trans
+      from da_martalamela.wallet_cod_serv_dv
+      group by cod_trnfims
+      ) a
+      left join
+      (
+        select distinct trim(cod_transaccion_txc) as cod_transaccion_txc, des_transaccion_txc
+        from da_catalogos.transaccion_txc
+      ) transaccion
+      on trim(a.cod_trnfims)=trim(transaccion.cod_transaccion_txc)
+      where sum_imp_trans > 0
+      order by sum_imp_trans desc")
+```
+
+Veámos cómo se distribuyen esos importes (en k €) mes a mes. ¿Podemos identificar volúmenes similares a los que se plasman en el dashboard WALLET? Ampliamos además el gráfico de las transacciones que parecen más interesantes:
+
+```{r eval=TRUE, echo=FALSE, cache=TRUE, fig.width=12, fig.height=7}
+imp_trans_partition <- qhive("select a.cod_trnfims as cod_trnfims,
+                            transaccion.des_transaccion_txc as des_transaccion_txc,
+                            a.partition_id as partition_id,
+                            a.sum_imp_trans as sum_imp_trans
+                            from
+                            (
+                            select cod_trnfims, partition_id, sum(imp_trans) as sum_imp_trans
+                            from da_martalamela.wallet_cod_serv_dv
+                            group by cod_trnfims, partition_id
+                            ) a
+                            left join
+                            (
+                              select distinct trim(cod_transaccion_txc) as cod_transaccion_txc, des_transaccion_txc
+                              from da_catalogos.transaccion_txc
+                            ) transaccion
+                            on trim(a.cod_trnfims)=trim(transaccion.cod_transaccion_txc)
+                            where sum_imp_trans > 0 and cast(partition_id as int) >= 20140731 and cast(partition_id as int) <= 20150131
+                            order by sum_imp_trans desc")
+
+imp_trans_partition$cod_trnfims_des_transaccion_txc <- paste0(imp_trans_partition$cod_trnfims,"-",imp_trans_partition$des_transaccion_txc)
+imp_trans_partition$sum_imp_trans_k <- imp_trans_partition$sum_imp_trans/1000
+
+cast(imp_trans_partition, cod_trnfims_des_transaccion_txc ~ partition_id, fun.aggregate=sum, value="sum_imp_trans_k")
+
+graph_imp_trans_partition <- ggplot(data=imp_trans_partition, aes(x=partition_id, y=sum_imp_trans_k, group=cod_trnfims_des_transaccion_txc, colour=cod_trnfims_des_transaccion_txc, ymax = max(sum_imp_trans_k))) + geom_line() + geom_point() + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + ylab("volume k €") + ggtitle("Volume k € x cod_trnfims") + theme(legend.title=element_blank())
+graph_imp_trans_partition
+
+graph_imp_trans_00000346 <- ggplot(data=imp_trans_partition[imp_trans_partition$cod_trnfims=='00000346',], aes(x=partition_id, y=sum_imp_trans_k, group=cod_trnfims_des_transaccion_txc, ymax = max(sum_imp_trans_k), label = sum_imp_trans_k)) + geom_line(colour="#FF0033") + geom_point(colour="#FF0033") + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + ylab("volume k €") + ggtitle("Volume k € x cod_trnfims='00000346'") + theme(legend.title=element_blank()) + geom_text(aes(y = sum_imp_trans_k, vjust=-1), position = "stack", size = 3.5, colour="#FF0033")
+graph_imp_trans_00000346
+
+graph_imp_trans_00001638 <- ggplot(data=imp_trans_partition[imp_trans_partition$cod_trnfims=='00001638',], aes(x=partition_id, y=sum_imp_trans_k, group=cod_trnfims_des_transaccion_txc, ymax = max(sum_imp_trans_k), label = sum_imp_trans_k)) + geom_line(colour="#3399FF") + geom_point(colour="#3399FF") + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + ylab("volume k €") + ggtitle("Volume k € x cod_trnfims='00001638'") + theme(legend.title=element_blank()) + geom_text(aes(y = sum_imp_trans_k, vjust=-1), position = "stack", size = 3.5, colour="#3399FF")
+graph_imp_trans_00001638
+
+graph_imp_trans_TCTFTL66 <- ggplot(data=imp_trans_partition[imp_trans_partition$cod_trnfims=='TCTFTL66',], aes(x=partition_id, y=sum_imp_trans_k, group=cod_trnfims_des_transaccion_txc, ymax = max(sum_imp_trans_k), label = sum_imp_trans_k)) + geom_line(colour="#9900FF") + geom_point(colour="#9900FF") + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + ylab("volume k €") + ggtitle("Volume k € x cod_trnfims='TCTFTL66'") + theme(legend.title=element_blank()) + geom_text(aes(y = sum_imp_trans_k, vjust=-1), position = "stack", size = 3.5, colour="#9900FF")
+graph_imp_trans_TCTFTL66
+```
+
+
+
+
+
+
+**Sumidero: traza de un cliente a través de la app Wallet**
+
+Accedemos al dato de Sumidero para intentar ver la traza que deja un cliente en su paso por la aplicación Wallet.
+Empezamos viendo qué dato tenemos en la tabla Hive de muestra extraída de Sumidero, ubicada en sumidero_master.weblogs.
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_sumidero_masters_web_logs as
+                  select * from sumidero_master.weblogs where upper(appname) like '%WALL%'")
+
+qhive("select appname,
+      appversion,
+      appcountry,
+      session,
+      uid,
+      user_id,
+      platform,
+      platformversion,
+      device,
+      method,
+      connection,
+      extra1,
+      extra2,
+      extra3,
+      source,
+      date
+      from da_martalamela.wallet_sumidero_masters_web_logs LIMIT 10")
+```
+
++ La variable _method_ marca la traza del cliente por lo que parece, así que hacemos un conteo de qué valores toma y con qué frecuencia:
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+method <- qhive("select method,
+                  count(distinct user_id) as count_distinct_user_id,
+                  count(*) as count_all
+                  from da_martalamela.wallet_sumidero_masters_web_logs
+                  group by method
+                  order by count_all desc")
+head(method)
+```
+
++ ¿Cuál es el identificador de usuario válido? Existen uid, userid, user_id y clientid así que hacemos algunos conteos y comprobamos cómo se relacionan entre sí:
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select count(distinct uid)
+      from da_martalamela.wallet_sumidero_masters_web_logs
+      where uid is not null")
+qhive("select count(distinct userid)
+      from da_martalamela.wallet_sumidero_masters_web_logs
+      where userid is not null")
+qhive("select count(distinct clientid)
+      from da_martalamela.wallet_sumidero_masters_web_logs
+      where clientid is not null")
+qhive("select count(distinct user_id)
+      from da_martalamela.wallet_sumidero_masters_web_logs
+       where user_id is not null")
+```
+
+Descartamos userid y clientid por no estar informados. Además uid hace referencia al hash del indentificador hardware del terminal.
+Parece que el identificador único de cliente que debemos utilizar viene dado por la variable user_id, que habrá que asociar con su código único de persona. **¿MÉTODO DE HASHEO?**
+Como sólo está informado en algunos casos, tendremos que ver en cuántos y si podemos aumentar la tasa de informados haciendo la asociación terminal-cliente (uid-user_id).
+
+
++ ¿Qué información tienen las variables extra1, extra2 y extra3?
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select extra1,
+      count(distinct user_id) as count_distinct_user_id,
+      count(*) as count_all
+      from da_martalamela.wallet_sumidero_masters_web_logs
+      where extra1 is not null and extra1 != ''
+      group by extra1
+      order by count_all desc
+      LIMIT 10")
+qhive("select extra2,
+      count(distinct user_id) as count_distinct_user_id,
+      count(*) as count_all
+      from da_martalamela.wallet_sumidero_masters_web_logs
+      where extra2 is not null and extra2 != ''
+      group by extra2
+      order by count_all desc
+      LIMIT 10")
+qhive("select extra3,
+      count(distinct user_id) as count_distinct_user_id,
+      count(*) as count_all
+      from da_martalamela.wallet_sumidero_masters_web_logs
+      where extra3 is not null and extra3 != ''
+      group by extra3
+      order by count_all desc
+      LIMIT 10")
+
+qhive("select extra1, method,
+      count(distinct user_id) as count_distinct_user_id,
+      count(*) as count_all
+      from da_martalamela.wallet_sumidero_masters_web_logs
+      where extra1 is not null and extra1 != ''
+      group by extra1, method
+      order by count_all desc
+      LIMIT 10")
+qhive("select extra2, method,
+      count(distinct user_id) as count_distinct_user_id,
+      count(*) as count_all
+      from da_martalamela.wallet_sumidero_masters_web_logs
+      where extra2 is not null and extra2 != ''
+      group by extra2, method
+      order by count_all desc
+      LIMIT 10")
+qhive("select extra3, method,
+      count(distinct user_id) as count_distinct_user_id,
+      count(*) as count_all
+      from da_martalamela.wallet_sumidero_masters_web_logs
+      where extra3 is not null and extra3 != ''
+      group by extra3, method
+      order by count_all desc
+      LIMIT 10")
+```
+
++ ¿Hay otros appname asociados a valores de method que pueden parecer de WALLET?
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select method, appname, count(*) as conteo
+      from sumidero_master.weblogs where method in ('StickerMovil-Info','WalletInvocation','cancelWalletVodafone',
+      'appStandalonePushWalletBubble','appStandaloneWalletHCEScreenDischarge',
+      'appStandaloneMenuItemGoToWallet','traceWallet','appStandaloneCloseWalletBubble',
+      'getWalletStatementByMonth','StickerMovil-Bloquear','getDniListFromWalletList',
+      'transferFromBBVAAccountToWallet','appStandaloneWalletHCEScreenContinue',
+      'transferFromWalletToWallet','get_WalletLimit','lockWallet',
+      'appStandaloneInstallWalletFromBubble','getWalletBalance','StickerMovil-CambiarPIN',
+      'appStandaloneShowWalletBubble')
+      group by appname, method")
+```
+
+Se ha realizado una petición de extracción de datos de Sumidero para todo el histórico disponible, aplicando el filtro appname='wall'. La tabla se ha almacenado en sumidero_master.weblogs_wallet. Veámos qué contiene (ya es DATO REAL de aplicación WALLET) basándonos en lo que hemos podido comprobar anteriormente:
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select appname,
+      appversion,
+      appcountry,
+      session,
+      uid,
+      user_id,
+      platform,
+      platformversion,
+      device,
+      method,
+      connection,
+      extra1,
+      extra2,
+      extra3,
+      source,
+      date
+      from sumidero_master.weblogs_wallet LIMIT 10")
+
+qhive("select method,
+      count(distinct user_id) as count_distinct_user_id,
+      count(*) as count_all
+      from sumidero_master.weblogs_wallet
+      group by method
+      order by count_all desc
+      LIMIT 10")
+
+qhive("select method, extra3,
+      count(distinct user_id) as count_distinct_user_id,
+      count(*) as count_all
+      from sumidero_master.weblogs_wallet
+      where extra3 is not null and extra3 != ''
+      group by method, extra3
+      order by count_all desc
+      LIMIT 10")
+```
+
+Hacemos la asociación terminal-cliente (uid-user_id) para ver en cuántos casos podemos identificar al cliente que realiza la operativa en la app Wallet:
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+qhive("select count(distinct uid)
+      from sumidero_master.weblogs_wallet")
+qhive("select count(distinct user_id)
+      from sumidero_master.weblogs_wallet
+      where user_id != '' and user_id is not null")
+
+# Asociación 1-1
+# Buscamos si esos uid de terminal tienen algún registro más con user_id vacío y le pegamos nuestro user_id identificado
+# Si hay varios user_id asociados a un mismo uid, elegimos el que más veces se repita
+do.hive("CREATE TABLE IF NOT EXISTS da_martalamela.wallet_asociacion_uid_user_id AS 
+        SELECT
+          uid, 
+          user_id 
+        FROM 
+          (
+          SELECT 
+            uid,
+            user_id, 
+            rank() over (PARTITION BY uid ORDER BY connections DESC) as rank
+          FROM 
+            ( 
+            SELECT
+              uid, 
+              user_id, 
+              count(*) as connections
+            FROM sumidero_master.weblogs_wallet
+              where user_id != '' AND user_id is not null
+            GROUP BY 
+              uid, 
+              user_id 
+            ) V
+          ) R
+        WHERE rank=1")
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_weblogs_wallet_user_id as
+      select a.*, b.user_id as user_id_not_null
+      from sumidero_master.weblogs_wallet a
+      left join da_martalamela.wallet_asociacion_uid_user_id b
+      on a.uid=b.uid")
+
+qhive("select count(distinct user_id_not_null)
+      from da_martalamela.wallet_weblogs_wallet_user_id
+      where user_id_not_null is not null")
+```
+
+
+**Hasheado SH1 a través del DNI de cliente:**
+
+Sacamos de TxC todos los cod_pers_trs que tienen algún registro asociado a WALLET, bien por el cod_serv_dv 101/102 o bien por el cod_trnfims entre los códigos de transacción etiquetados como WALLET. Después lo cruzamos con da_pro.clientes_corp para tener su DNI y ya poder realizar el hasheo.
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_cod_pers_trs_hasheo as
+select distinct cod_pers_trs
+from da_pro.transacciones_por_canal
+where (cast(cod_serv_dv as int) in (101,102)
+or (trim(cod_trnfims) like '00001492'
+or trim(cod_trnfims) like '00001493'
+or trim(cod_trnfims) like '00001494'
+or trim(cod_trnfims) like '00001663'
+or trim(cod_trnfims) like '00001684'
+or trim(cod_trnfims) like 'ADCTT007'
+or trim(cod_trnfims) like 'TCTFTW35'
+or trim(cod_trnfims) like 'TCTFTYYJ'
+or trim(cod_trnfims) like 'TCTFTYYK'
+or trim(cod_trnfims) like 'TCTFTYYL'))
+and cast(partition_id as int) >= 20141031")
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_dni_hasheo as
+        select a.cod_pers_trs,
+        b.cod_documps1
+        from da_martalamela.wallet_cod_pers_trs_hasheo a
+        left join da_pro.clientes_corp b
+        on a.cod_pers_trs = b.cod_persctpn")
+```
+
+Usamos un script de Python para hashear esos DNI, y los user_id asociados los guardamos en una tabla Hive en da_martalamela.wallet_output_padding.
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_weblogs_wallet_all as
+      select a.*, b.cod_pers_trs, b.cod_documps1
+      from da_martalamela.wallet_weblogs_wallet_user_id a
+      left join da_martalamela.wallet_output_padding b
+      on cast(trim(a.user_id_not_null) as string)=cast(trim(b.user_id) as string)")
+
+qhive("select count(distinct cod_pers_trs)
+      from da_martalamela.wallet_weblogs_wallet_all
+      where cod_pers_trs is not null")
+```
+
+**Acciones comerciales** donde la variable des_acom_x hace referencia a Wallet. Extraemos la acción comercial y algunas variables relevantes:
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_acciones_comerciales as
+select cod_acom,
+des_acom_x,
+cod_oricamp,
+cod_canal,
+cod_agruprod,
+fap_acom,
+fvt_acom
+from sinfo_master.acciones_comerciales
+where upper(des_acom_x) like '%WALL%'
+order by fap_acom")
+
+qhive("select cod_acom,
+      des_acom_x,
+      cod_oricamp,
+      cod_canal,
+      cod_agruprod,
+      fap_acom,
+      fvt_acom
+      from da_martalamela.wallet_acciones_comerciales LIMIT 10")
+```
+
++Se ha comprobado que el resto de valores relevantes que toma la variable des_acom_x no hacen referencia a WALLET.
+
+Vemos a lo largo del tiempo cómo se han distribuido las diferentes acciones comerciales relacionadas con Wallet en 2014 (por mes de inicio de la acción):
+
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+acciones_comerciales <- qhive("select des_acom_x,
+year(fap_acom) as year_fap_acom,
+month(fap_acom) as month_fap_acom,
+count(*) as count_acciones_comerciales
+from da_martalamela.wallet_acciones_comerciales
+where year(fap_acom) = 2014
+group by des_acom_x,year(fap_acom),month(fap_acom)
+order by count_acciones_comerciales desc")
+
+acciones_comerciales$yyyymm <- paste0(acciones_comerciales$year_fap_acom,
+                                      ifelse(acciones_comerciales$month_fap_acom>=10,
+                                             acciones_comerciales$month_fap_acom,
+                                             paste0("0",acciones_comerciales$month_fap_acom)))
+
+cast(acciones_comerciales, des_acom_x ~ yyyymm, fun.aggregate=sum, value="count_acciones_comerciales")
+
+acciones_comerciales_group <- aggregate(count_acciones_comerciales ~ yyyymm, acciones_comerciales, sum)
+
+graph_acciones_comerciales <- ggplot(data=acciones_comerciales_group, aes(x=yyyymm, y=count_acciones_comerciales, ymax = max(count_acciones_comerciales), label=count_acciones_comerciales)) + geom_line(aes(group=1), colour="#66CC99") + geom_point(colour="#66CC99") + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + ylab("# acciones comerciales") + ggtitle("# Acciones comerciales mensual") + geom_text(aes(y = count_acciones_comerciales), position = "stack", size = 3.5, colour="#66CC99")
+graph_acciones_comerciales
+```
+
+**Oportunidades comerciales** sobre clientes donde la acción comercial está entre las que acabamos de identificar como %wallet%. Extraemos las variables que consideramos relevantes:
+
+* cod_acom (código de la acción comercial). El campo key para cruzar ambas tablas (oportunidad y acciones comerciales)
+* cod_persona
+* cod_agruprod (tipo de producto: 464 hipotecario, etc)
+* cod_oricamp (S para campañas de sinfo)
+* fap_acom (fecha de inicio de la campaña)
+* fvt_acom (fecha de cierre de la campañas, teniendo en cuenta que en general se añade un mes más de margen durante el cual el cliente podría seguir contratando)
+* xsn_exito (respuesta Si o No del éxito de la campaña)
+* fec_resenv (fecha envio)
+* fec_respz (fecha de la respuesta)
+* des_acom_x (descripción sobre la campaña)
+* cod_canal (medio por el que se lanza la campaña)  
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_oportunidad_comercial as
+select a.cod_acom,
+a.cod_persona,
+a.cod_agruprod,
+a.cod_oricamp,
+a.fec_resenv,
+b.fap_acom,
+b.fvt_acom,
+a.xsn_exito,
+a.fec_respz,
+b.des_acom_x,
+a.cod_canal
+from sinfo_master.oportunidad_comercial a
+left join da_martalamela.wallet_acciones_comerciales b
+on a.cod_acom=b.cod_acom
+where b.cod_acom is not null")
+
+qhive("select cod_acom,
+cod_persona,
+fec_resenv,
+fvt_acom,
+xsn_exito,
+fec_respz,
+des_acom_x,
+cod_canal
+from da_martalamela.wallet_oportunidad_comercial LIMIT 10")
+```
+
+Tenemos **`r qhive("select count(distinct cod_persona) from da_martalamela.wallet_oportunidad_comercial")`** clientes distintos que han recibido cualquiera de las **`r qhive("select count(distinct cod_acom) from da_martalamela.wallet_acciones_comerciales")`** acciones comerciales etiquetadas como Wallet entre las fechas **`r qhive(" select MIN(fec_resenv) from da_martalamela.wallet_oportunidad_comercial")`** y **`r qhive("select MAX(fec_resenv) from da_martalamela.wallet_oportunidad_comercial")`**.
+
+Vemos el ratio de exito de cada campaña por mes:
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+oportunidad_comercial <- qhive("select des_acom_x,
+                                      year(fap_acom) as year_fap_acom,
+                                      month(fap_acom) as month_fap_acom,
+                                      xsn_exito,
+                                      count(*) as count_oportunidad_comercial
+                                from da_martalamela.wallet_oportunidad_comercial
+                                where year(fap_acom) = 2014
+                                group by des_acom_x,year(fap_acom),month(fap_acom), xsn_exito
+                                order by count_oportunidad_comercial desc")
+
+oportunidad_comercial$yyyymm <- paste0(oportunidad_comercial$year_fap_acom,
+                                      ifelse(oportunidad_comercial$month_fap_acom>=10,
+                                             oportunidad_comercial$month_fap_acom,
+                                             paste0("0",oportunidad_comercial$month_fap_acom)))
+                                             
+oportunidad_comercial <- ddply(oportunidad_comercial, .(des_acom_x , yyyymm), summarize, ratio = sum(count_oportunidad_comercial[xsn_exito == "S"]) / sum(count_oportunidad_comercial ))
+
+cast(oportunidad_comercial, des_acom_x ~ yyyymm, fun.aggregate=sum, value="ratio")
+```
+
+
+**Navegación web** donde la variable _pages_ se asocia a navegación a través de la sección Wallet:
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select substr(des_pages,1,50) as des_pages,
+count(*) as count_all,
+count(distinct cod_persona) as count_distinct_cod_pers_trs
+from omniture.omniture_bbvamice_altas
+where upper(des_pages) like '%WALL%'
+group by des_pages
+order by count_all desc
+LIMIT 15")
+```
+
+**Otras posibles fuentes de información**
+
+¿Pagos en comercios con nombre asociado a wallet? No identificables porque es una forma de pago en comercios habituales:
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select distinct des_razsoces
+from da_pro.comercios_corp
+where upper(des_razsoces) like '%WALLET%'")
+
+qhive("select distinct des_razsoces
+from da_pro.comercios_espana
+where upper(des_razsoces) like '%WALLET%'")
+
+qhive("select distinct name
+from catalogos_estaticos.fuc_comercios_todos
+where upper(name) like '%WALLET%'")
+```
+
+¿Movimientos en cuenta asociados a wallet? No identificables porque son pagos con tarjeta:
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select distinct des_tipo_movimiento
+from da_catalogos.tipo_movimiento
+where upper(des_tipo_movimiento) like '%WALL%'")
+```
+

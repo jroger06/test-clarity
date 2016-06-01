@@ -1,0 +1,580 @@
+---
+title: "Pymes_Explore_Renting"
+author: "Marta Lamela"
+date: "12/1/2016"
+output: html_document
+---
+
+
+```{r, echo=FALSE}
+# This is the first mandatory section.
+
+title     <- '[Pymes]: Exploration of Renting contracts'
+keywords  <- 'pymes,sme,renting'
+```
+
+```{r mandatory, echo=FALSE}
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+
+source('~/bda_clarity/tools/warehouse_basics.R')
+source('~/bda_clarity/tools/methods_connect.R')
+source('~/bda_clarity/tools/write.hive.R')
+```
+
+```{r libraries, echo=FALSE}
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(plyr))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(reshape))
+suppressPackageStartupMessages(library(reshape2))
+suppressPackageStartupMessages(library(googleVis))
+suppressPackageStartupMessages(library(scales))
+suppressPackageStartupMessages(library(reshape))
+```
+
+```{r environment}
+month <- '20151130'
+month_timestamp <- "unix_timestamp('2015-11-30 00:00:00')"
+```
+
+```{r dependencies, echo=FALSE}
+contrapartida <- clarity.use_table(DEPENDENCY_LASTPART_CATALOGO, 'contrapartida')
+
+global <- clarity.use_table(DEPENDENCY_LASTPART_CATALOGO, 'segmentacion_global', 
+                            select='cod_sgmento, des_sgmento')
+
+segmento <- clarity.use_table(DEPENDENCY_LASTPART_PRO_TABLE, 'segmento_global')
+
+intervinientes <- clarity.use_table(DEPENDENCY_LASTPART_PRO_TABLE, 'intervinientes_corp')
+
+clientes <- clarity.use_table(DEPENDENCY_LASTPART_PRO_TABLE, 'clientes_corp')
+
+movimientos <- clarity.use_table(DEPENDENCY_FULL_PRO_TABLE, 'movimientos_cuentas_corp')
+```
+
+
+### *Objective:* PYMES Renting contracts 
+
+### How can we see RENTING *inside* the bank?
+
+There are several RENTING products, and different ways are found in the data:
+
+* RENTING en Epígrafes (cod_prtda):
+  + **000006750  .TOTAL RENTING**
+  + 000006752	. RENTING AUTO
+  + 000006754	. RESTO RENTING
+  + 000006756	.  RENTING INMOBILIARIO
+  + 000006758	.   EDIFICIOS Y OTRAS CONSTR.
+  + 000006760	.   FINCAS RÚSTICAS,PARCELAS Y SOLARES
+  + 000006762	.  RENTING MOBILIARIO
+  + 000006764	.   EQUIPOS ELECTRONICOS
+  + 000006766	.   MOBILIARIO
+  + 000006768	.   INSTALACIONES
+  + 000006770	.   MATERIAL MOVIL
+  + 000006772	.   MAQUINAS
+  + 000006774	.   SOFTWARE
+  + 000006776	.  RESTO RENTING
+  + 000006778	.   RESTO RENTING
+  + 000006780	. RESTO RENTING
+
+* RENTING en Contrapartida: 
+  + **505: RENTING**
+  + 506, 507, 508: RENTING (sin uso actualmente)
+  + 355: PROPUESTAS DE RENTING
+
+All this analysis is done for **ACTIVE** renting contracts, identified with cod_situdw = 'A' or NULL (Epígrafes) or fec_cancel not informed and fec_vencto not informed or future (Contrapartida). See *Queries* section below.
+
+Also for the holder **1st TITULAR**. It could be changed with cod_tipotit = 'T' (Epígrafes) or trim(cod_ctippe)='TIT' without cod_ordentit = 1.
+
+```{r createContrapartidaRenting, eval=FALSE}
+do.hive("drop table da_pymes.contrapartida_renting")
+
+q <- paste0("create table da_pymes.contrapartida_renting as 
+  select cod_pgccontr as cod_contrapartida, max(des_ctrpartd) as des_contrapartida
+  from da_catalogos.contrapartida 
+  where cod_pgccontr in 
+    ('0505', '0506', '0507', '0508')
+      and partition_id = '", month, "'
+  group by cod_pgccontr
+")
+do.hive(q)
+do.impala("invalidate metadata da_pymes.contrapartida_renting")
+```
+
+```{r getContrapartidaRenting, eval=FALSE}
+q <- "select * from da_pymes.contrapartida_renting"
+dd <- qimpala(q)
+```
+
+```{r createProdGestRenting, eval=FALSE}
+partida <- c(6750,6752,6754,6756,6758,6760,6762,6764,6766,6768,6770,6772,6774,6776,6778,6780)
+estado <- rep(33, length(partida))
+descripcion <- c("TOTAL RENTING",
+"RENTING AUTO",
+"RESTO RENTING",
+"RENTING INMOBILIARIO",
+"EDIFICIOS Y OTRAS CONSTR.",
+"FINCAS RÚSTICAS,PARCELAS Y SOLARES",
+"RENTING MOBILIARIO",
+"EQUIPOS ELECTRONICOS",
+"MOBILIARIO",
+"INSTALACIONES",
+"MATERIAL MOVIL",
+"MAQUINAS",
+"SOFTWARE",
+"RESTO RENTING",
+"RESTO RENTING",
+"RESTO RENTING")
+
+epigrafe_renting <- data.frame(estado, partida, descripcion)
+do.hive("drop table da_pymes.epigrafe_renting")
+
+write.hive(epigrafe_renting, "da_pymes.epigrafe_renting")
+do.impala("invalidate metadata da_pymes.epigrafe_renting")
+
+do.hive("drop table da_pymes.prod_gest_renting")
+
+q <- paste0("create table da_pymes.prod_gest_renting as 
+  select cast(cod_prodct as int) as cod_prodct, estado as cod_std, partida as cod_prtda, descripcion
+  from da_pro.catalogo_productos_gestion_epigrafes_relacion 
+    join da_pymes.epigrafe_renting ep on ep.estado = cast(cod_std as int) and ep.partida = cast(cod_prtda as int) 
+    and partition_id = '", month, "'
+")
+do.hive(q)
+do.impala("invalidate metadata da_pymes.prod_gest_renting")
+```
+
+```{r getProdGestRenting, eval=FALSE}
+q <- "select * from da_pymes.prod_gest_renting"
+dd <- qimpala(q)
+```
+
+
+## Quick Exploration
+
+```{r segmentoGlobalCatalogo, cache=TRUE, echo=FALSE}
+seg <- qimpala(paste0("select distinct cast(trim(cod_sgmento) as int) cod_global,
+               des_sgmento as des_global
+from da_catalogos.segmentacion_global 
+where partition_id = '", month, "'
+"))
+```
+
+### Contrapartidas
+
+Let's see the volume of this type of contracts.
+
+```{r rentingClients, eval=FALSE}
+do.hive("drop table da_pymes.clientes_renting_contrapartidas")
+q <- paste0("create table da_pymes.clientes_renting_contrapartidas as
+select cod_entalfa, cod_persctpn, ic.cod_idcontra as cod_idcontra, ic.cod_pgccontr as cod_pgccontr, des_contrapartida
+from da_pymes.contrapartida_renting as contr 
+join (select cod_entalfa, cod_persctpn, cod_idcontra, cod_pgccontr from da_pro.intervinientes_corp
+      where partition_id= '", month, "' and trim(cod_ctippe)='TIT' and cod_ordentit=1 -- and cod_entalfa = '0182'
+) ic
+  on trim(ic.cod_pgccontr)= cod_contrapartida
+join (select cod_pgccontr,cod_idcontra, fec_altacto, fec_vencto, fec_cancel
+      from da_pro.productos_contratados where partition_id= '", month, "'  -- and cod_entalfa = '0182'
+) pc
+  on trim(pc.cod_idcontra) = trim(ic.cod_idcontra)
+where fec_cancel is NULL and (fec_vencto is NULL or fec_vencto >= ", month_timestamp, ")
+")
+do.hive(q)
+do.impala("invalidate metadata da_pymes.clientes_renting_contrapartidas")
+```
+
+We obtain how many clients and contracts there are for each contrapartida, depending on the customer being Legal or Natural and their Global Segment.
+
+```{r getContrapartidas}
+query <- paste0("select cod_segmsubo, xti_persona, cod_pgccontr, cc.des_contrapartida, 
+  count(*) ncontr, count(distinct cli.cod_persctpn) ncli
+from da_pymes.clientes_renting_contrapartidas cli 
+  join da_pymes.contrapartida_renting cc on cc.cod_contrapartida = cli.cod_pgccontr
+  join da_pro.segmento_global sg on sg.cod_persctpn = cli.cod_persctpn and sg.partition_id = '", month, "' and sg.cod_entalfa = '0182'
+  join da_pro.clientes_corp corp on corp.cod_persctpn = cli.cod_persctpn and corp.partition_id = '", month, "' and corp.cod_entalfa = '0182'
+group by cod_segmsubo, xti_persona, 
+  cod_pgccontr, cc.des_contrapartida
+")
+contr <- qimpala(query)
+names(contr) <- c("global", "tipo_persona", "cod", "contrapartida", "ncontr", "ncli")
+```
+
+```{r}
+contr <- merge(contr, seg, by.x="global", by.y="cod_global")
+contr$des_global <- factor(contr$des_global,
+                           levels = contr$des_global[order(contr$global)], ordered=TRUE)
+```
+
+We split the total contracts by Type of Person (Legal or Natural) and the Global Segment inside the bank.
+
+```{r, fig.height=8, fig.width=10}
+
+ggplot(melt(data.table(contr)[,list(ncontr=sum(ncontr), ncli=sum(ncli)),by=c("contrapartida","tipo_persona")],
+            id=c("tipo_persona", "contrapartida")), 
+       aes(x=contrapartida, y=value, fill=tipo_persona, order=tipo_persona)) + 
+  geom_bar(stat="identity", position="dodge") + 
+  facet_wrap(~variable) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+ggplot(melt(contr, id=c("global", "des_global", "tipo_persona", "cod", "contrapartida")), 
+       aes(x=contrapartida, y=value, fill=tipo_persona, order=tipo_persona)) + 
+  geom_bar(stat="identity", position="fill") + 
+  facet_wrap(~variable) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+#ggplot(melt(contr, id=c("global", "tipo_persona", "cod", "contrapartida")), 
+ggplot(contr, aes(x=contrapartida, y=ncontr, fill=des_global, order=desc(global))) + 
+  geom_bar(stat="identity", position="stack") + 
+  scale_y_log10()+
+  facet_wrap(~tipo_persona, scales="free_y", ncol=2) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+```
+
+We can see that most of those contracts are held mostly by Legal customers.
+
+Now we plot the number of contracts and people only for the SMEs global segments: 35 and 36. 
+
+```{r, fig.height=8, fig.width=12, echo=FALSE}
+
+ggplot(melt(data.table(contr)[global%in%c("35","36"),list(ncontr=sum(ncontr), ncli=sum(ncli)),by=c("des_global", "contrapartida")], 
+            id=c("des_global", "contrapartida")), 
+       aes(x=contrapartida, y=value, fill=des_global)) + 
+  geom_bar(stat="identity") + 
+  #scale_y_log10()+
+  facet_wrap(~variable, scales="free_y") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+```
+
+Based on this approach, the number of SMEs that have active RENTING related activity is:
+
+```{r resultsContrapartida, echo=FALSE}
+data.table(contr)[global%in%c("35","36"),list(ncontr=sum(ncontr), ncli=sum(ncli)),by=c("des_global", "contrapartida")]
+```
+
+
+
+### Products
+
+```{r rentingClientsProdGest, eval=FALSE}
+do.hive("drop table da_pymes.clientes_renting_prod_gest")
+
+q <- paste0("create table da_pymes.clientes_renting_prod_gest as
+select cod_entalcli, cod_persctpn, cod_prodgest, cod_std, cod_prtda, descripcion, qnu_contrato
+from da_pymes.prod_gest_renting as prod 
+  join da_pro.agregacion_comercial_vinculacion agg on trim(cod_prodgest)= cod_prodct
+where partition_id= '", month, "' and trim(cod_tipotit)='M' and (trim(cod_situdw)='A' or cod_situdw is NULL)
+    -- and cod_entalcli = '0182'
+")
+do.hive(q)
+do.impala("invalidate metadata da_pymes.clientes_renting_prod_gest")
+```
+
+
+```{r getSegmentosGestion}
+query <- paste0("select cod_segmsubo, xti_persona, descripcion, 
+  sum(qnu_contrato) ncontr, count(distinct cli.cod_persctpn) ncli
+from da_pymes.clientes_renting_prod_gest cli 
+  join da_pro.segmento_global sg on sg.cod_persctpn = cli.cod_persctpn and sg.partition_id = '", month, "' and sg.cod_entalfa = '0182'
+  join da_pro.clientes_corp corp on corp.cod_persctpn = cli.cod_persctpn and corp.partition_id = '", month, "' and corp.cod_entalfa = '0182'
+group by cod_segmsubo, xti_persona, descripcion
+")
+prod <- qimpala(query)
+names(prod) <- c("global", "tipo_persona", "prod_gestion", "ncontr", "ncli")
+```
+
+
+```{r}
+prod <- merge(prod, seg, by.x="global", by.y="cod_global")
+prod$des_global <- factor(prod$des_global,
+                           levels = prod$des_global[order(prod$global)], ordered=TRUE)
+```
+
+
+We split the total contracts by Type of Person (Natural or Legal) and the Global Segment inside the bank.
+
+```{r, fig.height=8, fig.width=10}
+
+ggplot(melt(data.table(prod)[,list(ncontr=sum(ncontr), ncli=sum(ncli)),by=c("prod_gestion","tipo_persona")],
+            id=c("tipo_persona", "prod_gestion")), 
+       aes(x=prod_gestion, y=value, fill=tipo_persona, order=tipo_persona)) + 
+  geom_bar(stat="identity", position="stack") + 
+  #scale_y_log10()+
+  facet_wrap(~variable) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+ggplot(melt(prod, id=c("global", "des_global", "tipo_persona", "prod_gestion")),
+       aes(x=prod_gestion, y=value, fill=tipo_persona, order=tipo_persona)) + 
+  geom_bar(stat="identity", position="fill") + 
+  facet_wrap(~variable) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+ggplot(prod, aes(x=prod_gestion, y=ncontr, fill=des_global, order=desc(global))) + 
+  geom_bar(stat="identity", position="stack") + 
+  scale_y_log10()+
+  facet_wrap(~tipo_persona, scales="free_y", ncol=1) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+```
+
+```{r onlyPymes, fig.height=8, fig.width=10}
+ggplot(subset(prod, global%in%c("35","36")), aes(x=prod_gestion, y=ncontr, fill=des_global, order=desc(global))) + 
+  geom_bar(stat="identity", position="stack") + 
+  #scale_y_log10()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+```
+
+Based on this approach, and considering **TOTAL RENTING** includes all the products related to RENTING, the number of SMEs that have active RENTING activity is:
+
+```{r resultsProdGestion, echo=FALSE}
+data.table(prod)[global%in%c("35","36")&prod_gestion%in%c("TOTAL RENTING"),list(ncontr=sum(ncontr), ncli=sum(ncli)),by=c("des_global", "prod_gestion")]
+```
+
+
+
+## Let's merge previous approaches
+
+Now we merge together the contracts by *contrapartida* and *producto de gestión*.
+
+```{rpa totalrentingClients}
+q <- paste0("select cli.*, xti_persona, cod_segmsubo
+    from (select cod_persctpn, des_contrapartida as descripcion, 'contrapartida' as type
+      from da_pymes.clientes_renting_contrapartidas
+      -- where cod_entalfa = '0182'
+    union all
+      select cod_persctpn, descripcion as descripcion, 'producto' as type
+      from da_pymes.clientes_renting_prod_gest where descripcion like '%TOTAL RENTING%'
+    -- and cod_entalcli = '0182'
+    ) cli
+  join da_pro.clientes_corp corp on cli.cod_persctpn = corp.cod_persctpn and corp.partition_id = '", month, "' and corp.cod_entalfa = '0182'
+  join da_pro.segmento_global sg on sg.cod_persctpn = cli.cod_persctpn and sg.partition_id = '", month, "' and sg.cod_entalfa = '0182'
+  ")
+
+cli <- qimpala(q)
+```
+
+
+There are `r length(unique(cli$cod_persctpn))` clients that have at least one renting product. The average statistics:
+```{r}
+cli.n <- data.table(cli)[, list(n=.N, ntype=length(unique(type))), by=c("cod_persctpn")]
+summary(data.frame(cli.n)[,c("n", "ntype")])
+```
+
+On average, **`r percent(nrow(subset(cli.n, ntype==2))/nrow(cli.n))`** of clients have RENTING products by *contrapartida* and *producto de gestión* at the same time.
+
+  + There are `r mean(cli.n$n)` contracts by customer on average, median `r median(cli.n$n)`
+  + There are `r mean(subset(cli.n, ntype==1)$n)` in case ntype = 1 (only one class, contrapartida or producto de     gestión informed), `r median(subset(cli.n, ntype==1)$n)`
+  + There are `r mean(subset(cli.n, ntype==2)$n)` in case ntype = 2 (two classes informed, contrapartida and producto de gestión), median `r median(subset(cli.n, ntype==2)$n)`
+
+```{r getrentingAgg}
+
+renting.agg <- data.table(cli)[,list(ncontr=.N, npers=length(unique(cod_persctpn))), by=c("descripcion", "type")]
+
+renting.agg.melt <- melt(renting.agg, id=c("descripcion", "type"))
+```
+
+```{r plotMerge, fig.width=12, fig.height=7, echo=FALSE}
+ggplot(renting.agg.melt, aes(x=descripcion, y=value, fill=type)) + 
+  geom_bar(stat="identity") +  
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #scale_y_log10() +
+  facet_wrap(~variable)
+
+ggplot(renting.agg, aes(x=descripcion, y=ncontr/npers, fill=type)) + 
+  geom_bar(stat="identity") +  
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+```
+
+
+And for the SMEs global segments: 35 and 36. 
+
+```{r getrentingAggPymes}
+renting.agg.pymes <- data.table(cli)[cod_segmsubo%in%c("35","36"),list(ncontr=.N, npers=length(unique(cod_persctpn))), by=c("descripcion", "type")]
+
+renting.agg.melt.pymes <- melt(renting.agg.pymes, id=c("descripcion", "type"))
+
+cli.n <- data.table(cli)[cod_segmsubo%in%c("35","36"), list(n=.N, ntype=length(unique(type))), by=c("cod_persctpn")]
+```
+
+There are `r length(unique(cli$cod_persctpn[cli$cod_segmsubo%in%c("35","36")]))` SMEs that have at least one renting product. On average, **`r percent(nrow(subset(cli.n, ntype==2))/nrow(cli.n))`** of SMEs have RENTING products by *contrapartida* and *producto de gestión* at the same time.
+
+
+```{r plotMergePymes, fig.width=12, fig.height=7, echo=FALSE}
+ggplot(renting.agg.melt.pymes, aes(x=descripcion, y=value, fill=type)) + 
+  geom_bar(stat="identity") +  
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #scale_y_log10() +
+  facet_wrap(~variable)
+
+ggplot(renting.agg.pymes, aes(x=descripcion, y=ncontr/npers, fill=type)) + 
+  geom_bar(stat="identity") +  
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+```
+
+
+## Conclusion
+
+We have two options to identify RENTING activity. Based on the data and on the recommendation of MIS, we should use *producto de gestión* because data can be split into types of renting.
+
+For SMEs we have identified renting contracts obtaining similar numbers with both options.
+
+## Queries
+
+
+```{r COD_ENTALFA, eval=FALSE}
+
+#### ¿USAMOS COD_ENTALFA O COD_ENTALCLI DE AGREGACION_COMERCIAL_VINCULACION? ####
+
+select count(distinct cli.cod_persctpn) ncli
+from da_pymes.clientes_renting_prod_gest cli
+
+# 15k clientes con prod gest de RENTING
+
+select count(distinct cli.cod_persctpn) ncli
+from da_pymes.clientes_renting_prod_gest cli
+join da_pro.segmento_global sg on sg.cod_persctpn = cli.cod_persctpn and sg.partition_id = '20151130' and sg.cod_entalfa = '0182'
+join da_pro.clientes_corp corp on corp.cod_persctpn = cli.cod_persctpn and corp.partition_id = '20151130' and corp.cod_entalfa = '0182'
+
+# 15k si hacemos join con segmento global y F/J
+
+select cod_entalcli, cod_entalfa, count(*) n
+from da_pro.agregacion_comercial_vinculacion
+where partition_id = '20151130'
+group by cod_entalcli, cod_entalfa
+order by n desc
+
+# hay combinaciones de todo con todo, no tienen por que coincidir los dos códigos
+
+select count(distinct cod_persctpn) ncli
+from da_pymes.prod_gest_renting as prod 
+  join da_pro.agregacion_comercial_vinculacion agg on trim(cod_prodgest)= cod_prodct
+where partition_id= '20151130'
+and trim(cod_tipotit)='M'
+and cod_entalcli = '0182'
+
+#68k con partition
+#21k con partition y entalfa 0182
+#55k con partition y menor titular M
+#14k con partition y menor titular M y entalcli 0182 ¡PERDEMOS MUCHOS DATOS!
+
+select cod_entalcli, count(distinct cod_persctpn) ncli
+from da_pymes.prod_gest_renting as prod 
+  join da_pro.agregacion_comercial_vinculacion agg on trim(cod_prodgest)= cod_prodct
+where partition_id= '20151130'
+and trim(cod_tipotit)='M'
+group by cod_entalcli
+order by ncli desc
+
+# 0980 42.2k ¡APARECEN NUEVOS CÓDIGOS SIGNIFICATIVOS!
+# 0182 14.5k
+# 0983 514
+
+select cod_entalfa, count(distinct cod_persctpn) ncli
+from da_pymes.prod_gest_renting as prod 
+  join da_pro.agregacion_comercial_vinculacion agg on trim(cod_prodgest)= cod_prodct
+where partition_id= '20151130'
+and trim(cod_tipotit)='M'
+group by cod_entalfa
+order by ncli desc
+
+# 0980 42.2k
+# 0182 14.5k
+# 0983 514
+
+select distinct des_nomabr from da_catalogos.entidad
+where partition_id = '20151130'
+and cod_entalfa = '0980' or cod_entalfa = '0983' 
+
+# BBVA RENTING / AUTORENTING
+
+
+#### ¿Y QUÉ PASA CON LA CONTRAPARTIDA? ¿OCURRE LO MISMO? #####
+
+select cod_entalfa, count(distinct cod_persctpn) ncli
+from da_pymes.contrapartida_renting as contr 
+  join da_pro.intervinientes_corp ic on trim(cod_pgccontr)= cod_contrapartida
+where partition_id= '20151130'
+and trim(cod_ctippe)='TIT' and cod_ordentit=1
+group by cod_entalfa
+order by ncli desc
+
+# 0980 91k
+# 0182 51.2k
+# 0983 6.3k
+# 0009 122
+# 0981 31
+
+select distinct des_nomabr from da_catalogos.entidad
+where partition_id = '20151130'
+and cod_entalfa = '0980' or cod_entalfa = '0983'
+or cod_entalfa = '0009' or cod_entalfa = '0981'
+
+# BBVA RENTING / AUTORENTING / FINANZIA RENTING / FINANZIA BCO CREDITO
+
+```
+
+
+```{r COD_SITUDW, eval=FALSE}
+
+#### ¿CÓMO CALCULAMOS QUE EL CONTRATO DE RENTING SIGA ACTIVO? #####
+
+select distinct fec_baja
+from da_pymes.contrapartida_renting as contr 
+  join da_pro.intervinientes_corp ic on trim(cod_pgccontr)= cod_contrapartida
+where partition_id= '20151130' and trim(cod_ctippe)='TIT' and cod_ordentit=1
+order by fec_baja
+
+# fec_fin_vin y fec_baja a NULL
+
+select distinct fec_vencto
+from da_pymes.contrapartida_renting as contr
+  join (select cod_pgccontr, cod_idcontra from da_pro.intervinientes_corp where partition_id= '20151130' and trim(cod_ctippe)='TIT' and cod_ordentit=1) ic
+  on trim(ic.cod_pgccontr)= cod_contrapartida
+  join (select cod_pgccontr,cod_idcontra, fec_vencto from da_pro.productos_contratados where partition_id= '20151130') pc
+  on trim(pc.cod_idcontra) = trim(ic.cod_idcontra)
+
+# informado
+
+select distinct fec_altacto, fec_vencto, fec_cancel
+from da_pymes.contrapartida_renting as contr
+  join (select cod_pgccontr, cod_idcontra from da_pro.intervinientes_corp where partition_id= '20151130' and trim(cod_ctippe)='TIT' and cod_ordentit=1) ic
+  on trim(ic.cod_pgccontr)= cod_contrapartida
+  join (select cod_pgccontr,cod_idcontra, fec_altacto, fec_vencto, fec_cancel from da_pro.productos_contratados where partition_id= '20151130') pc
+  on trim(pc.cod_idcontra) = trim(ic.cod_idcontra)
+order by fec_altacto desc, fec_vencto, fec_cancel
+
+# combinaciones para identificar Activos/Cancelados/Vencidos
+
+select count(distinct cod_persctpn) as ncli
+from da_pymes.prod_gest_renting as prod 
+  join da_pro.agregacion_comercial_vinculacion agg on trim(cod_prodgest)= cod_prodct
+where partition_id= '20151130' and trim(cod_tipotit)='M'
+
+# 55735 menor titular
+
+select count(distinct cod_persctpn) as ncli
+from da_pymes.prod_gest_renting as prod 
+  join da_pro.agregacion_comercial_vinculacion agg on trim(cod_prodgest)= cod_prodct
+where partition_id= '20151130' and trim(cod_tipotit)='M' and cod_situdw='A'
+
+# 32383 menor titular activo
+# 34796 cualquier titular T
+# 46551 cualquiera menos cancelado C
+# 32698 cualquiera menos cancelado C y moroso M
+
+select count(distinct cod_persctpn) as ncli
+from da_pymes.contrapartida_renting as contr 
+  join da_pro.intervinientes_corp ic on trim(cod_pgccontr)= cod_contrapartida
+where partition_id= '20151130' and trim(cod_ctippe)='TIT' and cod_ordentit=1
+
+# 137408
+
+select count(distinct cod_persctpn) as ncli
+from da_pymes.contrapartida_renting as contr 
+join (select cod_pgccontr, cod_persctpn, cod_idcontra from da_pro.intervinientes_corp
+      where partition_id= '20151130' and trim(cod_ctippe)='TIT' and cod_ordentit=1) ic
+  on trim(ic.cod_pgccontr)= cod_contrapartida
+join (select cod_pgccontr,cod_idcontra, fec_altacto, fec_vencto, fec_cancel
+      from da_pro.productos_contratados where partition_id= '20151130') pc
+  on trim(pc.cod_idcontra) = trim(ic.cod_idcontra)
+where fec_cancel is NULL and (fec_vencto is NULL or fec_vencto >= unix_timestamp('2015-11-30 00:00:00'))
+
+# 34509
+# 36973 cualquier titular TIT
+
+```

@@ -1,0 +1,240 @@
+---
+output:
+  html_document:
+    self_contained: no
+  pdf_document: default
+---
+
+```{r,  echo=FALSE, cache=TRUE}
+# This is the first mandatory section.
+
+title     <- '[Digital Sales] Lead Funnel Mortgages'
+
+# Keywords. Text separated by commas. E.g. keywords <- 'customer health, recibos' 
+# Keywords can classify the attribute in categories such as 'valor, vinculación, digitalidad', describe used tables such as 'recibos, 
+# transacciones tarjetas, segmento plan uno' or include other relevant info. Search keywords in the portal to find commonly used terms
+# and create new keywords only if justified.
+
+keywords  <- 'hipoteca, omniture, cmc, funnel'
+```
+
+
+```{r,  echo=FALSE, cache=TRUE}
+# Cargar librerías
+suppressPackageStartupMessages(library('data.table'))
+suppressPackageStartupMessages(library('plyr'))
+#suppressPackageStartupMessages(library('dplyr'))
+suppressPackageStartupMessages(library('ggplot2'))
+suppressPackageStartupMessages(library('googleVis'))
+suppressPackageStartupMessages(library('reshape2'))
+op <- options(gvis.plot.tag = NULL)
+op <- options(gvis.plot.tag = "chart")
+
+trim <- function (x) gsub("^\\s+|\\s+$", "", x)
+# Cargar datos
+dt.clientes.channel <- data.table(read.csv("/us/xe45922/hipotecas/data/fin\ form\ last\ touch\ 0110-310115.csv" , header = TRUE ,sep=","))
+dt.propuestas2 <- data.table(read.csv("/us/xe45922/hipotecas/data/formularios_propuestas.csv" , header = TRUE , sep=";"))
+
+dt.propuestas1 <- data.table(read.csv("/us/xe45922/hipotecas/data/Resultado\ Formularios\ Hipotecas_20150514.csv" , header = TRUE , sep=";"))
+
+dt.propuestas <- rbind.fill(dt.propuestas1, dt.propuestas2)
+
+suppressWarnings(names(dt.clientes.channel) <- c("Date", "Client_ID", "Last.Touch.Channel"))
+dt.propuestas$Fase.Tarea    <- as.character(dt.propuestas$Fase.Tarea)
+suppressWarnings(dt.propuestas$Fase.Tarea[ dt.propuestas$Fase.Tarea=="Cancelaci?n"] <- "Cancelación")
+dt.propuestas$Fase.Tarea    <- as.factor(trim(dt.propuestas$Fase.Tarea))
+dt.propuestas$Fecha.Pri.Gen <- as.Date(as.character(dt.propuestas$Fecha.Pri.Gen), format = "%d/%m/%Y")
+dt.propuestas$Fecha.Inicio  <- as.Date(as.character(dt.propuestas$Fecha.Inicio), format = "%d/%m/%Y")
+dt.propuestas$Fecha.Fin     <- as.Date(as.character(dt.propuestas$Fecha.Fin), format = "%d/%m/%Y")
+```
+
+
+```{r,  echo=FALSE, cache=TRUE}
+# Preprocesado:
+# Quito el mes de enero
+# dt.clientes.channel <- dt.clientes.channel[grep("January" , as.character(dt.clientes.channel$Date), invert=TRUE), ]
+clientes.channel <- dt.clientes.channel[ , list( Last.Touch.Channel = names(sort(table(Last.Touch.Channel), decreasing = TRUE)[1])) , by = Client_ID]
+
+#dt.propuestas <- dt.propuestas[dt.propuestas$Mes.formulario %in% c(10,11,12) & as.character(dt.propuestas$TIPO_CLIENTE)=="Cliente", ]
+#dt.propuestas <- dt.propuestas[is.na(dt.propuestas$Fecha.Pri.Gen) | (dt.propuestas$Fecha.Pri.Gen>="2014-10-01"), ]
+
+setnames(dt.propuestas, "Cliente", "Client_ID")
+clientes.channel$Client_ID <- as.integer(clientes.channel$Client_ID)
+dt.propuestas$Client_ID <- as.integer(dt.propuestas$Client_ID)
+```
+
+
+```{r,  echo=FALSE, cache=TRUE}
+
+#dt.propuestas <- suppressMessages(left_join( dt.propuestas,  dt.propuestas[ , list( max.Fecha_Fin.Tarea = max(Fecha_Fin.Tarea) ) , by=Client_ID] ))
+dt.propuestas <- suppressMessages(join(dt.propuestas, clientes.channel))
+# dt.propuestas$max.Fecha_Fin.Tarea==dt.propuestas$Fecha_Fin.Tarea
+
+dt.cliente.fase <- data.table(dt.propuestas)  # [, list( conteo = .N ) , by=c('Client_ID','Last.Touch.Channel','Fase.Tarea') ]
+
+
+# Reorder factor
+dt.cliente.fase$Fase.Tarea <- factor(dt.cliente.fase$Fase.Tarea, levels=c("Cancelación","Reestudio","Gen.Propuesta","Sanc.Riesgo","Sanc.Precio","Formalizacion","Puesta en Vigor"))
+
+
+Fases.channel <- dt.cliente.fase[, list( clientes = .N ), by = c("Last.Touch.Channel", "Fase.Tarea")][order(Last.Touch.Channel, Fase.Tarea)]
+```
+
+
+```{r PropuestasFase, results='asis', tidy=FALSE, echo=FALSE, cache=TRUE,fig.width=8, eval=FALSE}
+# 
+# Sobre un total de `r length(unique(dt.propuestas$Client_ID))` clientes que han realizado propuestas hay `r length(unique(dt.cliente.fase[is.na(dt.cliente.fase$Last.Touch.Channel), ]$Client_ID))` casos donde no se ha podido identificar el último canal de contacto porque no cruzan con el fichero de navegación de Omniture. Los posibles motivos por los que no se consigue identificar el 100% de los casos son: 
+# 
+# * Se realiza la confirmación del formulario como navegador anónimo (sin logarse en ningún momento)
+# * Utilizar un dispositivo que no permita fijar una cookie y por tanto no quede constancia en Omniture. 
+# 
+# En cualquier caso, del total de `r length(unique(dt.clientes.channel$Client_ID))` tenemos un **`r paste(round(length(unique(dt.cliente.fase[!is.na(dt.cliente.fase$Last.Touch.Channel), ]$Client_ID))/length(unique(dt.clientes.channel$Client_ID))*100,1), "%")` que se convierten en propuestas de contratación**. 
+# Durante el proceso de gestión, para Cada cliente se pueden generar varias propuestas de contratación. 
+# 
+# Por ello, para estos **`r length(unique(dt.propuestas$Client_ID))` clientes se han generado `r sum(table(dt.cliente.fase$Fase.Tarea))` propuestas**. 
+# Las propuestas de contratación pasan por un proceso de validación y gestión con diferentes etapas. 
+# Analizando la última fase en la que se han quedado todas estas propuestas recibidas obtenemos la siguiente distribución: 
+funnelPropuestas <- table(dt.cliente.fase[!is.na(dt.cliente.fase$Last.Touch.Channel), ]$Fase.Tarea)
+ 
+PropuestasFase <- gvisPieChart(data.frame(funnelPropuestas), 
+                      options=list(
+                        width=700,
+                        height=400,
+                        title="Última fase que alcanza cada propuesta",
+                        legend="{position: 'left', textStyle: {color: 'blue', fontSize: 12}}",
+                        pieHole=0.5), chartid="PropuestasFase")
+plot(PropuestasFase)
+
+```
+
+
+```{r,results='asis', tidy=FALSE, echo=FALSE, cache=TRUE,fig.width=8, eval=FALSE}
+
+# 
+# Algo más de la mitad de las propuestas son canceladas pero esto no implica necesariamente que el cliente abandone el proceso de contratación. Pueden generarse otras propuestas para el mismo cliente con diferente resultado. 
+# 
+# ### Modelo de atribución por propuestas
+# 
+# Analizando el último canal de contacto de los usuarios para los que se ha generado cada una de las propuestas, tanto por volumen como porcentaje sobre el total de propuestas por cada canal: 
+#   
+#   
+Fases.channel2 <- Fases.channel # [!(Fases.channel$Fase.Tarea %in% c("Cancelación", "Reestudio")), ]
+
+setnames(Fases.channel2, "Fase.Tarea", "Fases")
+df.Fases <- suppressMessages(dcast(Fases.channel2, Last.Touch.Channel ~ Fases))
+df.Fases <- df.Fases[!is.na(df.Fases$Last.Touch.Channel), ]
+
+df.Fases[is.na(df.Fases)] <- 0
+
+modeloPropuestas <- gvisBarChart(df.Fases, xvar=names(df.Fases)[1], yvar=names(df.Fases)[-1], 
+                       options=list(isStacked=TRUE,
+                                    title="Modelo de atribución por canal para cada propuesta",
+                                    width=1000,
+                                    height=500))
+plot(modeloPropuestas)
+
+```
+
+```{r, results='asis', tidy=FALSE, echo=FALSE, cache=TRUE,fig.width=8, eval=FALSE}
+df.prop.Fases <- cbind(df.Fases[1], prop.table( as.matrix(df.Fases[-1]) , margin = 1))
+
+modeloPropuestassPct <- gvisBarChart(df.prop.Fases, xvar=names(df.prop.Fases)[1], yvar=names(df.prop.Fases)[-1], 
+                       options=list(isStacked=TRUE,
+                                    title="Modelo de atribución por canal para cada propuesta",
+                                    hAxis="{format:'###,#%'}",
+                                    tooltip = "{text:'percentage'}",
+                                    width=1000,
+                                    height=500))
+plot(modeloPropuestassPct)
+
+
+# No se aprecian diferencias significativas en el éxito de la propuesta entre los distintos canales de contacto.
+# Tampoco se aprecian si comparamos obviando las proporciones entre los canales (salvo los casos donde la muestra es muy reducida). 
+# Además, en este caso las proporciones pueden verse afectadas por el echo de que unos clientes generan más propuestas que otros. Podemos hacer el mismo análisis a nivel de cliente en lugar de a nivel de propuesta. 
+
+```
+
+
+### Mortgages funnel: From lead to contract
+
+
+Omniture Data from October 1, 2014 to December 31, 2014 (Q4 Campaign period).
+This results take into account all requests per channel keeping the best request each time.
+
+```{r ClientesFase, results='asis', tidy=FALSE, echo=FALSE, cache=TRUE,fig.width=8}
+
+dt.cliente.final <- dt.cliente.fase[ !is.na(dt.cliente.fase$Last.Touch.Channel), 
+                                     list( Fase = sort(unique(Fase.Tarea),decreasing=TRUE)[1], 
+                                            Last.Touch.Channel= sample(Last.Touch.Channel,1) ) , by = Client_ID]
+
+funnelClientes <- table(dt.cliente.final$Fase)
+ 
+ClientesFase <- gvisPieChart(data.frame(funnelClientes), 
+                      options=list(
+                        width=700,
+                        height=400,
+                        title='Mortgages funnel',
+                        legend="{position: 'left', textStyle: {color: 'blue', fontSize: 12}}",
+                        pieHole=0.5), chartid="ClientesFase")
+plot(ClientesFase)
+
+```
+
+In addition, Last Touch Channel has been identified through funnel process to compare conversion rate between channels. 
+
+```{r modeloClientes, results='asis', tidy=FALSE, echo=FALSE, cache=TRUE,fig.width=8}
+
+Fases.channel.clientes <- dt.cliente.final[, list( clientes = .N), by = c("Last.Touch.Channel","Fase"),][order(Last.Touch.Channel,Fase)]
+#modeloClientes <- gvisBarChart( data.frame(Fases.channel.clientes), xvar = "clientes", yvar = "Last.Touch.Channel", options = list(), chartid="FasesChannelClientes")
+df.Fases <- suppressMessages(dcast(Fases.channel.clientes, Last.Touch.Channel ~ Fase))
+df.Fases <- df.Fases[!is.na(df.Fases$Last.Touch.Channel), ]
+
+df.Fases[is.na(df.Fases)] <- 0
+
+modeloClientes <- gvisBarChart(df.Fases, xvar=names(df.Fases)[1], yvar=names(df.Fases)[-1], 
+                       options=list(isStacked=TRUE,
+                                    title="Last Touch attribution model per channel. Mortgages funnel",
+                                    width=1000,
+                                    height=500))
+plot(modeloClientes)
+
+# hAxis="{format:'#,###%'}"
+
+df.prop.Fases <- cbind(df.Fases[1], prop.table( as.matrix(df.Fases[-1]) , margin = 1))
+
+modeloClientesPct <- gvisBarChart(df.prop.Fases, xvar=names(df.prop.Fases)[1], yvar=names(df.prop.Fases)[-1], 
+                       options=list(isStacked=TRUE,
+                                    hAxis="{format:'###,#%'}",
+                                    tooltip = "{text:'percentage'}",
+                                    title="Last Touch attribution model per channel. Mortgages funnel",
+                                    width=1000,
+                                    height=500))
+plot(modeloClientesPct)
+
+
+```
+
+```{r , echo=FALSE, eval=FALSE}
+Realmente para los 4 canales que más clientes aportan no se aprecian diferencias significativas. De hecho si sumamos los porcentajes de clientes en formalización y Puesta en Vigor los resultados son prácticamente idénticos. Podría parecer que SEM es el canal con el que mejores tasas de éxito se obtienen, pero hay que tener en cuenta que la muestra que queda es únicamente de 13 clientes. 
+
+En principio no parece haber una correlación entre el canal de procedencia del cliente y el éxito de las propuestas. 
+
+### Tiempo de espera desde la confirmación del formulario hasta la contratación
+
+Utilizando las propuestas de contratación podemos observar que hay una diferencia considerable entre la fecha de confirmación del formulario y la fecha de resolución de la propuesta cuando ésta está en "Formalización" o "Puesta en Vigor". La diferencia en tal caso es de una media de **`r paste(round(mean(as.Date(dt.propuestas[dt.propuestas$Fase.Tarea %in% c("Formalizacion", "Puesta en Vigor"),]$Fecha_Fin.Tarea, format="%d/%m/%Y") - as.Date(dt.propuestas[dt.propuestas$Fase.Tarea  %in% c("Formalizacion", "Puesta en Vigor"),]$mi_fecha, format="%d/%m/%Y")  ))) ` días**.
+
+
+propuestas.mes <- table(month( as.Date( dt.propuestas[dt.propuestas$Fase.Tarea %in% c("Formalizacion", "Puesta en Vigor"),]$mi_fecha , format="%d/%m/%Y")))
+
+Observando esta diferencia parece razonable pensar que algunas de estas propuestas más recientes todavía no han podido llegar a hacerse efectivas. 
+De todas las propuestas que han llegado a formalización o puesta en vigor, la mayoría corresponden a octubre y noviembre (`r propuestas.mes[1]` y `r propuestas.mes[2]` respectivamente) mientras que en **diciembre solo hay `r propuestas.mes[3]`**. Es posible que estas últimas todavía no les haya dado tiempo a llegar a una etapa de contratación. Además, este hecho concuerda con que hay un porcentaje elevado de clientes que todavía están en fase de propuesta generada.
+
+
+### Conclusiones y líneas de trabajo
+
+* Para **profundidar en el proceso de los no clientes** se necesita obtener la asociación entre el código de cliente que se genera durante el proceso y la cookie con la que se realiza la navegación. 
+* Sería interesante analizar datos similares de **propuestas de contratación de hipotecas en oficinas** y poder hacer la comparación con los clientes procedentes de la Net. 
+* En caso de disponer de las propuestas de contratación de hipotecas en oficinas se podría profundizar en analizar el fenómeno del **Online to Store**. Cruzando la navegación de aquellos clientes que contratan en oficina pero que navegan por contenido de la web relacionado con hipotecas, usan del simulador, calculadora, etc. De aquí podría extraerse algún tipo de influencia o atribución del canal digital sobre las ventas en oficina. 
+
+
+```

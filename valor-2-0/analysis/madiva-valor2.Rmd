@@ -1,0 +1,891 @@
+---
+title: "[Valor 2.0] : How many people do we retrieve from Madiva?"
+author: "Alberto Font, César de Pablo"
+date: "01/09/2015"
+output: html_document
+---
+
+_**2nd report iteration**_
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title <- "[Valor 2.0] : How many people do we retrieve from Madiva?"
+
+# Keywords. Text separated by commas. E.g. keywords <- 'customer health, recibos' 
+# Keywords can classify the attribute in categories such as 'valor, vinculación, digitalidad', describe used tables such as 'recibos, 
+# transacciones tarjetas, segmento plan uno' or include other relevant info. Search keywords in the portal to find commonly used terms
+# and create new keywords only if justified.
+
+keywords  <- 'madiva, valor, casa, casas, vivienda, viviendas, premium, particular, particulares'  
+```
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))  	# This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+
+source('~/bda_clarity/tools/warehouse_basics.R')
+```
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(grid))
+suppressMessages(library(hexbin))
+suppressMessages(library(lattice))
+suppressMessages(library(dplyr))
+`%ni%` <- Negate(`%in%`)
+options(warn=-1, scipen=3, width=450)
+source('~/bda_clarity/tools/warehouse_basics.R')
+
+```
+
+``` {r echo=FALSE}
+
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  require(grid)
+  
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+  
+  numPlots = length(plots)
+  
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                     ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+  
+  if (numPlots==1) {
+    print(plots[[1]])
+    
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+      
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+} ; 
+
+chname <- function(df)
+{
+  rex <- '^[[:alnum:]_]+\\.([[:alnum:]_]+)$'
+  nam <- colnames(df)
+  ix  <- which(grepl(rex, nam))
+  
+  nam[ix] <- gsub(rex, '\\1', nam[ix])
+  
+  colnames(df) <- nam
+  
+  df
+};
+
+```
+
+Primero cargamos en varios esquemas con los resultados de los datos.
+
+```{r echo=FALSE, eval=FALSE}
+df_madivaNF <- read.csv("/us/e032173/afont/dd300000_excel_limpio_norm_errors.tsv", fill=TRUE, sep="\t")
+df_hash <- read.table("/us/e032173/afont/hash.csv", fileEncoding="latin1",header=TRUE, fill=TRUE, sep=";", quote ="")
+df_hash$cod_persona <- (df_hash$cod_persona +14) /3
+names(df_hash) <- c("id","fila","cod_persona")
+
+df_madivaNF <- left_join(df_madivaNF,df_hash[,c(1,3)],by="id")
+df_madivaNF <- df_madivaNF[,c(10,2:9)]
+df_madivaNF$cod_persona <- as.integer(df_madivaNF$cod_persona)
+
+nameNF <- "da_afont.300k_notfound"
+write.hive(df_madivaNF, nameNF, drop.table = FALSE)
+
+df_madivaF <- read.table("/us/e032173/afont/dd300000_excel_limpio_norm_processed.tsv", fileEncoding="latin1",header=TRUE, fill=TRUE, sep="\t", quote ="")
+df_madivaF <- left_join(df_madivaF,df_hash[,c(1,3)],by="id")
+df_madivaF <- df_madivaF[,c(98,2:96)]
+
+nameF <- "da_afont.300k_found"
+df_madivaF$cod_persona <- as.integer(df_madivaF$cod_persona)
+write.hive(df_madivaF, nameF, drop.table = FALSE)
+
+```
+
+Usamos varios métodos de Clarity para cargar los datos en variables de R
+
+``` {r echo=TRUE, fig.width=12, fig.height=6} 
+sglobu <- clarity.use_table(DEPENDENCY_CLARITY_TABLE, 'clarity_elements.segmento_global_unico', '*', 'sglobu')
+
+#hcount(sglobu)
+#24533665
+
+splanu <- clarity.use_table(DEPENDENCY_CLARITY_TABLE, 'clarity_elements.segmento_plan_uno', '*', 'splanu')
+
+#hcount(splanu)
+#8123224
+
+madiva <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 
+                                'da_afont.300k_found', 
+                                select = "*",
+                                sqname = 'madiva')
+
+#hcount(madiva)
+#244498
+segm_part1 <- subq.join('madiva.*, segmento5c as segmento5c',
+                               sglobu,
+                               madiva,
+                               'sglobu.cod_persona=madiva.cod_persona',
+                               sqname='segm_part1')
+
+#hcount(segm_part1)
+#244498
+madiva_segm <- subq.join('segm_part1.*, cod_segmento_plan_uno as cod_segmento_plan_uno',
+                               segm_part1,
+                               splanu,
+                               'segm_part1.cod_persona=splanu.cod_persona',
+                               sqname='madiva_segm')
+# hcount(madiva_segm)
+# 244498
+
+df_madiva300k <- qhive(paste0("SELECT * FROM ",madiva_segm))
+
+df <- df_madiva300k
+rm(df_madiva300k)
+names(df) <- gsub("madiva_segm.","",names(df))
+```
+
+Vamos a trabajar con precio. Se agrupan en 1000 puntos los 244500 resultados.
+El objetivo es hallar el punto de corte de una regresión lineal por 2 tramos. estableciendo un rango. Nota, al final el score va a significar a ser un rango entre 0 y 1. Según este resultado deberíamos usar un 18% de los datos.
+
+
+``` {r echo=TRUE, fig.width=12, fig.height=6} 
+
+dfbis <-df[,c("precio","superficietotal","segmento5c")]
+
+dfbis$resultado <- df$segmento5c
+dfbis$resultado <- as.character(dfbis$resultado)
+dfbis$resultado[dfbis$resultado=='1'|dfbis$resultado=='2'] <- "PARTICULARES"
+dfbis$resultado[dfbis$resultado!='PARTICULARES'] <- "PREMIUM"
+dfbis$resultado <- factor(dfbis$resultado)
+names (dfbis) <- c("precio", "superficie","","resultado")
+
+#bines <- dfbis[!is.na(dfbis[with(dfbis,order(precio,superficie)),])]
+bines <- dfbis[with(dfbis,order(precio,superficie)),]
+bines <-bines[complete.cases(bines),]
+bines <- bines[,c("precio", "superficie","resultado")]
+
+
+brks <- with(bines, quantile(precio, probs = seq(0,1,by=0.001)))
+bines <- within(bines, quantile <- cut(precio, breaks=brks, labels=1:1000, include.lowest = TRUE))
+
+resumen <- aggregate(precio ~ quantile + resultado, data = bines, length)
+#resumen
+
+resumen2 <- aggregate(precio ~ quantile, data = bines, length)
+#resumen2
+
+precios <- aggregate(precio ~ quantile, data = bines, mean)
+
+resumen$probs <-resumen$precio/resumen2$precio * 100
+rm(resumen2)
+#plot(resumen[((nrow(resumen)/2)+1):nrow(resumen),4])
+
+y <- resumen[((nrow(resumen)/2)+1):nrow(resumen),"probs"]
+#y <- bines$precio
+
+x <- 1:length(y)
+d <- numeric(length(y))
+
+for (i in 1:length(x)){
+  model<-lm(y~ (x<x[i]) * x + (x>=x[i]) * x )
+  d[i] <- summary(model)[[6]]
+}
+
+(corte <- which.min(d))
+
+y2 <- y[corte:length(y)]
+x2 <- x[corte:length(x)]  
+
+d2 <- numeric(length(y2))
+for(i in 1:length(y2)){
+  model2 <- lm(y2~ (x2<x2[i]) * x2 + (x2>=x2[i]) * x2 )
+  d2[i] <- summary(model2)[[6]]
+}
+
+(corte2 <- which.min(d2))
+
+# x
+dat<-data.frame(x=x,y=y)
+dat$z <- NA
+#dat[1:(corte-1),"z"] <- 1
+#dat[corte:(corte+corte2-1),"z"] <- 2
+#dat[(corte+corte2):length(y),"z"] <- 3
+#dat$z <- factor(dat$z)
+
+#Mejor usar esta librería ya que permite juntar en los breakpoints
+library(segmented)
+lin.mod <- lm(y~x)
+lin.mod
+
+ #primero se aproxima 2 valores, no importa si la aproximación es buena
+segmented.mod <- segmented(lin.mod, seg.Z=~x, psi= c(length(y)*0.5,length(y)*0.9))
+segmented.mod
+dat$z<-factor(segmented.mod$id.group)
+
+(corte <- segmented.mod$psi[4])
+
+(precioCorte <- precios[[2]][floor(corte)] + (corte-floor(corte))* (precios[[2]][ceiling(corte)]- precios[[2]][floor(corte)]))
+
+
+dev.off()
+ggplot(dat, aes(x,y, color=z))+
+  geom_point()+
+  stat_smooth(method="lm", se=F, size= 2)
+```
+
+Vamos a representar los resultados anteriores usando diferentes escalas y diferentes gráficas. Vemos con esto la dispersión y también como se satura. Los colores usados se corresponden a la gráfica anterior. Lo único que se concluye es que se acaba saturando la probabilidad de ser premium con respecto a la alta transaccionalidad.
+
+
+``` {r echo=TRUE, fig.width=12, fig.height=6} 
+
+x <- precios$precio
+lin.mod <- lm(y~x)
+
+#primero se aproxima 2 valores, no importa si la aproximación es buena
+segmented.mod <- segmented(lin.mod, seg.Z=~x, psi= c(quantile(x,0.5)))
+segmented.mod
+#my.model$z<-factor(segmented.mod$id.group)
+
+my.fitted <- fitted(segmented.mod)
+my.model <- data.frame(x= precios$precio, y= dat$y, z= dat$z)
+my.linea <- data.frame(x= precios$precio, y=my.fitted, z = dat$z)
+summary(my.model)
+ggplot(my.model, aes(x,y, color=z))+
+  geom_point()+
+  scale_x_log10()
+
+ggplot(my.model, aes(x,y, color=z))+
+  geom_point()+
+  stat_smooth(method="lm", se=F, size= 2)+
+  xlim(0,2000000)+
+  geom_line(data=my.linea, aes(x=x,y=y), color="tomato")
+
+ggplot(my.model, aes(x,y, color=z))+
+  geom_point() +
+  xlim(0,2000000)
+
+
+```
+
+Ahora vamos a estudiar como se segmenta la precisión de segmentación. De esta manera se concluye que hay menos dispersión en la contabilización de 'premiumness' cuanto más exacto se aproxime el resultado de la referencia catastral. Hasta precisión 3 (encontrar el número del portal) se afina bastante.
+
+``` {r echo=TRUE, fig.width=12, fig.height=6} 
+
+ dfbis <-df[,c("precio","superficietotal","segmento5c")]
+ 
+ dfbis$resultado <- df$segmento5c
+ dfbis$resultado <- as.character(dfbis$resultado)
+ dfbis$resultado[dfbis$resultado=='1'|dfbis$resultado=='2'] <- "PARTICULARES"
+ dfbis$resultado[dfbis$resultado!='PARTICULARES'] <- "PREMIUM"
+ dfbis$resultado <- factor(dfbis$resultado)
+ names (dfbis) <- c("precio", "superficie","","resultado")
+ 
+ #bines <- dfbis[!is.na(dfbis[with(dfbis,order(precio,superficie)),])]
+ dfbis$precisionsegmentacion = factor(df$precisionsegmentacion)
+ bines <- dfbis[with(dfbis,order(precio,superficie)),]
+ bines <-bines[complete.cases(bines),]
+ bines <- bines[,c("precio", "superficie","resultado","precisionsegmentacion")]
+
+grafico_precision <- list()
+j <- 0
+ for(j in 0:6){
+ if (j != 2){
+   
+   print(j)
+ binestemp <- bines[bines$precisionsegmentacion==j,]
+ #binestemp <- bines
+ binestemp <- binestemp[,c("precio", "superficie","resultado")]
+ brks <- with(binestemp, quantile(precio, probs = seq(0,1,by=0.01)))
+ binestemp <- within(binestemp, quantile <- cut(precio, breaks=brks, labels=1:100, include.lowest = TRUE))
+ 
+ resumen <- aggregate(precio ~ quantile + resultado, data = binestemp, length)
+ #resumen
+ 
+ resumen2 <- aggregate(precio ~ quantile, data = binestemp, length)
+ #resumen2
+ 
+ precios <- aggregate(precio ~ quantile, data = binestemp, mean)
+ 
+ resumen$probs <-resumen$precio/resumen2$precio * 100
+ rm(resumen2)
+ #plot(resumen[((nrow(resumen)/2)+1):nrow(resumen),4])
+ 
+ y <- resumen[((nrow(resumen)/2)+1):nrow(resumen),"probs"]
+ #y <- bines$precio
+ 
+ x <- 1:length(y)
+ d <- numeric(length(y))
+ 
+ for (i in 1:length(x)){
+   model<-lm(y~ (x<x[i]) * x + (x>=x[i]) * x )
+   d[i] <- summary(model)[[6]]
+ }
+ 
+ (corte <- which.min(d))
+ 
+ y2 <- y[corte:length(y)]
+ x2 <- x[corte:length(x)]  
+ 
+ d2 <- numeric(length(y2))
+ for(i in 1:length(y2)){
+   model2 <- lm(y2~ (x2<x2[i]) * x2 + (x2>=x2[i]) * x2 )
+   d2[i] <- summary(model2)[[6]]
+ }
+ 
+ (corte2 <- which.min(d2))
+ 
+ # x
+ dat<-data.frame(x=x,y=y)
+ dat$z <- NA
+ dat[1:(corte-1),"z"] <- 1
+ dat[corte:(corte+corte2-1),"z"] <- 2
+ #dat[(corte+corte2):length(y),"z"] <- 3
+ dat$z <- factor(dat$z)
+ 
+ #Mejor usar esta librería ya que permite juntar en los breakpoints
+ library(segmented)
+ lin.mod <- lm(y~x)
+ lin.mod
+ 
+  #primero se aproxima 2 valores, no importa si la aproximación es buena
+ segmented.mod <- segmented(lin.mod, seg.Z=~x, psi= c(length(y)*0.5))
+ segmented.mod
+ dat$z<-factor(segmented.mod$id.group)
+ 
+ #dev.off()
+ #temp <- ggplot(dat, aes(x,y, color=z))+
+ #  geom_point()+
+ #  stat_smooth(method="lm", se=F, size= 2)
+ my.model <- data.frame(x= precios$precio, y= dat$y, z= dat$z)
+ grafico_precision[[j+1]] <- ggplot(my.model, aes(x,y))+
+   geom_point() +
+   geom_smooth()+
+   xlim(0,1000000)+
+   ggtitle(paste0("precision",j))
+ 
+ }
+ }
+
+multiplot(grafico_precision[[1]],grafico_precision[[2]],grafico_precision[[4]],grafico_precision[[5]],grafico_precision[[6]],grafico_precision[[7]], cols=2)
+
+```
+
+Vamos a representar las 3 precisiones anteriores en un solo gráfico. Vemos pocas diferencias. Lo que se observa es que hay una mayor concentración de casas de alto valor con precisión 0. También se observa que el el porcentaje premiums de segmentación global es menor del que debería. Por lo que hay un hueco que no está cubierto.
+
+``` {r echo=TRUE, fig.width=12, fig.height=6} 
+
+dfbis <-df[,c("precio","superficietotal","segmento5c")]
+ 
+dfbis$resultado <- df$segmento5c
+dfbis$resultado <- as.character(dfbis$resultado)
+dfbis$resultado[dfbis$resultado=='1'|dfbis$resultado=='2'] <- "PARTICULARES"
+dfbis$resultado[dfbis$resultado!='PARTICULARES'] <- "PREMIUM"
+dfbis$resultado <- factor(dfbis$resultado)
+names (dfbis) <- c("precio", "superficie","","resultado")
+ 
+#bines <- dfbis[!is.na(dfbis[with(dfbis,order(precio,superficie)),])]
+dfbis$precisionsegmentacion = factor(df$precisionsegmentacion)
+bines <- dfbis[with(dfbis,order(precio,superficie)),]
+bines <-bines[complete.cases(bines),]
+bines <- bines[,c("precio", "superficie","resultado","precisionsegmentacion")]
+
+
+modeloX6 <- data.frame(precio=numeric(),probs=numeric(),precision=numeric(),stringsAsFactors=TRUE)
+
+grafico_precision <- list()
+j <- 0
+ for(j in 0:3){
+ if (j != 2){
+   print(j)
+ binestemp <- bines[bines$precisionsegmentacion==j,]
+ 
+ set.seed(42)
+ binestemp  <- binestemp[sample(1:dim(binestemp)[1], 26000, replace=FALSE),]
+ 
+ #binestemp <- bines
+ binestemp <- binestemp[,c("precio", "superficie","resultado")]
+ brks <- with(binestemp, quantile(precio, probs = seq(0,1,by=0.01)))
+ binestemp <- within(binestemp, quantile <- cut(precio, breaks=brks, labels=1:100, include.lowest = TRUE))
+ 
+ resumen <- aggregate(precio ~ quantile + resultado, data = binestemp, length)
+ #resumen
+ 
+ resumen2 <- aggregate(precio ~ quantile, data = binestemp, length)
+ #resumen2
+ 
+ precios <- aggregate(precio ~ quantile, data = binestemp, mean)
+ 
+ resumen$probs <-resumen$precio/resumen2$precio * 100
+ rm(resumen2)
+ #plot(resumen[((nrow(resumen)/2)+1):nrow(resumen),4])
+ 
+ y <- resumen[((nrow(resumen)/2)+1):nrow(resumen),"probs"]
+ #y <- bines$precio
+ 
+ x <- 1:length(y)
+ d <- numeric(length(y))
+ 
+ # x
+ dat<-data.frame(x=x,y=y)
+
+ 
+ #Mejor usar esta librería ya que permite juntar en los breakpoints
+ library(segmented)
+ lin.mod <- lm(y~x)
+ lin.mod
+ 
+ #primero se aproxima 2 valores, no importa si la aproximación es buena
+ segmented.mod <- segmented(lin.mod, seg.Z=~x, psi= c(length(y)*0.5))
+ segmented.mod
+ dat$z<-factor(segmented.mod$id.group)
+ 
+ #dev.off()
+ #temp <- ggplot(dat, aes(x,y, color=z))+
+ #  geom_point()+
+ #  stat_smooth(method="lm", se=F, size= 2)
+ #nombres <- names(my.model)
+ print(j)
+ dat$y
+ modeloX6 <- rbind(modeloX6,data.frame(x=precios$precio, y=dat$y, prec=j))
+ #names(my.model) <- nombres
+ 
+ grafico_precision[[j+1]] <- ggplot(my.model, aes(x,y))+
+   geom_point() +
+   geom_smooth()+
+   xlim(0,1000000)+
+   ggtitle(paste0("precision",j))
+ }
+ }
+
+modeloX6$prec <- ordered(modeloX6$prec)
+
+ggplot(modeloX6, aes(x,y, colour=prec))+
+   geom_point() +
+   geom_smooth()
+     
+
+```
+
+Vamos a ver con se comporta con la precisionVivienda. Indica con cuantos testigos se ha calculado el precio. Cuantos más testigos más confinidad en la probabilidad de de premiumness. 
+
+``` {r echo=TRUE, fig.width=12, fig.height=6} 
+
+ dfbis <-df[,c("precio","superficietotal","segmento5c")]
+ 
+ dfbis$resultado <- df$segmento5c
+ dfbis$resultado <- as.character(dfbis$resultado)
+ dfbis$resultado[dfbis$resultado=='1'|dfbis$resultado=='2'] <- "PARTICULARES"
+ dfbis$resultado[dfbis$resultado!='PARTICULARES'] <- "PREMIUM"
+ dfbis$resultado <- factor(dfbis$resultado)
+ names (dfbis) <- c("precio", "superficie","","resultado")
+ 
+ #bines <- dfbis[!is.na(dfbis[with(dfbis,order(precio,superficie)),])]
+ dfbis$precisionpreciovivienda = factor(df$precisionpreciovivienda)
+ bines <- dfbis[with(dfbis,order(precio,superficie)),]
+ bines <-bines[complete.cases(bines),]
+ bines <- bines[,c("precio", "superficie","resultado","precisionpreciovivienda")]
+
+grafico_precision <- list()
+j <- 3
+ for(j in 0:6){
+   print (j)
+ binestemp <- bines[bines$precisionpreciovivienda==j,]
+ #binestemp <- bines
+ binestemp <- binestemp[,c("precio", "superficie","resultado")]
+ brks <- with(binestemp, quantile(precio, probs = seq(0,1,by=0.01)))
+ binestemp <- within(binestemp, quantile <- cut(precio, breaks=brks, labels=1:100, include.lowest = TRUE))
+ 
+ resumen <- aggregate(precio ~ quantile + resultado, data = binestemp, length)
+ #resumen
+ 
+ resumen2 <- aggregate(precio ~ quantile, data = binestemp, length)
+ #resumen2
+ 
+ precios <- aggregate(precio ~ quantile, data = binestemp, mean)
+ 
+ resumen$probs <-resumen$precio/resumen2$precio * 100
+ rm(resumen2)
+ #plot(resumen[((nrow(resumen)/2)+1):nrow(resumen),4])
+ 
+ y <- resumen[((nrow(resumen)/2)+1):nrow(resumen),"probs"]
+ #y <- bines$precio
+ 
+ x <- 1:length(y)
+ d <- numeric(length(y))
+ 
+ for (i in 1:length(x)){
+   model<-lm(y~ (x<x[i]) * x + (x>=x[i]) * x )
+   d[i] <- summary(model)[[6]]
+ }
+ 
+ (corte <- which.min(d))
+ 
+ y2 <- y[corte:length(y)]
+ x2 <- x[corte:length(x)]  
+ 
+ d2 <- numeric(length(y2))
+ for(i in 1:length(y2)){
+   model2 <- lm(y2~ (x2<x2[i]) * x2 + (x2>=x2[i]) * x2 )
+   d2[i] <- summary(model2)[[6]]
+ }
+ 
+ (corte2 <- which.min(d2))
+ 
+ # x
+ dat<-data.frame(x=x,y=y)
+ #dat$z <- NA
+ #dat[1:(corte-1),"z"] <- 1
+ #dat[corte:(corte+corte2-1),"z"] <- 2
+ #dat[(corte+corte2):length(y),"z"] <- 3
+ #dat$z <- factor(dat$z)
+ 
+ #Mejor usar esta librería ya que permite juntar en los breakpoints
+ library(segmented)
+ lin.mod <- lm(y~x)
+ lin.mod
+ 
+  #primero se aproxima 2 valores, no importa si la aproximación es buena
+ segmented.mod <- segmented(lin.mod, seg.Z=~x, psi= c(length(y)*0.5))
+ segmented.mod
+ #dat$z<-factor(segmented.mod$id.group)
+ 
+ #dev.off()
+ #temp <- ggplot(dat, aes(x,y, color=z))+
+ #  geom_point()+
+ #  stat_smooth(method="lm", se=F, size= 2)
+ my.model <- data.frame(x= precios$precio, y= dat$y)
+ grafico_precision[[j+1]] <- ggplot(my.model, aes(x,y))+
+   geom_point() +
+   geom_smooth()+
+   xlim(0,1000000)+
+   ggtitle(paste0("precisionpreciovivienda",j))
+ }
+
+multiplot(grafico_precision[[1]],grafico_precision[[2]],grafico_precision[[3]],grafico_precision[[4]],grafico_precision[[5]],grafico_precision[[6]],grafico_precision[[7]], cols=3)
+
+```
+
+Vamos a ver como se relaciona el precio y preciom2 Se observa como la variable principal que marca es el precio. Pero además hay una relación creciente con el precio por metro dentro de un cuantil determinado. Dicha relación incrementalno es plausible si se usa el precio /m2 como medida adicional
+
+``` {r echo=TRUE, fig.width=12, fig.height=6} 
+
+dfbis <-df[,c("precio","superficietotal","segmento5c")]
+ 
+dfbis$resultado <- df$segmento5c
+dfbis$resultado <- as.character(dfbis$resultado)
+dfbis$resultado[dfbis$resultado=='1'|dfbis$resultado=='2'] <- "PARTICULARES"
+dfbis$resultado[dfbis$resultado!='PARTICULARES'] <- "PREMIUM"
+dfbis$resultado <- factor(dfbis$resultado)
+names (dfbis) <- c("precio", "superficie","","resultado")
+ 
+#bines <- dfbis[!is.na(dfbis[with(dfbis,order(precio,superficie)),])]
+dfbis$precisionsegmentacion = factor(df$precisionsegmentacion)
+bines <- dfbis[with(dfbis,order(precio,superficie)),]
+bines <-bines[complete.cases(bines),]
+bines <- bines[,c("precio", "superficie","resultado","precisionsegmentacion")]
+bines$preciom2 <- bines$precio / bines$superficie
+
+brks <- with(bines, quantile(precio, probs = seq(0,1,by=0.1)))
+bines <- within(bines, quantile_precio <- cut(precio, breaks=brks, labels=1:10, include.lowest = TRUE))
+
+bines <- bines[with(bines,order(preciom2,precio)),]
+brks <- with(bines, quantile(preciom2, probs = seq(0,1,by=0.1)))
+bines <- within(bines, quantile_preciom2 <- cut(preciom2, breaks=brks, labels=1:10, include.lowest = TRUE))
+
+ 
+ resumen <- aggregate(precio ~ quantile_precio + resultado, data = bines, length)
+ #resumen
+ 
+ resumen2 <- aggregate(precio ~ quantile_precio, data = bines, length)
+ #resumen2
+ 
+ precios <- aggregate(precio ~ quantile_precio, data = bines, mean)
+ 
+ resumen$probs_precio <-resumen$precio/resumen2$precio * 100
+ rm(resumen2)
+ #plot(resumen[((nrow(resumen)/2)+1):nrow(resumen),4])
+ 
+ y <- resumen[((nrow(resumen)/2)+1):nrow(resumen),"probs_precio"]
+ #y <- bines$precio
+ 
+ x <- 1:length(y)
+
+ # x
+ dat<-data.frame(x=x,y_precio=y)
+
+ resumen <- aggregate(preciom2 ~ quantile_preciom2 + resultado, data = bines, length)
+ #resumen
+ 
+ resumen2 <- aggregate(preciom2 ~ quantile_preciom2, data = bines, length)
+ #resumen2
+ 
+ preciosm2 <- aggregate(preciom2 ~ quantile_preciom2, data = bines, mean)
+ 
+ resumen$probs_preciom2 <-resumen$preciom2/resumen2$preciom2 * 100
+ rm(resumen2)
+ #plot(resumen[((nrow(resumen)/2)+1):nrow(resumen),4])
+ 
+ y <- resumen[((nrow(resumen)/2)+1):nrow(resumen),"probs_preciom2"]
+ #y <- bines$precio
+ 
+Apremiums= matrix(0, nrow=100, ncol=100)
+Aparticulares= matrix(0, nrow=100, ncol=100)
+
+dat$y_preciom2 <- y
+head(dat)
+
+bines$combined <- 1
+resumen <- aggregate(combined ~ quantile_precio + quantile_preciom2 + resultado, data = bines, length)
+
+bines$precio_prob <- sapply(bines$quantile_precio, function(x) dat$y_precio[x])
+bines$preciom2_prob <- sapply(bines$quantile_preciom2, function(x) dat$y_preciom2[x])
+
+#ggplot(bines,aes(x=precio,y=preciom2,fill=precio_prob))+ geom_tile()
+
+library(reshape)
+mydf <- cast(resumen, quantile_precio+quantile_preciom2~resultado, sum, value='combined')
+ggplot(mydf, aes(x=quantile_precio, y=quantile_preciom2, size=PREMIUM/(PARTICULARES+PREMIUM))) + geom_point()
+
+ggplot(mydf, aes(x=quantile_preciom2, y=PREMIUM/(PARTICULARES+PREMIUM))) + geom_point() + facet_wrap(~quantile_precio)
+
+
+library(plyr)
+
+ggplot(ddply(mydf, .(quantile_precio), summarise, part=sum(PARTICULARES), pre=sum(PREMIUM)), 
+       aes(x=quantile_precio, y=pre/(pre+part))) + geom_bar(stat="identity")
+
+ggplot(ddply(mydf, .(quantile_preciom2), summarise, part=sum(PARTICULARES), pre=sum(PREMIUM)), 
+       aes(x=quantile_preciom2, y=pre/(pre+part))) + geom_bar(stat="identity")
+
+#melt(mydf, by=c("PARTICULARES", "PREMIUM"))
+```
+
+
+``` {r echo=TRUE, fig.width=12, fig.height=6} 
+
+ dfbis <-df[,c("precio","superficietotal","segmento5c")]
+ 
+ dfbis$resultado <- df$segmento5c
+ dfbis$resultado <- as.character(dfbis$resultado)
+ dfbis$resultado[dfbis$resultado=='1'|dfbis$resultado=='2'] <- "PARTICULARES"
+ dfbis$resultado[dfbis$resultado!='PARTICULARES'] <- "PREMIUM"
+ dfbis$resultado <- factor(dfbis$resultado)
+
+ names (dfbis) <- c("precio", "superficie","","resultado")
+ 
+ #bines <- dfbis[!is.na(dfbis[with(dfbis,order(precio,superficie)),])]
+ dfbis$precisionpreciovivienda <- factor(df$precisionpreciovivienda)
+ dfbis$precisionsegmentacion <- factor(df$precisionsegmentacion)
+ dfbis$cod_segmento_plan_uno <- factor(df$cod_segmento_plan_uno)
+
+ bines <- dfbis[with(dfbis,order(precio,superficie)),]
+ bines <-bines[complete.cases(bines),]
+ bines <- bines[bines$precisionsegmentacion==0|bines$precisionsegmentacion==1|bines$precisionsegmentacion==2|bines$precisionsegmentacion==3,]
+ bines <- bines[bines$precisionpreciovivienda!=0&bines$precisionpreciovivienda!=1&bines$precisionpreciovivienda!=2,]
+ bines <- bines[bines$cod_segmento_plan_uno=='P',]
+# bines <- bines[bines$cod_segmento_plan_uno=='P',]
+bines <- bines[,c("precio", "superficie","resultado","precisionsegmentacion")]
+bines$preciom2 <- bines$precio / bines$superficie
+
+brks <- with(bines, quantile(precio, probs = seq(0,1,by=0.001)))
+bines <- within(bines, quantile <- cut(precio, breaks=brks, labels=1:1000, include.lowest = TRUE))
+
+ resumen <- aggregate(precio ~ quantile + resultado, data = bines, length)
+ #resumen
+ 
+ resumen2 <- aggregate(precio ~ quantile, data = bines, length)
+ #resumen2
+ 
+ precios <- aggregate(precio ~ quantile, data = bines, mean)
+ 
+ resumen$probs <-resumen$precio/resumen2$precio * 100
+ rm(resumen2)
+ #plot(resumen[((nrow(resumen)/2)+1):nrow(resumen),4])
+ 
+ y <- resumen[((nrow(resumen)/2)+1):nrow(resumen),"probs"]
+ #y <- bines$precio
+ 
+ x <- 1:length(y)
+ d <- numeric(length(y))
+ 
+ for (i in 1:length(x)){
+   model<-lm(y~ (x<x[i]) * x + (x>=x[i]) * x )
+   d[i] <- summary(model)[[6]]
+ }
+ 
+ (corte <- which.min(d))
+ 
+ y2 <- y[corte:length(y)]
+ x2 <- x[corte:length(x)]  
+ 
+ d2 <- numeric(length(y2))
+ for(i in 1:length(y2)){
+   model2 <- lm(y2~ (x2<x2[i]) * x2 + (x2>=x2[i]) * x2 )
+   d2[i] <- summary(model2)[[6]]
+ }
+ 
+ (corte2 <- which.min(d2))
+ 
+ # x
+ dat<-data.frame(x=x,y=y)
+dat$z <- NA
+dat[1:(corte-1),"z"] <- 1
+#dat[corte:(corte+corte2-1),"z"] <- 2
+#dat[(corte+corte2):length(y),"z"] <- 3
+#dat$z <- factor(dat$z)
+
+#Mejor usar esta librería ya que permite juntar en los breakpoints
+library(segmented)
+x <- precios$precio
+lin.mod <- lm(y~x)
+lin.mod
+
+ #primero se aproxima 2 valores, no importa si la aproximación es buena
+segmented.mod <- segmented(lin.mod, seg.Z=~x, psi= c(x[length(y)*0.5],x[length(y)*0.]))
+segmented.mod
+dat$precio <- precios$precio
+dat$z<-factor(segmented.mod$id.group)
+summary(dat$z)
+
+(corte <- segmented.mod$psi[2])
+segmented.mod$coefficients[[1]]+segmented.mod$coefficients[[2]]*corte
+
+
+#(precioCorte <- precios[[2]][floor(corte)] + (corte-floor(corte))* (precios[[2]][ceiling(corte)]- precios[[2]][floor(corte)]))
+
+dev.off()
+ggplot(dat, aes(x,y, color=z))+
+  geom_point()
+ggplot(dat,aes(precio,y,color=z))+
+  geom_point()
+
+#ggplot(dat,)
+
+```
+
+
+
+``` {r echo=TRUE, fig.width=12, fig.height=6} 
+
+ dfbis <-df[,c("precio","superficietotal","segmento5c")]
+ 
+ dfbis$resultado <- df$segmento5c
+ dfbis$resultado <- as.character(dfbis$resultado)
+ dfbis$resultado[dfbis$resultado=='1'|dfbis$resultado=='2'] <- "PARTICULARES"
+ dfbis$resultado[dfbis$resultado!='PARTICULARES'] <- "PREMIUM"
+ dfbis$resultado <- factor(dfbis$resultado)
+
+ names (dfbis) <- c("precio", "superficie","","resultado")
+ 
+ #bines <- dfbis[!is.na(dfbis[with(dfbis,order(precio,superficie)),])]
+ dfbis$precisionpreciovivienda <- factor(df$precisionpreciovivienda)
+ dfbis$precisionsegmentacion <- factor(df$precisionsegmentacion)
+ dfbis$cod_segmento_plan_uno <- factor(df$cod_segmento_plan_uno)
+
+ bines <- dfbis[with(dfbis,order(precio,superficie)),]
+ bines <-bines[complete.cases(bines),]
+ bines <- bines[bines$precisionsegmentacion==0|bines$precisionsegmentacion==1|bines$precisionsegmentacion==2|bines$precisionsegmentacion==3,]
+ bines <- bines[bines$precisionpreciovivienda!=0&bines$precisionpreciovivienda!=1&bines$precisionpreciovivienda!=2,]
+ bines <- bines[bines$cod_segmento_plan_uno=='P',]
+# bines <- bines[bines$cod_segmento_plan_uno=='P',]
+bines <- bines[,c("precio", "superficie","resultado","precisionsegmentacion")]
+bines$preciom2 <- bines$precio / bines$superficie
+
+brks <- with(bines, quantile(precio, probs = seq(0,1,by=0.001)))
+bines <- within(bines, quantile <- cut(precio, breaks=brks, labels=1:1000, include.lowest = TRUE))
+
+ resumen <- aggregate(precio ~ quantile + resultado, data = bines, length)
+ #resumen
+ 
+ resumen2 <- aggregate(precio ~ quantile, data = bines, length)
+ #resumen2
+ 
+ precios <- aggregate(precio ~ quantile, data = bines, mean)
+ 
+ resumen$probs <-resumen$precio/resumen2$precio * 100
+ rm(resumen2)
+ #plot(resumen[((nrow(resumen)/2)+1):nrow(resumen),4])
+ 
+ y <- resumen[((nrow(resumen)/2)+1):nrow(resumen),"probs"]
+ #y <- bines$precio
+ 
+ x <- 1:length(y)
+ d <- numeric(length(y))
+ 
+ for (i in 1:length(x)){
+   model<-lm(y~ (x<x[i]) * x + (x>=x[i]) * x )
+   d[i] <- summary(model)[[6]]
+ }
+ 
+ (corte <- which.min(d))
+ 
+ y2 <- y[corte:length(y)]
+ x2 <- x[corte:length(x)]  
+ 
+ d2 <- numeric(length(y2))
+ for(i in 1:length(y2)){
+   model2 <- lm(y2~ (x2<x2[i]) * x2 + (x2>=x2[i]) * x2 )
+   d2[i] <- summary(model2)[[6]]
+ }
+ 
+ (corte2 <- which.min(d2))
+ 
+ # x
+ dat<-data.frame(x=x,y=y)
+dat$z <- NA
+dat[1:(corte-1),"z"] <- 1
+#dat[corte:(corte+corte2-1),"z"] <- 2
+#dat[(corte+corte2):length(y),"z"] <- 3
+#dat$z <- factor(dat$z)
+
+#Mejor usar esta librería ya que permite juntar en los breakpoints
+library(segmented)
+x <- precios$precio
+lin.mod <- lm(y~x)
+lin.mod
+
+ #primero se aproxima 2 valores, no importa si la aproximación es buena
+segmented.mod <- segmented(lin.mod, seg.Z=~x, psi= c(x[length(y)*0.5]))
+segmented.mod
+dat$precio <- precios$precio
+dat$z<-factor(segmented.mod$id.group)
+summary(dat$z)
+
+(corte <- segmented.mod$psi[2])
+segmented.mod$coefficients[[1]]+segmented.mod$coefficients[[2]]*corte
+
+#(precioCorte <- precios[[2]][floor(corte)] + (corte-floor(corte))* (precios[[2]][ceiling(corte)]- precios[[2]][floor(corte)]))
+
+porc.prior <- nrow(subset(bines, resultado=="PREMIUM"))*100 / nrow(bines)
+#dev.off()
+ggplot(dat, aes(x,y, color=z))+
+  geom_point()
+ggplot(dat,aes(precio,y,color=z))+
+  geom_point() + geom_hline(aes(yintercept=porc.prior)) + geom_hline(aes(yintercept=porc.prior*2))
+
+#ggplot(dat,)
+
+```

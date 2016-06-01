@@ -1,0 +1,1006 @@
+---
+title: "Análisis de rentabilidad/comportamiento de usuario Wallet (vs usuario Wallet inactivo vs usuario BBVANet)"
+---
+
+```{r, echo = FALSE}
+title     <- '[Wallet]: Análisis de rentabilidad/comportamiento de usuario Wallet (vs usuario Wallet inactivo vs usuario BBVANet)'
+
+keywords  <- 'wallet, digital, online, bbva.es, bbvanet, rentabilidad, comportamiento, transaccionalidad, tarjetas, recibos, segmento, plan uno, comportamental, global'  
+```
+
+```{r, echo=FALSE}
+suppressMessages(library(DBI))
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(lattice))
+suppressMessages(library(reshape))
+suppressMessages(library(plyr))
+
+options(warn=-1, scipen=3, width=150)
+source('~/bda_clarity/tools/warehouse_basics.R') ;
+source('~/bda_clarity/tools/write.hive.R') ;
+```
+
+```{r echo=FALSE, eval=FALSE}
+# Dependencies
+da_pro.transacciones_por_canal <- clarity.use_table(DEPENDENCY_FULL_PRO_TABLE,
+                                                    'da_pro.transacciones_por_canal',
+                                                    select = '*')
+da_pro.clientes_corp <- clarity.use_table(DEPENDENCY_FULL_PRO_TABLE,
+                                                    'da_pro.clientes_corp',
+                                                    select = '*')
+da_pro.intervinientes_corp <- clarity.use_table(DEPENDENCY_FULL_PRO_TABLE,
+                                                    'da_pro.intervinientes_corp',
+                                                    select = '*')
+da_pro.rentabilidad_clientes <- clarity.use_table(DEPENDENCY_FULL_PRO_TABLE,
+                                                    'da_pro.rentabilidad_clientes',
+                                                    select = '*')
+da_pro.movimientos_cuentas_corp <- clarity.use_table(DEPENDENCY_FULL_PRO_TABLE,
+                                                    'da_pro.movimientos_cuentas_corp',
+                                                    select = '*')
+da_pro.datos_tarjetas_corp <- clarity.use_table(DEPENDENCY_FULL_PRO_TABLE,
+                                                    'da_pro.datos_tarjetas_corp',
+                                                    select = '*')
+da_pro.datos_tarjetas_detalle_corp <- clarity.use_table(DEPENDENCY_FULL_PRO_TABLE,
+                                                    'da_pro.datos_tarjetas_detalle_corp',
+                                                    select = '*')
+da_pro.segmento_global <- clarity.use_table(DEPENDENCY_FULL_PRO_TABLE,
+                                                    'da_pro.segmento_global',
+                                                    select = '*')
+da_pro.segmento_plan_uno <- clarity.use_table(DEPENDENCY_FULL_PRO_TABLE,
+                                                    'da_pro.segmento_plan_uno',
+                                                    select = '*')
+clarity_intermediate.detalle_productos_saldos_cliente <- clarity.use_table(DEPENDENCY_OTHER_TABLES,
+                                                            'clarity_intermediate.detalle_productos_saldos_cliente',
+                                                            select = '*',
+                                                            sqname = 'clarity_intermediate.detalle_productos_saldos_cliente')
+clarity_elements.metricas_segm_comport <- clarity.use_table(DEPENDENCY_OTHER_TABLES,
+                                                            'clarity_elements.metricas_segm_comport',
+                                                            select = '*',
+                                                            sqname = 'clarity_elements.metricas_segm_comport')
+da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20140331 <- clarity.use_table(DEPENDENCY_OTHER_TABLES,
+                                                            'da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20140331',
+                                                            select = '*',
+                                                            sqname = 'da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20140331')
+```
+
+LAST UPDATE: **`r qhive("select max(partition_id) from da_martalamela.wallet_new_users_active_month")`**
+
+Tenemos que realizar una comparativa de los siguientes grupos:
+
++ Usuarios wallet
++ Usuarios activos wallet en el periodo analizado
++ Usuarios no wallet, activos en BBVA Net y menores de 64 años (grupo considerado como control)
+
+Algunas métricas interesantes podrían ser:
+
++ margen/cliente
++ nº tarjetas/cliente
++ nº transacciones acumuladas (crédito y débito)
++ volumen de compras acumuladas (crédito y débito)
++ % actividad últimos 3 meses
++ % cancelación tarjetas
++ IRENE
++ etc
+
+**PREPARACIÓN CONJUNTO DE USUARIOS**
+
+Comenzamos identificando qué es un _usuario wallet_, y qué definimos como _usuario activo_. Basándonos en el dashboard recibido por parte de la gente de wallet, un usuario wallet es todo aquel cliente que se ha descargado la aplicación y ha hecho login. Un usuario activo sería aquel que ha hecho login en el último mes.
+
+Partiendo del análisis previo realizado de los datos, consideramos que un usuario wallet es aquel que en algún momento de todo el histórico **se ha conectado a la aplicación wallet**, entendiendo como tal que existe al menos un registro en la tabla de Transacciones Por Canal asociado a ese cliente y etiquetado como:
+
+| cod_trnfims |      des_trnfims      |
+|:-----------:|:---------------------:|
+|  00000001   | CONEXIÓN CANAL REMOTO |
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+# filtramos por códigos de servicio wallet en TxC
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_cod_serv_dv as
+select fec_soli_trn,
+cod_anno_ej,
+cod_mes_ej,
+cod_trnfims,
+cod_canal_dv,
+cod_medio_dv,
+cod_serv_dv,
+cod_pan,
+imp_trans,
+cod_idcontra,
+cod_pers_trs,
+cod_eve_trn,
+cod_deve_trn,
+cod_pmit_trn,
+partition_id
+from da_pro.transacciones_por_canal
+where cast(cod_serv_dv as int) in (101,102)")
+
+# creación de la variable "usuario wallet", conteo de nuevos usuarios mes a mes
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_new_users_month as
+SELECT yyyymmdd,
+rank() over (ORDER BY yyyymmdd ASC) as num_partition,
+SUM(count_distinct_cod_pers_trs) OVER (PARTITION BY yyyymmdd ORDER BY yyyymmdd) as new_users,
+SUM(count_distinct_cod_pers_trs) OVER (PARTITION BY over_partition ORDER BY yyyymmdd) as new_users_acum
+FROM
+(
+  select
+  1 as over_partition,
+  concat(year(first_fec_soli_trn),
+  case when month(first_fec_soli_trn)>=10 then month(first_fec_soli_trn)
+  else concat(0,month(first_fec_soli_trn)) end,
+  case when month(first_fec_soli_trn)=2 then 28
+  when month(first_fec_soli_trn) in (1,3,5,7,8,10,12) then 31
+  else 30 end) as yyyymmdd,
+  count(distinct cod_pers_trs) as count_distinct_cod_pers_trs,
+  count(*) as count_all
+  from
+  ( 
+    select
+    cod_pers_trs,
+    min(fec_soli_trn) as first_fec_soli_trn
+    from da_martalamela.wallet_cod_serv_dv
+    where cod_pers_trs not like '%@%'
+    and cod_trnfims like '%00000001%'
+    group by cod_pers_trs
+  ) conexion
+  group by concat(year(first_fec_soli_trn),
+  case when month(first_fec_soli_trn)>=10 then month(first_fec_soli_trn)
+  else concat(0,month(first_fec_soli_trn)) end,
+  case when month(first_fec_soli_trn)=2 then 28
+  when month(first_fec_soli_trn) in (1,3,5,7,8,10,12) then 31
+  else 30 end)
+  order by yyyymmdd
+) auxiliar")
+
+qhive("select yyyymmdd, new_users, new_users_acum
+      from da_martalamela.wallet_new_users_month")
+```
+
+Basándonos ahora en el concepto de usuario activo wallet que se plasma en el Dashboard de referencia creado por el equipo de MIS, tenemos que identificar mensualmente a aquellos usuarios wallet que **se han conectado a la aplicación wallet en los últimos tres meses**.
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+# tablón de conexiones mes a mes
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_active_users_month as
+select tablon.cod_pers_trs,
+tablon.partition_id,
+tablon.num_partition,
+case when ind_conexion_wallet=1 then 1 else 0 end as ind_conexion_wallet
+from
+(
+  select b.cod_pers_trs, a.partition_id, a.num_partition
+  from
+  (select distinct partition_id, rank() over (ORDER BY partition_id ASC) as num_partition from da_martalamela.wallet_cod_serv_dv) a
+  join
+  (select distinct cod_pers_trs from da_martalamela.wallet_cod_serv_dv where cod_pers_trs not like '%@%' and cod_trnfims like '%00000001%') b
+) tablon
+left join
+(
+  select
+  cod_pers_trs,
+  concat(year(fec_soli_trn),
+  case when month(fec_soli_trn)>=10 then month(fec_soli_trn)
+  else concat(0,month(fec_soli_trn)) end,
+  case when month(fec_soli_trn)=2 then 28
+  when month(fec_soli_trn) in (1,3,5,7,8,10,12) then 31
+  else 30 end) as yyyymmdd,
+  1 as ind_conexion_wallet
+  from da_martalamela.wallet_cod_serv_dv
+  where cod_pers_trs not like '%@%'
+  and cod_trnfims like '%00000001%'
+  group by cod_pers_trs, concat(year(fec_soli_trn),
+  case when month(fec_soli_trn)>=10 then month(fec_soli_trn)
+  else concat(0,month(fec_soli_trn)) end,
+  case when month(fec_soli_trn)=2 then 28
+  when month(fec_soli_trn) in (1,3,5,7,8,10,12) then 31
+  else 30 end)
+) conexiones
+on (cast(tablon.cod_pers_trs as int)=cast(conexiones.cod_pers_trs as int) and cast(tablon.partition_id as int)=cast(conexiones.yyyymmdd as int))
+order by tablon.cod_pers_trs, tablon.partition_id")
+
+# acumulamos por 3 meses
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_active_users_three_months as
+select mm.cod_pers_trs,
+mm.partition_id,
+mm.num_partition,
+mm.ind_conexion_wallet,
+case when (mm.ind_conexion_wallet + mm1.ind_conexion_wallet + mm2.ind_conexion_wallet)>0 then 1 else 0 end as ind_conexion_wallet_ult_3m
+from da_martalamela.wallet_active_users_month mm
+left join da_martalamela.wallet_active_users_month mm1
+on cast(mm.cod_pers_trs as int)=cast(mm1.cod_pers_trs as int) and mm.num_partition=(mm1.num_partition+1)
+left join da_martalamela.wallet_active_users_month mm2
+on cast(mm.cod_pers_trs as int)=cast(mm2.cod_pers_trs as int) and mm.num_partition=(mm2.num_partition+2)")
+
+# cálculo del % de usuarios activos
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_new_users_active_month as
+select partition_id,
+new_users_acum,
+sum_conexion_wallet,
+round(sum_conexion_wallet/new_users_acum*100,1) as pct_active_users_acum,
+sum_conexion_wallet_ult_3m,
+round(sum_conexion_wallet_ult_3m/new_users_acum*100,1) as pct_active_users_acum_ult_3m,
+total_new_users,
+round(sum_conexion_wallet_ult_3m/total_new_users*100,1) as pct_active_users_total
+from
+(
+  select partition_id,
+  sum(ind_conexion_wallet) as sum_conexion_wallet,
+  sum(ind_conexion_wallet_ult_3m) as sum_conexion_wallet_ult_3m
+  from da_martalamela.wallet_active_users_three_months
+  group by partition_id
+) conexiones
+left join da_martalamela.wallet_new_users_month acum
+on cast(conexiones.partition_id as int)=cast(acum.yyyymmdd as int)
+join
+(
+  select sum(new_users) as total_new_users from da_martalamela.wallet_new_users_month
+) total
+order by partition_id")
+
+qhive("select partition_id, new_users_acum, sum_conexion_wallet_ult_3m, pct_active_users_acum_ult_3m
+      from da_martalamela.wallet_new_users_active_month")
+```
+
+Definimos ahora nuestro propio concepto de usuario activo wallet, ya que para poder realizar evolutivos anuales no podemos tener en cuenta únicamente el estado (activo/inactivo) del usuario wallet en los últimos 3 meses, si no que debemos estudiar su estado a lo largo de los 12 meses para poder ubicarlo dentro de la bolsa de usuarios activos o de usuarios inactivos.
+
+Para poder definirlo correctamente, empezamos calculando cuántos usuarios se conectan mes a mes, y cuántos cada 3 meses:
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+# número de meses que se conectan los usuarios wallet (1-17 meses)
+qhive("select num_meses_conexion,
+count(distinct cod_pers_trs) as usuarios_wallet,
+round(count(distinct cod_pers_trs)/241551*100,2) as pct_usuarios_wallet
+from
+(
+  select cod_pers_trs, sum(ind_conexion_wallet) as num_meses_conexion
+  from da_martalamela.wallet_active_users_three_months
+  group by cod_pers_trs
+) as auxiliar
+group by num_meses_conexion
+order by num_meses_conexion desc LIMIT 20")
+
+# número de conexiones acumuladas cada 3 meses (1-15 meses)
+qhive("select num_conexiones_acum_ult_3m,
+count(distinct cod_pers_trs) as usuarios_wallet,
+round(count(distinct cod_pers_trs)/241551*100,2) as pct_usuarios_wallet
+from
+(
+select cod_pers_trs, sum(ind_conexion_wallet_ult_3m) as num_conexiones_acum_ult_3m
+from da_martalamela.wallet_active_users_three_months
+group by cod_pers_trs
+) auxiliar
+group by num_conexiones_acum_ult_3m
+order by num_conexiones_acum_ult_3m desc LIMIT 20")
+```
+
+Para la entrega de una bolsa de 40.000 usuarios wallet (20.000 activos y 20.000 inactivos) seleccionamos como periodo de estudio los 12 meses entre marzo'14 - marzo'15. Elegimos los usuarios wallet que se dieron de alta en la aplicación (conectaron por primera vez a ésta) **antes del mes de marzo'14**. Validamos el estado de los usuarios (activo/inactivo) en tramos de 3 meses:
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+# partición de alta de usuario
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_user_partition_first_connection as
+select
+cod_pers_trs,
+min(yyyymmdd) as partition_id_alta
+from
+(
+select
+  cod_pers_trs,
+  concat(year(fec_soli_trn),
+  case when month(fec_soli_trn)>=10 then month(fec_soli_trn)
+  else concat(0,month(fec_soli_trn)) end,
+  case when month(fec_soli_trn)=2 then 28
+  when month(fec_soli_trn) in (1,3,5,7,8,10,12) then 31
+  else 30 end) as yyyymmdd,
+  1 as ind_conexion_wallet
+  from da_martalamela.wallet_cod_serv_dv
+  where cod_pers_trs not like '%@%'
+  and cod_trnfims like '%00000001%'
+  group by cod_pers_trs, concat(year(fec_soli_trn),
+  case when month(fec_soli_trn)>=10 then month(fec_soli_trn)
+  else concat(0,month(fec_soli_trn)) end,
+  case when month(fec_soli_trn)=2 then 28
+  when month(fec_soli_trn) in (1,3,5,7,8,10,12) then 31
+  else 30 end)
+) conexiones
+group by cod_pers_trs
+order by cod_pers_trs")
+
+# selección de periodo de estudio (marzo14-marzo15), validación de estado de usuario cada 3 meses
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_bolsa_usuarios_marzo as
+select actividad.cod_pers_trs,
+partition_id_alta,
+partition_id,
+num_partition,
+ind_conexion_wallet_ult_3m,
+case when cast(partition_id as int)=20140331 and ind_conexion_wallet_ult_3m=1 then 1 else 0 end as ind_20140331,
+case when cast(partition_id as int)=20140630 and ind_conexion_wallet_ult_3m=1 then 1 else 0 end as ind_20140630,
+case when cast(partition_id as int)=20140930 and ind_conexion_wallet_ult_3m=1 then 1 else 0 end as ind_20140930,
+case when cast(partition_id as int)=20141231 and ind_conexion_wallet_ult_3m=1 then 1 else 0 end as ind_20141231,
+case when cast(partition_id as int)=20150331 and ind_conexion_wallet_ult_3m=1 then 1 else 0 end as ind_20150331
+from da_martalamela.wallet_active_users_three_months actividad
+left join da_martalamela.wallet_user_partition_first_connection alta
+on cast(actividad.cod_pers_trs as int) = cast(alta.cod_pers_trs as int)
+where cast(partition_id as int) in (20140331,20140630,20140930,20141231,20150331)
+and cast(partition_id_alta as int) <= 20140331")
+```
+
+Definimos las siguientes categorías de usuarios:
+
++ Activo: conexión cada 3 meses durante los últimos 12 meses
++ Activo tras inactividad: conexión en los últimos 3, 6, 9 meses tras no existir conexión anterior desde el alta
++ Inactivo: no existe conexión en los últimos 12 meses
++ Inactivo tras actividad: no existe conexión en los últimos 6, 9 meses tras existir conexión anterior desde el alta
+
+El resto de opciones no serían viables para la definición de usuario activo o inactivo.
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+# creación bolsa usuarios activos + usuarios inactivos
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_categorias_usuarios_marzo as
+select distinct cod_pers_trs,
+case when ind_20140331 in (0,1) and ind_20140630=1 and ind_20140930=1 and ind_20141231=1 and ind_20150331=1 then 'Activo'
+     when ind_20140331 in (0,1) and ind_20140630=0 and ind_20140930=0 and ind_20141231=0 and ind_20150331=0 then 'Inactivo'
+     when ind_20140331=1 and ind_20140630=1 and ind_20140930 in (0,1) and ind_20141231=0 and ind_20150331=0 then 'Inactivo_tras_actividad'
+     when ind_20140331=0 and ind_20140630=0 and ind_20140930 in (0,1) and ind_20141231=1 and ind_20150331=1 then 'Activo_tras_inactividad'
+     when ind_20140331=0 and ind_20140630=0 and ind_20140930=0 and ind_20141231=0 and ind_20150331=1 then 'Activo_tras_inactividad'
+     else null
+     end as categoria_usuario
+from
+(
+  select cod_pers_trs,
+  sum(ind_20140331) as ind_20140331,
+  sum(ind_20140630) as ind_20140630,
+  sum(ind_20140930) as ind_20140930,
+  sum(ind_20141231) as ind_20141231,
+  sum(ind_20150331) as ind_20150331
+  from da_martalamela.wallet_bolsa_usuarios_marzo
+  group by cod_pers_trs 
+) grupos")
+
+qhive("select categoria_usuario, count(distinct cod_pers_trs)
+from da_martalamela.wallet_categorias_usuarios_marzo
+group by categoria_usuario
+order by categoria_usuario")
+```
+
+Por tanto, podemos construir una tabla que contenga para cada cod_pers_trs la categoría de usuario wallet a la que pertenece (usuario Activo/Inactivo) siendo Activo aquellos que han tenido conexión todos los trimestres del último año e Inactivo aquellos que no existe conexión al menos en los últimos 6 meses (agrupa los estados Inactivo e Inactivo tras actividad definidos anteriormente).
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_categorias_usuarios as
+select distinct cod_pers_trs,
+case when ind_20140331 in (0,1) and ind_20140630=1 and ind_20140930=1 and ind_20141231=1 and ind_20150331=1 then 'Wallet Activo'
+     when ind_20140331 in (0,1) and ind_20140630=0 and ind_20140930=0 and ind_20141231=0 and ind_20150331=0 then 'Wallet Inactivo'
+     when ind_20140331=1 and ind_20140630=1 and ind_20140930 in (0,1) and ind_20141231=0 and ind_20150331=0 then 'Wallet Inactivo'
+     else null
+     end as categoria_usuario
+from
+(
+  select cod_pers_trs,
+  sum(ind_20140331) as ind_20140331,
+  sum(ind_20140630) as ind_20140630,
+  sum(ind_20140930) as ind_20140930,
+  sum(ind_20141231) as ind_20141231,
+  sum(ind_20150331) as ind_20150331
+  from da_martalamela.wallet_bolsa_usuarios_marzo
+  group by cod_pers_trs 
+) grupos")
+
+qhive("select categoria_usuario, count(distinct cod_pers_trs)
+from da_martalamela.wallet_categorias_usuarios
+group by categoria_usuario
+order by categoria_usuario")
+```
+
+Hemos de comparar este conjunto de clientes con los usuarios no wallet, activos en BBVA Net y menores de 64 años (grupo considerado como control). Para ello extraemos de la tabla de segmentación comportamental en la Net los grupos 1 a 6 (1-contratan,..., 6-consultan) que serían los usuarios que consideramos activos en BBVA Net y cruzamos con Edad (atributo Clarity) para filtrar menores de 64 años. Además seleccionamos clientes cuya fecha de alta según da_pro.clientes_corp esté comprendida entre el 01/11/2013 y el 31/03/2014, igual que ocurría con los botes de usuarios wallet. También cruzamos con nuestro grupo de usuarios wallet para que un cliente no esté en ambos botes.
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select segmento_comportamental, mix_actividad
+from clarity_elements.metricas_segm_comport
+group by segmento_comportamental, mix_actividad
+order by segmento_comportamental")
+```
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_bbvanet as
+      select usuarionet.cod_persona as cod_pers_trs,
+      rand() as random_number
+      from
+      (
+        select distinct cod_persona
+        from clarity_elements.metricas_segm_comport
+        where segmento_comportamental >= 1 and segmento_comportamental <= 6
+      ) usuarionet
+      left join clarity_elements.edad edad
+      on cast(usuarionet.cod_persona as int)=cast(edad.cod_persona as int)
+      left join da_martalamela.wallet_categorias_usuarios wallet
+      on cast(usuarionet.cod_persona as int)=cast(wallet.cod_pers_trs as int)
+      left join (select cod_persctpn,
+                 min(fec_altapers) as fec_altapers
+                 from da_pro.clientes_corp
+                group by cod_persctpn) clientes
+      on cast(usuarionet.cod_persona as int)=cast(clientes.cod_persctpn as int)
+      where edad >= 18 and edad <= 64
+      and categoria_usuario is null
+      --and fec_altapers >= '2013-11-01'
+      and fec_altapers <= '2014-03-31'")
+
+qhive("select count(distinct cod_pers_trs)
+from da_martalamela.wallet_bbvanet")
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_bbvanet_sample as
+      select cod_pers_trs,
+      'BBVANet' as categoria_usuario
+      from da_martalamela.wallet_bbvanet
+      where random_number <= 30000/2687553")
+```
+
+Por tanto nuestro tablón base para el estudio de rentabilidad sería el siguiente:
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_tablon_analisis_rentabilidad as
+        select b.cod_pers_trs, b.categoria_usuario, a.partition_id
+        from
+         (
+          select distinct partition_id from da_martalamela.wallet_cod_serv_dv) a
+          join
+          (
+            select *
+            from da_martalamela.wallet_categorias_usuarios
+            where categoria_usuario is not null
+            union all
+            select *
+            from da_martalamela.wallet_bbvanet_sample
+          ) b
+        order by b.cod_pers_trs, a.partition_id")
+
+qhive("select categoria_usuario, count(distinct cod_pers_trs)
+      from da_martalamela.wallet_tablon_analisis_rentabilidad
+      group by categoria_usuario")
+```
+
+
+**ANÁLISIS DE RENTABILIDAD**
+
++ Rentabilidad/Margen: Filtramos en da_pro.rentabilidad_clientes por codprtda=000099005 (Margen Neto), sumando la variable imp_anual
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_margen_neto_anual as
+      select
+      tablon.cod_pers_trs,
+      tablon.categoria_usuario,
+      tablon.partition_id,
+      rent.sum_imp_anual
+      from da_martalamela.wallet_tablon_analisis_rentabilidad tablon
+      left join
+      (
+        select cod_persctpn,
+        partition_id,
+        sum(CASE WHEN CAST(imp_anual AS DOUBLE) IS NULL THEN 0.0 ELSE CAST(imp_anual AS DOUBLE) END) AS sum_imp_anual
+        from da_pro.rentabilidad_clientes
+        where cod_prtda like '%99005%'
+        group by cod_persctpn,partition_id
+      ) rent
+      on cast(trim(tablon.cod_pers_trs) as int)=cast(trim(rent.cod_persctpn) as int)
+      and cast(tablon.partition_id as int)=cast(rent.partition_id as int)")
+
+wallet_margen_neto_anual <- qhive("select cod_pers_trs,
+                                  categoria_usuario,
+                                  partition_id,
+                                  concat(substr(partition_id,1,4),'-',substr(partition_id,5,2),'-',substr(partition_id,7,2)) as date,
+                                  sum_imp_anual
+                                  from da_martalamela.wallet_margen_neto_anual
+                                  order by cod_pers_trs,partition_id")
+#write.table(wallet_margen_neto_anual,"wallet_margen_neto_anual.txt",row.names=FALSE,dec = ",",sep = ";")
+```
+
+
++ Segmento GLOBAL: Agrupamos en PYMES/Premium/PAES/Particulares
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_segmento_global as
+        select
+        tablon.cod_pers_trs,
+        tablon.categoria_usuario,
+        tablon.partition_id,
+        global.cod_segmsubo_gr
+        from da_martalamela.wallet_tablon_analisis_rentabilidad tablon
+        left join
+        (
+          select cod_persctpn,
+          partition_id,
+          case
+          when cod_segmsubo between 36 and 38 then 'Pymes'
+          when cod_segmsubo between 41 and 43 then 'Premium'
+          when cod_segmsubo between 51 and 54 then 'PAES'
+          when cod_segmsubo between 55 and 62 then 'Particulares'
+          else 'Otros'
+          end as cod_segmsubo_gr
+          from da_pro.segmento_global
+          where cod_segmsubo is not null
+        ) global
+        on cast(trim(tablon.cod_pers_trs) as int)=cast(trim(global.cod_persctpn) as int)
+        and cast(tablon.partition_id as int)=cast(global.partition_id as int)")
+
+wallet_segmento_global <- qhive("select cod_pers_trs,
+                                  categoria_usuario,
+                                  partition_id,
+                                  concat(substr(partition_id,1,4),'-',substr(partition_id,5,2),'-',substr(partition_id,7,2)) as date,
+                                  cod_segmsubo_gr
+                                  from da_martalamela.wallet_segmento_global
+                                  order by cod_pers_trs,partition_id")
+#write.table(wallet_segmento_global,"wallet_segmento_global.txt",row.names=FALSE,dec = ",",sep = ";")
+
+evolucion_wallet_segmento_global <- qhive("select cod_pers_trs,
+                                          categoria_usuario,
+                                          max(cod_segmsubo_gr_20140331) as cod_segmsubo_gr_20140331,
+                                          max(cod_segmsubo_gr_20140630) as cod_segmsubo_gr_20140630,
+                                          max(cod_segmsubo_gr_20140930) as cod_segmsubo_gr_20140930,
+                                          max(cod_segmsubo_gr_20141231) as cod_segmsubo_gr_20141231,
+                                          max(cod_segmsubo_gr_20150331) as cod_segmsubo_gr_20150331
+                                          from
+                                          (
+                                            select cod_pers_trs,
+                                            categoria_usuario,
+                                            case when cast(partition_id as int) = 20140331 then cod_segmsubo_gr else null end as cod_segmsubo_gr_20140331,
+                                            case when cast(partition_id as int) = 20140630 then cod_segmsubo_gr else null end as cod_segmsubo_gr_20140630,
+                                            case when cast(partition_id as int) = 20140930 then cod_segmsubo_gr else null end as cod_segmsubo_gr_20140930,
+                                            case when cast(partition_id as int) = 20141231 then cod_segmsubo_gr else null end as cod_segmsubo_gr_20141231,
+                                            case when cast(partition_id as int) = 20150331 then cod_segmsubo_gr else null end as cod_segmsubo_gr_20150331
+                                            from da_martalamela.wallet_segmento_global
+                                          ) aux
+                                          group by cod_pers_trs, categoria_usuario
+                                          order by cod_pers_trs")
+#write.table(evolucion_wallet_segmento_global,"evolucion_wallet_segmento_global.txt",row.names=FALSE,dec = ",",sep = ";")
+```
+
++ Segmento PLAN UNO
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_segmento_plan_uno as
+        select
+        tablon.cod_pers_trs,
+        tablon.categoria_usuario,
+        tablon.partition_id,
+        uno.cod_segmento_plan_uno
+        from da_martalamela.wallet_tablon_analisis_rentabilidad tablon
+        left join
+        (
+          select distinct cod_persctpn,
+          partition_id,
+          substr(trim(cod_segpref),2,1) as cod_segmento_plan_uno
+          from da_pro.segmento_plan_uno
+          where substr(trim(cod_segpref),2,1) is not null
+        ) uno
+        on cast(trim(tablon.cod_pers_trs) as int)=cast(trim(uno.cod_persctpn) as int)
+        and cast(tablon.partition_id as int)=cast(uno.partition_id as int)")
+
+wallet_segmento_plan_uno <- qhive("select cod_pers_trs,
+                                  categoria_usuario,
+                                  partition_id,
+                                  concat(substr(partition_id,1,4),'-',substr(partition_id,5,2),'-',substr(partition_id,7,2)) as date,
+                                  cod_segmento_plan_uno
+                                  from da_martalamela.wallet_segmento_plan_uno
+                                  order by cod_pers_trs,partition_id")
+#write.table(wallet_segmento_plan_uno,"wallet_segmento_plan_uno.txt",row.names=FALSE,dec = ",",sep = ";")
+
+evolucion_wallet_segmento_plan_uno <- qhive("select cod_pers_trs,
+                                          categoria_usuario,
+                                          max(cod_segmento_plan_uno_20140331) as cod_segmento_plan_uno_20140331,
+                                          max(cod_segmento_plan_uno_20140630) as cod_segmento_plan_uno_20140630,
+                                          max(cod_segmento_plan_uno_20140930) as cod_segmento_plan_uno_20140930,
+                                          max(cod_segmento_plan_uno_20141231) as cod_segmento_plan_uno_20141231,
+                                          max(cod_segmento_plan_uno_20150331) as cod_segmento_plan_uno_20150331
+                                          from
+                                          (
+                                            select cod_pers_trs,
+                                            categoria_usuario,
+                                            case when cast(partition_id as int) = 20140331 then cod_segmento_plan_uno else null end as cod_segmento_plan_uno_20140331,
+                                            case when cast(partition_id as int) = 20140630 then cod_segmento_plan_uno else null end as cod_segmento_plan_uno_20140630,
+                                            case when cast(partition_id as int) = 20140930 then cod_segmento_plan_uno else null end as cod_segmento_plan_uno_20140930,
+                                            case when cast(partition_id as int) = 20141231 then cod_segmento_plan_uno else null end as cod_segmento_plan_uno_20141231,
+                                            case when cast(partition_id as int) = 20150331 then cod_segmento_plan_uno else null end as cod_segmento_plan_uno_20150331
+                                            from da_martalamela.wallet_segmento_plan_uno
+                                          ) aux
+                                          group by cod_pers_trs, categoria_usuario
+                                          order by cod_pers_trs")
+#write.table(evolucion_wallet_segmento_plan_uno,"evolucion_wallet_segmento_plan_uno.txt",row.names=FALSE,dec = ",",sep = ";")
+```
+
++ Segmento COMPORTAMENTAL
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+do.hive("create table IF NOT EXISTS da_martalamela.segm_comport_perfil_digit_metricas_num_dias as
+select distinct cod_cliente,
+        '20140331' as partition_id,
+        marca_segmento_comp as segmento_comportamental,
+        marca_perfil_digital as perfil_digital
+        from da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20140331
+union all
+select distinct cod_cliente,
+        '20140430' as partition_id,
+        segmento_comportamental,
+        perfil_digital
+        from da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20140430
+union all
+select distinct cod_cliente,
+        '20140531' as partition_id,
+        segmento_comportamental,
+        perfil_digital
+        from da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20140531
+union all
+select distinct cod_cliente,
+        '20140630' as partition_id,
+        segmento_comportamental,
+        perfil_digital
+        from da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20140630
+union all
+select distinct cod_cliente,
+        '20140731' as partition_id,
+        segmento_comportamental,
+        perfil_digital
+        from da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20140731
+union all
+select distinct cod_cliente,
+        '20140831' as partition_id,
+        segmento_comportamental,
+        perfil_digital
+        from da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20140831
+union all
+select distinct cod_cliente,
+        '20140930' as partition_id,
+        segmento_comportamental,
+        perfil_digital
+        from da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20140930
+union all
+select distinct cod_cliente,
+        '20141031' as partition_id,
+        segmento_comportamental,
+        perfil_digital
+        from da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20141031
+union all
+select distinct cod_cliente,
+        '20141130' as partition_id,
+        segmento_comportamental,
+        perfil_digital
+        from da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20141130
+union all
+select distinct cod_cliente,
+        '20141231' as partition_id,
+        segmento_comportamental,
+        perfil_digital
+        from da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20141231
+union all
+select distinct cod_cliente,
+        '20150131' as partition_id,
+        segmento_comportamental,
+        perfil_digital
+        from da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20150131
+union all
+select distinct cod_cliente,
+        '20150228' as partition_id,
+        segmento_comportamental,
+        perfil_digital
+        from da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20150228
+union all
+select distinct cod_cliente,
+        '20150331' as partition_id,
+        segmento_comportamental,
+        perfil_digital
+        from da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20150331")
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_segmento_comportamental as
+        select
+        tablon.cod_pers_trs,
+        tablon.categoria_usuario,
+        tablon.partition_id,
+        comp.segmento_comportamental,
+        comp.perfil_digital
+        from da_martalamela.wallet_tablon_analisis_rentabilidad tablon
+        left join
+        (
+          select distinct cod_cliente,
+          partition_id,
+          segmento_comportamental,
+          perfil_digital
+          from da_martalamela.segm_comport_perfil_digit_metricas_num_dias
+        ) comp
+        on cast(trim(tablon.cod_pers_trs) as int)=cast(comp.cod_cliente as int)
+        and cast(tablon.partition_id as int)=cast(comp.partition_id as int)")
+
+wallet_segmento_comportamental <- qhive("select cod_pers_trs,
+                                  categoria_usuario,
+                                  partition_id,
+                                  concat(substr(partition_id,1,4),'-',substr(partition_id,5,2),'-',substr(partition_id,7,2)) as date,
+                                  segmento_comportamental,
+                                  perfil_digital
+                                  from da_martalamela.wallet_segmento_comportamental
+                                  order by cod_pers_trs,partition_id")
+#write.table(wallet_segmento_comportamental,"wallet_segmento_comportamental.txt",row.names=FALSE,dec = ",",sep = ";")
+
+evolucion_wallet_segmento_comportamental <- qhive("select cod_pers_trs,
+                                          categoria_usuario,
+                                          max(segmento_comportamental_20140331) as segmento_comportamental_20140331,
+                                          max(segmento_comportamental_20140630) as segmento_comportamental_20140630,
+                                          max(segmento_comportamental_20140930) as segmento_comportamental_20140930,
+                                          max(segmento_comportamental_20141231) as segmento_comportamental_20141231,
+                                          max(segmento_comportamental_20150331) as segmento_comportamental_20150331,
+                                          max(perfil_digital_20140331) as perfil_digital_20140331,
+                                          max(perfil_digital_20140630) as perfil_digital_20140630,
+                                          max(perfil_digital_20140930) as perfil_digital_20140930,
+                                          max(perfil_digital_20141231) as perfil_digital_20141231,
+                                          max(perfil_digital_20150331) as perfil_digital_20150331
+                                          from
+                                          (
+                                            select cod_pers_trs,
+                                            categoria_usuario,
+                                            case when cast(partition_id as int) = 20140331 then segmento_comportamental else null end as segmento_comportamental_20140331,
+                                            case when cast(partition_id as int) = 20140630 then segmento_comportamental else null end as segmento_comportamental_20140630,
+                                            case when cast(partition_id as int) = 20140930 then segmento_comportamental else null end as segmento_comportamental_20140930,
+                                            case when cast(partition_id as int) = 20141231 then segmento_comportamental else null end as segmento_comportamental_20141231,
+                                            case when cast(partition_id as int) = 20150331 then segmento_comportamental else null end as segmento_comportamental_20150331,
+                                            case when cast(partition_id as int) = 20140331 then perfil_digital else null end as perfil_digital_20140331,
+                                            case when cast(partition_id as int) = 20140630 then perfil_digital else null end as perfil_digital_20140630,
+                                            case when cast(partition_id as int) = 20140930 then perfil_digital else null end as perfil_digital_20140930,
+                                            case when cast(partition_id as int) = 20141231 then perfil_digital else null end as perfil_digital_20141231,
+                                            case when cast(partition_id as int) = 20150331 then perfil_digital else null end as perfil_digital_20150331
+                                            from da_martalamela.wallet_segmento_comportamental
+                                          ) aux
+                                          group by cod_pers_trs, categoria_usuario
+                                          order by cod_pers_trs")
+#write.table(evolucion_wallet_segmento_comportamental,"evolucion_wallet_segmento_comportamental.txt",row.names=FALSE,dec = ",",sep = ";")
+```
+
+
++ TRANSACCIONALIDAD
+
+++ Número de tarjetas, movimientos e importe
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_intervinientes_tarjetas as
+        select tablon.cod_pers_trs,
+        tablon.categoria_usuario,
+        tablon.partition_id,
+        cod_idcontra,
+        cod_pgccontr
+        from da_martalamela.wallet_tablon_analisis_rentabilidad tablon
+        left join
+        (
+          select distinct cod_persctpn,
+          cod_idcontra,
+          cod_pgccontr,
+          partition_id
+          from da_pro.intervinientes_corp
+          where cast(cod_pgccontr as int) in (615,616,617,685)
+        ) contratos
+        on cast(trim(tablon.cod_pers_trs) as int)=cast(trim(contratos.cod_persctpn) as int)
+        and cast(tablon.partition_id as int)=cast(contratos.partition_id as int)
+        order by cod_pers_trs,partition_id,cod_idcontra")
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_movimientos_tarjetas as
+        select cod_pers_trs,
+        contratos.cod_idcontra,
+        cod_pgccontr,
+        partition_id,
+        fec_movimien,
+        imp_mvimient
+        from
+        (
+          select cod_idcontra,
+          fec_movimien,
+          imp_mvimient,
+          partition_id
+          from da_pro.movimientos_tarjetas_corp
+        ) movimientos
+        left join
+        (
+          select distinct cod_pers_trs, cod_idcontra, cod_pgccontr
+          from da_martalamela.wallet_intervinientes_tarjetas 
+        ) contratos
+        on cast(trim(contratos.cod_idcontra) as int) = cast(trim(movimientos.cod_idcontra) as int)
+        where cod_pers_trs is not null
+        order by cod_pers_trs,partition_id,cod_idcontra")
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_tarjetas_resumen as
+        select
+        tablon.cod_pers_trs,
+        tablon.categoria_usuario,
+        tablon.partition_id,
+        tarjetas.num_tarjetas,
+        movimientos.num_movimientos_total,
+        movimientos.volumen_movimientos_total
+        from da_martalamela.wallet_tablon_analisis_rentabilidad tablon
+        left join
+        (
+          select cod_pers_trs,
+          partition_id,
+          count(distinct cod_idcontra) as num_tarjetas
+          from da_martalamela.wallet_intervinientes_tarjetas
+          group by cod_pers_trs, partition_id
+        ) tarjetas
+        on cast(trim(tablon.cod_pers_trs) as int)=cast(trim(tarjetas.cod_pers_trs) as int)
+        and cast(tablon.partition_id as int)=cast(tarjetas.partition_id as int)
+        left join
+        (
+          select cod_pers_trs,
+          partition_id,
+          count(*) as num_movimientos_total,
+          sum(imp_mvimient) as volumen_movimientos_total
+          from da_martalamela.wallet_movimientos_tarjetas
+          group by cod_pers_trs, partition_id
+        ) movimientos
+        on cast(trim(tablon.cod_pers_trs) as int)=cast(trim(movimientos.cod_pers_trs) as int)
+        and cast(tablon.partition_id as int)=cast(movimientos.partition_id as int)
+        order by cod_pers_trs,partition_id")
+
+wallet_tarjetas_resumen <- qhive("select cod_pers_trs,
+                                  categoria_usuario,
+                                  partition_id,
+                                  concat(substr(partition_id,1,4),'-',substr(partition_id,5,2),'-',substr(partition_id,7,2)) as date,
+                                  num_tarjetas,
+                                  case
+                                  when num_movimientos_total is null then 0
+                                  else num_movimientos_total
+                                  end as num_movimientos_total,
+                                  case
+                                  when volumen_movimientos_total is null then 0
+                                  else volumen_movimientos_total
+                                  end as volumen_movimientos_total
+                                  from da_martalamela.wallet_tarjetas_resumen
+                                  order by cod_pers_trs,partition_id")
+#write.table(wallet_tarjetas_resumen,"wallet_tarjetas_resumen.txt",row.names=FALSE,dec = ",",sep = ";")
+```
+
+++ Cancelación de tarjetas
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_cancelacion_tarjetas as
+        select tablon.cod_pers_trs,
+        tablon.categoria_usuario,
+        tablon.partition_id,
+        tablon.cod_idcontra,
+        tablon.cod_pgccontr,
+        cod_pan,
+        tarjetas.cod_bloq_tar as tarjetas_cod_bloq_tar,
+        detalle.cod_bloq_tar as detalle_cod_bloq_tar
+        from da_martalamela.wallet_intervinientes_tarjetas tablon
+        left join
+        (
+          select distinct cod_idcontra,
+          cod_bloq_tar,
+          partition_id
+          from da_pro.datos_tarjetas_corp
+        ) tarjetas
+        on cast(trim(tablon.cod_idcontra) as int)=cast(trim(tarjetas.cod_idcontra) as int)
+        and cast(tablon.partition_id as int)=cast(tarjetas.partition_id as int)
+        left join
+        (
+          select distinct cod_idcontra,
+          cod_pan,
+          cod_bloq_tar,
+          partition_id
+          from da_pro.datos_tarjetas_detalle_corp
+        ) detalle
+        on cast(trim(tablon.cod_idcontra) as int)=cast(trim(detalle.cod_idcontra) as int)
+        and cast(tablon.partition_id as int)=cast(detalle.partition_id as int)
+        order by cod_pers_trs,partition_id,cod_idcontra")
+
+wallet_cancelacion_tarjetas <- qhive("select cod_pers_trs,
+                                  categoria_usuario,
+                                  partition_id,
+                                  concat(substr(partition_id,1,4),'-',substr(partition_id,5,2),'-',substr(partition_id,7,2)) as date,
+                                  detalle_cod_bloq_tar,
+                                  count(distinct cod_idcontra) as contratos_distintos
+                                  from da_martalamela.wallet_cancelacion_tarjetas
+                                  --where detalle_cod_bloq_tar like '%T%' or detalle_cod_bloq_tar like '%D%'
+                                  group by cod_pers_trs,
+                                  categoria_usuario,
+                                  partition_id,
+                                  concat(substr(partition_id,1,4),'-',substr(partition_id,5,2),'-',substr(partition_id,7,2)),
+                                  detalle_cod_bloq_tar
+                                  order by cod_pers_trs,partition_id")
+#write.table(wallet_cancelacion_tarjetas,"wallet_cancelacion_tarjetas.txt",row.names=FALSE,dec = ",",sep = ";")
+```
+
+++ Recibos
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_intervinientes_corp as
+        select tablon.cod_pers_trs,
+        tablon.categoria_usuario,
+        tablon.partition_id,
+        cod_idcontra,
+        cod_pgccontr
+        from da_martalamela.wallet_tablon_analisis_rentabilidad tablon
+        left join
+        (
+          select distinct cod_persctpn,
+          cod_idcontra,
+          cod_pgccontr,
+          partition_id
+          from da_pro.intervinientes_corp
+        ) contratos
+        on cast(trim(tablon.cod_pers_trs) as int)=cast(trim(contratos.cod_persctpn) as int)
+        and cast(tablon.partition_id as int)=cast(contratos.partition_id as int)
+        order by cod_pers_trs,partition_id,cod_idcontra")
+
+do.hive("create table IF NOT EXISTS da_martalamela.movimientos_cuentas_corp_recibos as
+        select cod_idcontra, fec_movimien, imp_mvimient, cod_talon, partition_id
+        from da_pro.movimientos_cuentas_corp
+        where cast(cod_talon as int) in (135,481,326,729,430,521,229,625,235,86,631,10,528,134,22,931,336,454,831,887,
+        728,133,6,530,126,435,821,129,266,16,804,805,332,844,827,34,469,735,474,529,
+        231,1,533,236,818,497,828,635,329,132,230,183,933,901,328,734,531,29,413,432,
+        928,436,932,91,803,730,632,815,738,28,629,829,162,434,7,335,732,816,0,131,836,
+        429,634,136,120,331,125,854,186,856,233,412,534,825,848,525,226,754,633,834,3,
+        880,12,936,35,330,535,32,234,130,532,761,334,853,569,123,810,11,998,630,36,492,
+        777,41,536,925,228,428,812,232,46,128,321,837,999,431,139,119,333,501,316,628,
+        832,453,270,433,636,830,137,833,547,725,204,733)
+        and cod_paisoalf LIKE '%ES%'
+        and cod_entalfa LIKE '%0182%'
+        and cod_tip_movi LIKE '%0001%'
+        and xti_cnceptos LIKE '%0%'")
+
+do.hive("create table IF NOT EXISTS da_martalamela.movimientos_cuentas_corp_recibos_resumen as
+        select cod_idcontra,
+        concat(year(fec_movimien),
+        case when month(fec_movimien)>=10 then month(fec_movimien)
+        else concat(0,month(fec_movimien)) end,
+        case when month(fec_movimien)=2 then 28
+        when month(fec_movimien) in (1,3,5,7,8,10,12) then 31
+        else 30 end) as partition_id,
+        count(*) as num_recibos_total,
+        sum(imp_mvimient) as volumen_recibos_total,
+        avg(imp_mvimient) as media_recibos
+        from da_martalamela.movimientos_cuentas_corp_recibos
+        group by cod_idcontra, concat(year(fec_movimien),
+        case when month(fec_movimien)>=10 then month(fec_movimien)
+        else concat(0,month(fec_movimien)) end,
+        case when month(fec_movimien)=2 then 28
+        when month(fec_movimien) in (1,3,5,7,8,10,12) then 31
+        else 30 end)")
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_recibos_resumen as
+        select
+        tablon.cod_pers_trs,
+        tablon.cod_idcontra,
+        tablon.categoria_usuario,
+        tablon.partition_id,
+        num_recibos_total,
+        volumen_recibos_total,
+        media_recibos
+        from da_martalamela.wallet_intervinientes_corp tablon
+        left join da_martalamela.movimientos_cuentas_corp_recibos_resumen recibos
+        on cast(trim(tablon.cod_idcontra) as int)=cast(trim(recibos.cod_idcontra) as int)
+        and cast(tablon.partition_id as int)=cast(recibos.partition_id as int)
+        order by cod_pers_trs,partition_id")
+
+wallet_recibos_resumen <- qhive("select cod_pers_trs,
+                                  categoria_usuario,
+                                  partition_id,
+                                  concat(substr(partition_id,1,4),'-',substr(partition_id,5,2),'-',substr(partition_id,7,2)) as date,
+                                  sum(case
+                                  when num_recibos_total is null then 0
+                                  else num_recibos_total
+                                  end) as num_recibos_total,
+                                  sum(case
+                                  when volumen_recibos_total is null then 0
+                                  else volumen_recibos_total
+                                  end) as volumen_recibos_total,
+                                  sum(case
+                                  when media_recibos is null then 0
+                                  else media_recibos
+                                  end) as media_recibos
+                                  from da_martalamela.wallet_recibos_resumen
+                                  group by cod_pers_trs,
+                                  categoria_usuario,
+                                  partition_id,
+                                  concat(substr(partition_id,1,4),'-',substr(partition_id,5,2),'-',substr(partition_id,7,2))
+                                  order by cod_pers_trs,partition_id")
+#write.table(wallet_recibos_resumen,"wallet_recibos_resumen.txt",row.names=FALSE,dec = ",",sep = ";")
+```
+
+

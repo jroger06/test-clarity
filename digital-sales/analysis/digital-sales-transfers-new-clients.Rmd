@@ -1,0 +1,503 @@
+---
+output:
+  html_document:
+    self_contained: no
+    theme: cerulean
+---
+
+---
+title: ""
+author: "BBVA D&A - Captación"
+date: "5/10/2015"
+output: html_document
+---
+
+
+
+
+```{r, echo=FALSE}
+# This is the first mandatory section.
+
+title     <- '[Digital Sales] Banco de procedencia de nuevos clientes online'
+
+description <- 'Detection of the new clients coming from another bank '
+
+# Keywords. Text separated by commas. E.g. keywords <- 'customer health, recibos' 
+# Keywords can classify the attribute in categories such as 'valor, vinculación, digitalidad', describe used tables such as 'recibos, 
+# transacciones tarjetas, segmento plan uno' or include other relevant info. Search keywords in the portal to find commonly used terms
+# and create new keywords only if justified.
+
+
+keywords  <- 'new clientes, altas, transferencias, competencia'
+
+
+#### new clients
+#### 1 era transferencia recibida
+# rafa  032523498
+```
+
+
+
+## Banco de procedencia de nuevos clientes online
+
+### 1. Motivación de negocio
+
+A lo largo del proceso de alta online los clientes disponen de dos opciones para crearse la cuenta dependiendo de si están o no bancarizados previamente:
+
+* Si no poseen ninguna otra cuenta en otro banco deben enviar la documentación correspondiente por email o por correo ordinario.
+* Aquellos clientes bancarizados deberán aportar la cuenta que posean en otra entidad.
+
+
+
+
+### 2. Objetivo
+
+El objetivo de este análisis consiste en determinar cuál es el banco de procedencia de los nuevos clientes online que ya están bancarazidos.
+
+Etapas:
+
+1. Detectar nuevos clientes online de Enero a Junio 2015 (2323 clientes)
+2. ¿Cuántos de estos nuevos clientes ya poseen una cuenta bancaria? (1102 clients)
+3. ¿Cuál es el % de cada banco de procedencia? Comparativa con la cuota de mercado
+
+
+
+### 3. Fuentes de datos
+
+Se han empleado diversas tablas en el análisis, en particular:
+
+* **da_ventadigital.listado_productos_clientes_filtrado:** En la que se informa los productos que poseen cada uno de los clientes según su tipología (online, ropo u oficina), en este caso nos interesan sólo los online.
+* **clarity_intermediate.detalle_productos_saldos_cliente:** Todos los productos de los clientes en general, en concreto nos interesa saber los que se han dado de alta una cuenta recientemente (cod_partda = '000022000')
+* **da_pro.transferencias_corp:** Contiene las transferencias emitidas y recibidas. La usamos para asegurarnos de que la fecha de esta transferencia es cercana a la fecha de alta.
+* **da_pro.movimientos_cuenta_corp:** Contiene los movimientos de cuenta. Aquí podremos ver las transferencias de 0.01 recibidas, así como el banco emisor con una fecha cercana a la de alta.
+
+Como resultado de este cruce de datos obtenemos una nueva tabla que contiene las transferencias de 0.01 euros de todos los clientes online bancarizados así como su banco de procedencia: **da_alaguna.transfers_newclients_alta**
+
+
+
+```{r, echo=FALSE, cache=FALSE, warning=FALSE, message=FALSE}
+fec_inicial <- "2014-10-01"
+fec_final   <- "2014-12-31"
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+source('~/bda_clarity/tools/warehouse_basics.R')
+source('~/bda_clarity/tools/write.hive.R')
+suppressPackageStartupMessages(library('data.table'))
+suppressPackageStartupMessages(library('ggplot2'))
+suppressPackageStartupMessages(library('plyr'))
+suppressPackageStartupMessages(library('data.table'))
+suppressPackageStartupMessages(library('googleVis'))
+suppressPackageStartupMessages(library('reshape2'))
+suppressPackageStartupMessages(library('reshape'))
+suppressPackageStartupMessages(library('scales'))
+suppressPackageStartupMessages(library('scales'))
+suppressPackageStartupMessages(library('grid'))
+
+
+op <- options(gvis.plot.tag=NULL)
+op <- options(gvis.plot.tag="chart")
+
+doit = FALSE
+
+
+labels_euro <- function(x) {# no rounding
+paste0(format(x, big.mark = ",", decimal.mark = ".", trim = TRUE,
+    scientific = FALSE), " €")
+} 
+
+
+
+```
+
+```{r dependencias, echo=FALSE}
+
+### DEPENDENCIAS DE TABLAS
+
+campaigns.navegacion_ppi_octenero <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'campaigns.navegacion_ppi_octenero', '*', sqname = 'campaigns.navegacion_ppi_octenero')
+clarity_elements.saldos_pasivo_particular <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'clarity_elements.saldos_pasivo_particular', '*', sqname = 'clarity_elements.saldos_pasivo_particular')
+clarity_elements.saldos_activo_particular <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'clarity_elements.saldos_activo_particular', '*', sqname = 'clarity_elements.saldos_activo_particular')
+clarity_elements.metricas_segm_comport <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'clarity_elements.metricas_segm_comport', '*', sqname = 'clarity_elements.metricas_segm_comport')
+campaigns.edad <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'campaigns.edad', '*', sqname = 'campaigns.edad')
+da_pro.clientes_domicilios <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'da_pro.clientes_domicilios', '*', sqname = 'da_pro.clientes_domicilios')
+da_pro.intervinientes_corp <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'da_pro.intervinientes_corp', '*', sqname = 'da_pro.intervinientes_corp')
+segmcomport_sep14 <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20140930', '*', sqname = 'da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20140930')
+
+detalle_productos_epigrafes  <- clarity.use_table(DEPENDENCY_CLARITY_TABLE, 
+                                                 'clarity_intermediate.detalle_productos_epigrafes', 
+                                                 '*', sqname = 'prod_epi' )
+
+detalle_productos_saldos_cliente  <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 
+                                                 'da_rafa.detalle_productos_saldos_cliente', 
+                                                 '*', sqname = 'prod_saldos' )
+
+ropo_altas <-  clarity.use_table(DEPENDENCY_OTHER_TABLES, 'da_ventadigital.listado_productos_clientes_filtrado', '*', sqname = 'da_ventadigital.listado_productos_clientes_filtrado')
+
+
+
+
+```
+
+
+```{r online, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE, fig.width=7, fig.height=5, EVAL=FALSE, error=TRUE}
+
+online <- qimpala("select count(distinct cod_persona) from da_ventadigital.listado_productos_clientes_filtrado where type_desc like 'ONLINE'") 
+
+
+``````
+
+
+```{r interv, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE, fig.width=7, fig.height=5, EVAL=FALSE, error=TRUE}
+
+#qhive("select * from da_pro.intervinientes_corp where cast(cod_persctpn as int)= 32523498 and cast(partition_id as int)= 20150630") 
+
+
+
+  # numberbet  cod_paisoalf	cod_entalfa	cod_paisocnt	cod_entalcnt	cod_persctpn	cod_idcontra	cod_depend	cod_ctippe	cod_ordentit	fec_cierre	tim_ini_vig	fec_fin_vin	fec_ultmdf	cod_pgccontr	cod_identint	fec_ininter	fec_baja	cod_paiscom	cod_entcom	cod_mentitul	cod_apliremi	cod_sqregist	cod_sec_int	aud_tim	partition_id
+#0	526558	ES	0182	ES	0182	032523498	00000000000000000259427019	000000000	TIT	1	2015-06-30 00:00:00	NULL	NULL	NULL	0871		2015-06-28 00:00:00	NULL	ES	0182	M	NULL	4620519421	121653794	2015-07-01 02:55:19.080000000	20150630
+#1	656583	ES	0182	ES	0182	032523498	00000000000000000259427013	000000000	TIT	1	2015-06-30 00:00:00	NULL	NULL	NULL	0020		2015-06-28 00:00:00	NULL	ES	0182	M	NULL	4731586681	121653794	2015-07-01 02:55:19.080000000	20150630
+``````
+
+```{r tranf, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE, fig.width=7, fig.height=5, EVAL=FALSE, error=TRUE}
+
+#select * from da_pro.transferencias_corp where cast(cod_idcontra as int) = 259427013 
+
+#cod_paisben  xti_emisionn	cod_iucdespo	cod_endesbbv	cod_ofdesbbv	cod_pgcdsbbv	des_obstrans	cod_dninifbe	cod_sqregist	cod_sec_int	aud_tim	partition_id
+#0	615694	0182	ES	00000000000000000259427013	2015181	000126	23414586	0000000008	2015-07-31 00:00:00	-999999934403599924	NULL	11T	74	64	1	0	NULL	NULL	NULL	2015-06-30 00:00:00	NULL	NULL	0	1	126	NULL	NULL	03	101	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	0	1		201506280015	NULL	NULL	NULL	NULL	2015-06-30 00:00:00	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	3	NULL	2015-06-30 00:00:00	NULL	NULL	NULL	NULL	NULL	0	NULL	2015-06-29 00:00:00	NULL	NULL	NULL	NULL	TO	TO	EUR	NULL	NULL	NULL	NULL	0128	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	0128	6001	0010	NULL	0182	5739	0020	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	1	NULL	NULL	NULL	NULL		NULL	0	122048915	2015-08-03 01:00:47.170000000	20150731
+
+
+#campos
+
+#fec_valcarga en transferencias_corp fecha de la transferencia corp
+#cod_banorign en transferencias_corp fecha de la transferencia corp
+
+`````
+
+```{r mov, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE, fig.width=7, fig.height=5, EVAL=FALSE, error=TRUE}
+#1 centimo
+#select * from da_pro.movimientos_cuentas_corp where cast(cod_idcontra as int) = 259427013 and cast(partition_id as int)= 20150731
+
+````
+
+
+```{r myquer1, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE, fig.width=7, fig.height=5, EVAL=FALSE, error=TRUE}
+
+#do.hive("drop table if exists da_alaguna.transfers_newclients_alta")
+# 
+# query <- do.hive("CREATE TABLE da_alaguna.transfers_newclients_alta as 
+# SELECT ONLINE.cod_persona, ONLINE.fecha_alta,PROD.cod_idcontra, PROD.fecha_producto,  TRANSF.fec_transfer, TRANSF.cod_banorign, MOV.imp_mvimient, MOV.fec_movimien, MOV.cod_reffactb   FROM
+# (select cod_persona, fec_soli_trn as fecha_alta from da_ventadigital.listado_productos_clientes_filtrado where type_desc like 'ONLINE') ONLINE
+# 
+# LEFT OUTER JOIN
+# 
+# (select cod_idcontra, cod_persona, fec_ininter as fecha_producto, cod_ordentit from da_rafa.detalle_productos_saldos_cliente where array_contains(cod_partda,'000022000')) PROD
+# on(cast(ONLINE.cod_persona as int) = cast(PROD.cod_persona as int))
+# 
+# LEFT OUTER JOIN
+# 
+# (select cod_idcontra, fec_valcarga as fec_transfer, cod_banorign from da_pro.transferencias_corp  ) TRANSF
+# on(cast(PROD.cod_idcontra as int)=cast(TRANSF.cod_idcontra as int))
+# 
+# LEFT OUTER JOIN
+# 
+# (select cod_idcontra, imp_mvimient, fec_movimien as fec_movimien, cod_reffactb    from da_pro.movimientos_cuentas_corp) MOV
+# on(cast(TRANSF.cod_idcontra as int)=cast(MOV.cod_idcontra as int))
+# 
+# where datediff(fecha_producto, fec_transfer) <= 5
+# and fecha_alta <= fecha_producto
+# and datediff(fec_transfer, MOV.fec_movimien) <= 5
+# and fecha_producto <= fec_transfer
+# and imp_mvimient = 0.01
+# and cod_banorign is not null")
+
+
+
+
+
+
+`````
+
+```{r myquery, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE, fig.width=7, fig.height=5, EVAL=true, error=TRUE}
+
+count <- qhive("select count(distinct cod_persona) from da_alaguna.transfers_newclients_alta")
+#1102 clientes bancarizados
+
+#online <- qimpala("select count(distinct cod_persona) from da_ventadigital.listado_productos_clientes_filtrado where type_desc like 'ONLINE'")
+#2332
+
+groupby <- qhive("select cod_banorign, count(distinct cod_persona) as cunt from da_alaguna.transfers_newclients_alta group by cod_banorign order by cunt")
+
+
+`````
+
+
+### 4. Análisis
+
+El siguiente gráfico nos muestra la cuota de mercado FRS y el porcentaje de transferencias que provienen de cada uno de los bancos más importantes de España.
+
+
+
+```{r datos, echo=FALSE, cache=FALSE, warning=FALSE, message=FALSE, fig.width=7, fig.height=5, EVAL=true, error=TRUE, results='asis', tidy=FALSE}
+
+#codigos <- read.csv("../../../DYA/analisis_compartidos/codigos_entidades_financieras.csv", sep=";")
+codigos_cuotasFRS <- read.csv("/DYA/analisis_compartidos/codigos_entidades_bancarias_cuotas.csv", sep=";")
+
+#codigos_cuotas <- qhive("select * from catalogos_estaticos.codigos_entidades_bancarias_cuotas")
+#codigos <- qhive("select * from catalogos_estaticos.codigos_entidades_bancarias")
+#write.hive(codigos_cuotas, 'catalogos_estaticos.codigos_entidades_bancarias_cuotas')
+
+names(groupby)[1] <- "codigo"
+names(codigos_cuotasFRS)[1] <- "codigo"
+names(codigos_cuotasFRS)[3] <- "AGRUPACIÓN"
+
+
+groupby <- data.table(groupby)
+groupby <- groupby[, codigo := as.integer(groupby$codigo)]
+
+dd <- merge(codigos_cuotasFRS, groupby, by="codigo")
+
+conteos <- dd[with(dd, order(-cunt)), ]
+#conteos
+
+# 
+# 
+# codigo                                                             banco cunt
+# 24   2100                          CAJA DE AHORROS Y PENSIONES DE BARCELONA  303
+# 14   1465                                                        ING DIRECT  114
+# 3      49                                                   BANCO SANTANDER  113
+# 17   2038                       CAJA DE AHORROS Y MONTE DE PIEDAD DE MADRID   83
+# 8      81                                                 BANCO DE SABADELL   52
+# 20   2080                                          CAIXA DE AFORROS DE VIGO   34
+# 25   2103                       MONTES DE PIEDAD Y CAJA DE AHORROS DE RONDA   28
+# 6      73                                                         OPEN BANK   27
+# 16   2013                                     CAIXA D'ESTALVIS DE CATALUNYA   23
+# 22   2095                                              BILBAO BIZKAIA KUTXA   23
+# 36   3058                                                CAJAMAR CAJA RURAL   23
+# 7      75                                          BANCO POPULAR ESPA\x84OL   21
+# 21   2085                     CAJA DE AHORROS Y MONTE DE PIEDAD DE ZARAGOZA   21
+# 2      30                                       BANCO ESPA\x84OL DE CREDITO   20
+# 10    128                                                         BANKINTER   17
+# 19   2048                                       CAJA DE AHORROS DE ASTURIAS   16
+# 48   3187                                                CAJA RURAL DEL SUR   16
+# 23   2096                                     CAJA ESPA\x84A DE INVERSIONES   11
+# 1      19                                                     DEUTSCHE BANK   10
+# 34   3035                             CAJA LABORAL POPULAR COOP. DE CREDITO   10
+# 39   3076                                                         CAJASIETE   10
+# 27   2105                             CAJA DE AHORROS DE CASTILLA-LA MANCHA    5
+# 32   3023                                             CAJA RURAL DE GRANADA    5
+# 33   3025 CAIXA DE CREDIT DELS ENGINYERS- CAJA DE CREDITO DE LOS INGENIEROS    5
+# 46   3159                                         CAIXA POPULAR-CAIXA RURAL    5
+# 15   1491                                                      TRIODOS BANK    4
+# 38   3067                                                CAJA RURAL DE JAEN    4
+# 9     122                                                CITIBANK ESPA\x84A    3
+# 12    229                                                    BANCOPOPULAR-E    3
+# 41   3081                                              CAJA RURAL DE TOLEDO    3
+# 4      61                                                       BANCA MARCH    2
+# 26   2104                              CAJA DE AHORROS DE SALAMANCA Y SORIA    2
+# 29   3008                                             CAJA RURAL DE NAVARRA    2
+# 47   3183                           CAJA DE ARQUITECTOS S. COOP. DE CREDITO    2
+# 5      65                                                     BARCLAYS BANK    1
+# 11    186                                   BANCO DE FINANZAS E INVERSIONES    1
+# 13    235                                         BANCO PICHINCHA ESPA\x84A    1
+# 18   2045                    CAJA DE AHORROS Y MONTE DE PIEDAD DE ONTINYENT    1
+# 28   3005                                                CAJA RURAL CENTRAL    1
+# 30   3017                                               CAJA RURAL DE SORIA    1
+# 31   3018               CAJA RURAL REGIONAL SAN AGUSTIN FUENTE ALAMO MURCIA    1
+# 35   3045                                                 CAIXA RURAL ALTEA    1
+# 37   3059                                            CAJA RURAL DE ASTURIAS    1
+# 40   3080                                              CAJA RURAL DE TERUEL    1
+# 42   3085                                              CAJA RURAL DE ZAMORA    1
+# 43   3098                                 CAJA RURAL NTRA. SRA. DEL ROSARIO    1
+# 44   3138                                               CAJA RURAL DE BETXI    1
+# 45   3140                                            CAJA RURAL DE GUISSONA    1
+
+
+dd$porc <- round((dd$cunt/sum(dd$cunt))*100,2)
+
+porcentaje <- dd[with(dd, order(-porc)), ]
+
+
+#######
+
+
+
+dd.dt <- data.table(dd)
+
+data <- dd.dt[,agrup_porc:=sum(porc),by=AGRUPACIÓN]
+
+data_ord <- data[order(-agrup_porc,decreasing=FALSE),]
+
+data_ord_sel <- unique(data_ord[, !c("codigo","DES_BANCO.EMISOR","cunt","porc"), with=FALSE])
+
+names(data_ord_sel)[2] <- "cuota"
+names(data_ord_sel)[3] <- "% transf"
+
+
+`````
+
+```{r plot_tabla, echo=FALSE, cache=FALSE, warning=FALSE, message=FALSE, fig.width=7, fig.height=5, EVAL=true, error=TRUE, results='asis', tidy=FALSE}
+
+
+Table <- gvisTable(data_ord_sel[cuota >= 0])
+plot(Table)
+
+
+
+
+``````
+
+
+
+El siguiente gráfico compara la cuenta de mercado (en color azul) y el porcentaje de transferencias provinientes de cada banco (en color rojo).
+
+
+
+```{r plot_bar, echo=FALSE, cache=FALSE, warning=FALSE, message=FALSE, fig.width=7, fig.height=5, EVAL=true, error=TRUE, results='asis', tidy=FALSE}
+
+
+Bar <- gvisBarChart(data_ord_sel[cuota >= 0], 
+                    options=list(
+                        width=600, height=800, 
+                        title="Comparación de cuotas de mercado y % de transferencias por banco"))
+plot(Bar)
+
+`````
+
+A continuación se representa el porcentaje de transferencias del total de bancos de procedencia de nuestros clientes.
+
+```{r plot_pie, echo=FALSE, cache=FALSE, warning=FALSE, message=FALSE, fig.width=7, fig.height=5, EVAL=true, error=TRUE, results='asis', tidy=FALSE}
+
+#Column <- gvisColumnChart(data_ord_sel[CUOTA_MERCADO >= 0],)
+#plot(Column)
+
+
+Pie <- gvisPieChart(data_ord_sel[,!c("cuota"), with=FALSE], options=list(
+                        width=600, height=800, 
+                        title="% de transferencias procedentes de cada entidad"))
+plot(Pie)
+
+
+#Tree <- gvisTreeMap(data_ord_sel[cuota >= 0],  
+#                     "AGRUPACIÓN", 
+#                     "% transf", 
+#                    options=list(fontSize=16))
+
+
+
+#tree <- data_ord_sel[cuota >= 0]
+#tree$parent <- "NA"
+
+#Tree <- gvisTreeMap(data_ord_sel[cuota >= 0],  idvar="AGRUPACIÓN", parentvar="% transf",
+#                    sizevar="% transf", colorvar="% transf")
+#plot(Tree)
+ 
+
+
+
+`````
+
+
+
+```{r plot, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE, fig.width=7, fig.height=5, EVAL=FALSE, error=TRUE, results='asis', tidy=FALSE}
+# 
+# ggplot(porcentaje, aes(x=reorder(banco, -porc), y= porc, fill=banco)) + geom_bar() + xlab("Banco") +
+#   ylab("% ") +
+#   opts(title = "Bancos procedencia altas online") +  geom_text(aes(label=paste0(porc, "%")), vjust=1.5, colour="white")
+# 
+# 
+# 
+# ggplot(porcentaje, aes(x=reorder(banco, -porc), y= porc, fill=banco)) + geom_bar() +
+#   theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)) + xlab("Banco") +
+#   ylab("% ") +  geom_text(aes(label=paste0(porc, "%")), vjust=1.5, colour="white")
+# 
+
+# porcentaje
+#    codigo                                                             banco cunt  porc
+# 24   2100                          CAJA DE AHORROS Y PENSIONES DE BARCELONA  303 29.30
+# 14   1465                                                        ING DIRECT  114 11.03
+# 3      49                                                   BANCO SANTANDER  113 10.93
+# 17   2038                       CAJA DE AHORROS Y MONTE DE PIEDAD DE MADRID   83  8.03
+# 8      81                                                 BANCO DE SABADELL   52  5.03
+# 20   2080                                          CAIXA DE AFORROS DE VIGO   34  3.29
+# 25   2103                       MONTES DE PIEDAD Y CAJA DE AHORROS DE RONDA   28  2.71
+# 6      73                                                         OPEN BANK   27  2.61
+# 16   2013                                     CAIXA D'ESTALVIS DE CATALUNYA   23  2.22
+# 22   2095                                              BILBAO BIZKAIA KUTXA   23  2.22
+# 36   3058                                                CAJAMAR CAJA RURAL   23  2.22
+# 7      75                                          BANCO POPULAR ESPA\x84OL   21  2.03
+# 21   2085                     CAJA DE AHORROS Y MONTE DE PIEDAD DE ZARAGOZA   21  2.03
+# 2      30                                       BANCO ESPA\x84OL DE CREDITO   20  1.93
+# 10    128                                                         BANKINTER   17  1.64
+# 19   2048                                       CAJA DE AHORROS DE ASTURIAS   16  1.55
+# 48   3187                                                CAJA RURAL DEL SUR   16  1.55
+# 23   2096                                     CAJA ESPA\x84A DE INVERSIONES   11  1.06
+# 1      19                                                     DEUTSCHE BANK   10  0.97
+# 34   3035                             CAJA LABORAL POPULAR COOP. DE CREDITO   10  0.97
+# 39   3076                                                         CAJASIETE   10  0.97
+# 27   2105                             CAJA DE AHORROS DE CASTILLA-LA MANCHA    5  0.48
+# 32   3023                                             CAJA RURAL DE GRANADA    5  0.48
+# 33   3025 CAIXA DE CREDIT DELS ENGINYERS- CAJA DE CREDITO DE LOS INGENIEROS    5  0.48
+# 46   3159                                         CAIXA POPULAR-CAIXA RURAL    5  0.48
+# 15   1491                                                      TRIODOS BANK    4  0.39
+# 38   3067                                                CAJA RURAL DE JAEN    4  0.39
+# 9     122                                                CITIBANK ESPA\x84A    3  0.29
+# 12    229                                                    BANCOPOPULAR-E    3  0.29
+# 41   3081                                              CAJA RURAL DE TOLEDO    3  0.29
+# 4      61                                                       BANCA MARCH    2  0.19
+# 26   2104                              CAJA DE AHORROS DE SALAMANCA Y SORIA    2  0.19
+# 29   3008                                             CAJA RURAL DE NAVARRA    2  0.19
+# 47   3183                           CAJA DE ARQUITECTOS S. COOP. DE CREDITO    2  0.19
+# 5      65                                                     BARCLAYS BANK    1  0.10
+# 11    186                                   BANCO DE FINANZAS E INVERSIONES    1  0.10
+# 13    235                                         BANCO PICHINCHA ESPA\x84A    1  0.10
+# 18   2045                    CAJA DE AHORROS Y MONTE DE PIEDAD DE ONTINYENT    1  0.10
+# 28   3005                                                CAJA RURAL CENTRAL    1  0.10
+# 30   3017                                               CAJA RURAL DE SORIA    1  0.10
+# 31   3018               CAJA RURAL REGIONAL SAN AGUSTIN FUENTE ALAMO MURCIA    1  0.10
+# 35   3045                                                 CAIXA RURAL ALTEA    1  0.10
+# 37   3059                                            CAJA RURAL DE ASTURIAS    1  0.10
+# 40   3080                                              CAJA RURAL DE TERUEL    1  0.10
+# 42   3085                                              CAJA RURAL DE ZAMORA    1  0.10
+# 43   3098                                 CAJA RURAL NTRA. SRA. DEL ROSARIO    1  0.10
+# 44   3138                                               CAJA RURAL DE BETXI    1  0.10
+# 45   3140                                            CAJA RURAL DE GUISSONA    1  0.10
+
+````
+
+
+
+
+```{r concepto, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE, fig.width=7, fig.height=5, EVAL=FALSE , results='asis', tidy=FALSE}
+
+#####Description of the bank tranfers
+
+#As shown in the following table, the description of the authomatic transfers from the origin bank of our new online clients do not  provide so much information.
+
+
+concepto_transf <- qimpala("select cod_reffactb, COUNT(*) as cunt from da_alaguna.transfers_newclients_alta group by cod_reffactb order by cunt desc")
+
+
+Table1 <- gvisTable(head(concepto_transf, 12))
+#plot(Table1 )
+
+
+
+````
+
+
+
+
+
+### 5. Conclusiones
+
+
+* El número de clientes procedentes de Caixa e ING es considerable y superior a la cuota de mercado de cada entidad.
+
+
+
+**Siguientes pasos**
+
+* Lanzamiento de una campaña de display en Amazon a todos aquellos no clientes que realicen pagos con tarjetas de ING y de la Caixa para conseguir captarlos como nuevos clientes BBVA.
+
+

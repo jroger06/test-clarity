@@ -1,0 +1,192 @@
+---
+title: "Fitro de Pymes de valor"
+author: "Agudo González, Pedro José - Martín Álvarez, Begoña - Medina Gallego, Carlos"
+editor: "César de Pablo Sánchez"
+date: "16/4/2015"
+output: html_document
+---
+========================================================
+_Migrado desde el Rmd del curso_
+
+
+```{r, echo=FALSE}
+# This is the first mandatory section.
+title     <- '[Pymes] Filtros para la selección de pymes de valor'
+keywords  <- 'pymes, sme'
+```
+
+
+<h2>Objetivos del proyecto</h2>
+<p>Generar un recomendador de productos para los clientes pymes del Banco y para los no clientes, en el que para cada pyme se obtengan los productos con mayor probabilidad de contratación.</p>
+
+<h2>Desarrollo de la solución</h2>
+<p>Nuestra base de clientes son los segmentos 35 y 36 del segmento global (pequeñas empresas y micropymes). A estos clientes se les pasa una serie de filtros para obtener una muestra limpia y con la que se pueda trabajar analíticamente.</p>
+<p>En esta presentación explicaremos el proceso de filtrado de datos del inventario de clientes hasta quedarnos con aquellos que consideramos pymes adecuadas para trabajar el modelo.</p>
+
+<h2>Entradas</h2>
+<p>Nuestro punto de partida es la base de <b>inventario de clientes</b>, la cual hemos subido a Cloudera con el nombre <a href="http://lpcmf421.igrupobbva:8888/metastore/table/da_pymes/inventario">`da_pymes.inventario`</a>. A partir de aquí, empezamos a descartar clientes.</p>
+<p>En esta base disponemos de información que nos define una empresa pyme, tanto para pymes clientes como para no clientes. A estas variables las llamamos <b>"características de la empresa"</b> como son:</p>
+<ul>
+<li>Actividad empresarial</li>
+<li>Facturación</li>
+<li>Deuda financiera a corto plazo</li>
+<li>Deuda financiera a largo plazo</li>
+<li>Balance</li>
+<li>Rating</li>
+<li>Nº empleados…</li>
+</ul>
+
+
+
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))		# This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+source('~/bda_clarity/tools/warehouse_basics.R')
+```
+
+```{r Load libraries and initialization, echo=FALSE, message=FALSE}
+library(ggplot2)
+library(stringr)
+
+```
+
+
+
+```{r Carga del inventario de clientes, echo=FALSE, cache=TRUE}
+
+qinv <- paste(
+  "select ",
+     "* ",
+  "from ",
+     "da_pymes.inventario",
+#  "where ",
+  ""
+)
+
+df.inv <- qhive(qinv)
+
+#Simplificamos nombres de columnas
+colnames(df.inv)<-str_replace(colnames(df.inv),"inventario.","")
+```
+
+
+```{r Filtrado del inventario de clientes, echo=FALSE, cache=TRUE}
+
+stats <- data.frame("Paso"="Total clientes", "numreg"=nrow(df.inv), stringsAsFactors = FALSE)
+
+#Se excluyen registros que no sean micropymes, pequeñas empresas (35, 36)
+df.inv <- subset(df.inv, cod_segmento %in% c(35,36))
+stats <- rbind(stats, c("Paso"="Pymes", nrow(df.inv)))
+
+#Trabajamos solo clientes de Banca Comercial, Banca de Empresas, Consumer Finance
+df.inv <- subset(df.inv, substring(area,1,4) %in% c('0013', '0058', '6057'))
+stats <- rbind(stats, c("BC + BE + CF", nrow(df.inv)))
+
+#Eliminamos clientes con algún valor en marca exclusión  
+df.inv <- subset(df.inv, marca_exclusion=="")
+stats <- rbind(stats, c("Sin marca exclusión", nrow(df.inv)))
+
+#Excluimos prioridad mora
+df.inv <- subset(df.inv, tarta_calidad!='M')
+stats <- rbind(stats, c("Sin mora", nrow(df.inv)))
+
+#Exclusiones de sociedades no mercantiles y cifes no válidos
+snm <- c('H','J','P','Q','R','S','W')
+df.inv <- subset(df.inv, !(substring(cif,1,1) %in% snm))
+stats <- rbind(stats, c("Sin sociedades no mercantiles", nrow(df.inv)))
+
+#Exclusiones de cifes no válidos
+cif.err <- c('A00000000', 'ZZZZZZZZZZZ', 'Z00000000', 'YYYYYYYYYYY')
+df.inv <- subset(df.inv, !(cif %in% cif.err))
+stats <- rbind(stats, c("CIFs válidos", nrow(df.inv)))
+
+#excluimos las referentes a administraciones públicas, soberano y promotor
+herramientas <- c('0006036300010001','0006036400010001','0006036500010001','0008001400010001',
+                  '0008001400010002','0008091700010001','0008091800010001','0010001600010001',
+                  '0010001700010001','0010091600010001','0011001600010001','0011091600010001',
+                  '3333333333330001','3333333333330002','3333333333330003','3333333333330004',
+                  '4444444444440001','7777777777770002','7777777777770007','7777777777770008',
+                  '7777777777770012','7777777777770013','7777777777770017','7777777777770040',
+                  '7777777777770044','7777777777770045')
+df.inv <- subset(df.inv, !(cod_herramienta %in% herramientas))
+stats <- rbind(stats, c("Sin AA.PP., soberano ni promotor", nrow(df.inv)))
+
+stats <- within(stats, Paso <- factor(Paso, levels=rev(Paso)))
+stats$numreg<-as.numeric(stats$numreg)
+```
+
+```{r Estadísticas del filtrado de clientes}
+
+stats.plot <- ggplot(stats, aes(x = Paso, y=numreg))
+stats.plot <- stats.plot + scale_y_continuous(limits=c(0,1000000))
+stats.plot <- stats.plot + geom_bar(stat="identity",fill='#0065C1')
+stats.plot <- stats.plot + coord_flip()
+stats.plot <- stats.plot + ggtitle("Número de registros tras filtrado")
+stats.plot <- stats.plot + geom_text(aes(label=numreg),vjust=0,hjust=-0.2, color='#094FA4', size=3)
+stats.plot <- stats.plot + ylab("Número de clientes")
+stats.plot <- stats.plot + theme(axis.text.x = element_text(size = 10, vjust = 0.5, hjust=0.5, color='#094FA4'))
+stats.plot <- stats.plot + theme(axis.text.y = element_text(size = 12, angle=0, color='#094FA4'))
+stats.plot
+```
+
+<p>Se puede ver cómo desde el punto de partida de <b>`r format(stats$numreg[1],decimal.mark=",",big.mark=".")` clientes</b>, se consideran válidos para el análisis el <b>`r format(round(stats$numreg[nrow(stats)]*100/stats$numreg[1],2),decimal.mark=",",big.mark=".")`%</b> de ellos.</p>
+<h3>Filtros aplicados</h3>
+<ul>
+<li><b>Pymes:</b> Se seleccionan únicamente los clientes de los segmentos globales 35 y 36 (micropymes y pequeñas empresas).</li>
+<li><b>BC + BE + CF :</b> Trabajamos solo clientes de Banca Comercial, Banca de Empresas, Consumer Finance</li>
+<li><b>Sin marca exclusión:</b> Se descartan clientes globales, de project finance o filiales de BBVA.</li>
+<li><b>Sin mora:</b> Se descartan clientes morosos.</li>
+<li><b>Sin sociedades no mercantiles:</b> Se descartan sociedades de los siguientes grupos, según su letra de CIF.
+  <ul>
+    <li>H. Comunidades de propietarios en régimen de propiedad horizontal.</li>
+    <li>J. Sociedades civiles, con o sin personalidad jurídica.</li>
+    <li>P. Corporaciones locales.</li>
+    <li>Q. Organismos autónomos, estatales o no, y asimilados, y congregaciones e instituciones religiosas.</li>
+    <li>R. Congregaciones e instituciones religiosas.</li>
+    <li>S. Órganos de la Administración del Estado y comunidades autónomas</li>
+    <li>W. Reservado a establecimientos permanentes de entidades no residentes en territorio español.</li>
+  </ul>
+</li>
+<li><b>CIFs válidos:</b> Se descartan CIFs no válidos o no informados (ZZZZZZZZ, A00000000...)</li>
+<li><b>Sin AA.PP., soberano, entidades financieras, project finance ni promotor:</b> Según el código de herramienta, se descartan las referentes a administraciones públicas, soberano y promotor. No se descartan aquellas en las que el código de herramienta viene a blanco, porque puede ser un cliente con facturación menor a un millón euros que esté pasando rating en su lugar. Se puede consultar <a href="https://docs.google.com/a/bbva.com/spreadsheets/d/1gbJIZ2e42SHkgrfcr6RlAAqhBStYZpU3Y7ZDCTZyTAc/edit#gid=522745394" target="_blank">aquí</a> el listado de herramientas descartadas (sombreadas)</li>
+</ul>
+
+<h3>To-do</h3>
+<p>También consideramos que podría llegar a ser interesante filtrados posteriores por los siguientes criterios:</p>
+<ul>
+<li><b>Número de empleados:</b> Obtener el dato de número de empleados, y descartar aquellas empresas con número de empleados = 1 (serían con toda probabilidad autónomos) o sin informar.</li>
+<li><b>Ventas:</b> Descartar aquellos clientes con una cifra de ventas = 0, puesto que pueden corresponder a empresas sin actividad o con datos insuficientes para incluirlas en un modelo válido. Este dato se puede obtener de la tabla EE.FF. externos.</li>
+</ul>
+
+```{r Filtrado de clientes vinculados (>50%), echo=FALSE, cache=TRUE}
+#Establecemos que vamos a buscar cestas de productos para clientes vinculados al menos un 80%
+#Posibles valores: 
+# a. 0     
+# b. <10%  
+# c. 10%-25%
+# d. 25%-50%
+# e. 50%-75%
+# f. 75%-99%
+# g. 100%
+minVinculacion <- 'e'
+df.inv.vinc <- subset(df.inv, cuota_cirbe_dispuesto_directo > minVinculacion)
+```
+
+
+```{r Persistir tabla con los clientes filtrados, echo=FALSE, eval = FALSE}
+
+# save(df.inv, file="df.inv.Rda")
+# load("df.inv.Rda")
+# 
+# save(df.inv.vinc, file="df.inv.vinc.Rda")
+# load("df.inv.vinc.Rda")
+
+source('~/bda_clarity/tools/write.hive.R')
+write.hive(df.inv, "da_pymes.inventario_filtrado", drop.table=TRUE)
+
+```
+

@@ -1,0 +1,209 @@
+---
+title: "Wallet Tenencia Tarjetas Activas"
+output: html_document
+---
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- "[Wallet]: Estudio del dato disponible de BBVA Wallet - Tarjetas activas"
+
+keywords  <- 'wallet, tarjetas, actividad, uso'  
+```
+
+
+```{r tabla vinculados y transaccionales tarjeta unica, eval=TRUE, echo=TRUE, cache=TRUE}
+do.hive("drop table da_mariadrav.wallet_rentab_clientes_tarjetas")
+do.hive("create table if not exists da_mariadrav.wallet_rentab_clientes_tarjetas as
+        select distinct clientes.cod_pers_trs, clientes.categoria_usuario, clientes.tipo_tarjeta, clientes.cod_idcontra, tarjetas.partition_id, 
+        tarjetas.debito_credito,
+        tarjetas.num_movimientos, tarjetas.imp_movimientos, tarjetas.num_compras, tarjetas.imp_compras, tarjetas.num_devoluciones, tarjetas.imp_devoluciones, 
+        tarjetas.num_disposiciones, tarjetas.imp_disposiciones
+        from da_martalamela.wallet_tarjetas_cod_comprod clientes 
+        right join (
+                    select cod_idcontra, partition_id, 
+                    case when cast(cod_pgccontr as int)=615 then 'Credito'
+                         when cast(cod_pgccontr as int)=616 then 'Debito'
+                    end as debito_credito,
+                    count(*) as num_movimientos, sum(imp_mvimient) as imp_movimientos,
+                    sum(case when cod_tip_movi like '%0005%' then 1 else 0 end) as num_compras,
+                    sum(case when cod_tip_movi like '%0005%' then imp_mvimient else 0 end) as imp_compras,
+                    sum(case when cod_tip_movi like '%0006%' then 1 else 0 end) as num_devoluciones,
+                    sum(case when cod_tip_movi like '%0006%' then imp_mvimient else 0 end) as imp_devoluciones,
+                    sum(case when cod_tip_movi like '%0007%' then 1 else 0 end) as num_disposiciones,
+                    sum(case when cod_tip_movi like '%0007%' then imp_mvimient else 0 end) as imp_disposiciones
+                    from da_pro.movimientos_tarjetas_detalle_corp
+                    where cod_tip_regi like '%D%' and (cod_tip_movi like '%0005%' or cod_tip_movi like '%0006%' or cod_tip_movi like '%0007%')
+                    group by cod_idcontra, partition_id, cod_pgccontr
+                    ) tarjetas
+        on clientes.cod_idcontra=tarjetas.cod_idcontra
+        where clientes.cod_idcontra is not null")
+
+do.hive("drop table da_mariadrav.wallet_rentab_tarjetas_activas")  
+do.hive("create table if not exists da_mariadrav.wallet_rentab_tarjetas_activas as 
+        select cod_pers_trs, categoria_usuario, cod_idcontra, debito_credito, tipo_tarjeta, ideal_partition as partition_id,
+        num_movimientos, imp_movimientos, num_compras, imp_compras, num_devoluciones, imp_devoluciones, 
+        num_disposiciones, imp_disposiciones, case when indic>0 then 1 else 0 end as ind_tarjeta_activa,
+        case when debito_credito='Credito' then 0.003*(imp_compras+imp_devoluciones)
+             when debito_credito='Debito' then 0.002*(imp_compras+imp_devoluciones)
+        end as rentabilidad_nodisp
+        from ( 
+              select *, 
+              sum(case when partition_id is not null then 1 else 0 end) OVER (PARTITION BY cod_idcontra ORDER BY ideal_partition ROWS 2 PRECEDING) as indic
+              FROM (
+                    select distinct tarfechas.cod_idcontra, tarjetas.debito_credito, tarfechas.cod_pers_trs, tarfechas.categoria_usuario,
+                    tarfechas.tipo_tarjeta, tarfechas.ideal_partition, tarjetas.partition_id, 
+                    tarjetas.num_movimientos, tarjetas.imp_movimientos, tarjetas.num_compras, tarjetas.imp_compras, tarjetas.num_devoluciones, 
+                    tarjetas.imp_devoluciones, tarjetas.num_disposiciones, tarjetas.imp_disposiciones
+                    from (
+                          select distinct tarjetas.cod_idcontra, tarjetas.debito_credito, tarjetas.cod_pers_trs, tarjetas.categoria_usuario,
+                          tarjetas.tipo_tarjeta, tarjetas.num_movimientos, tarjetas.imp_movimientos, tarjetas.num_compras, tarjetas.imp_compras, 
+                          tarjetas.num_devoluciones, tarjetas.imp_devoluciones, tarjetas.num_disposiciones, tarjetas.imp_disposiciones,
+                          fechas.partition_id as ideal_partition
+                          from (select distinct partition_id from da_martalamela.wallet_mtdc_cod_comprod_resumen) fechas, da_mariadrav.wallet_rentab_clientes_tarjetas tarjetas
+                          ) tarfechas 
+                    left join da_mariadrav.wallet_rentab_clientes_tarjetas tarjetas
+                    on tarfechas.ideal_partition=tarjetas.partition_id and tarfechas.cod_idcontra=tarjetas.cod_idcontra
+                    order by cod_idcontra, ideal_partition
+                  ) tar_fechas_ideal
+              ) fin_tar_fechas where ideal_partition>='20140228'")
+
+wallet_rentab_tarjetas_activas <- qhive("select *
+                                  from da_mariadrav.wallet_rentab_tarjetas_activas")
+#write.table(wallet_rentab_tarjetas_activas,"wallet_rentab_tarjetas_activas.txt",row.names=FALSE,dec = ",",sep = ";")
+```
+
+```{r tabla basicos tarjeta unica, eval=TRUE, echo=TRUE, cache=TRUE}
+do.hive("drop table da_mariadrav.wallet_rentab_clientes_tarjetas_basicos")  
+do.hive("create table if not exists da_mariadrav.wallet_rentab_clientes_tarjetas_basicos as
+        select distinct clientes.cod_pers_trs, clientes.categoria_usuario, clientes.tipo_tarjeta, clientes.cod_idcontra, tarjetas.partition_id, 
+        tarjetas.debito_credito,
+        tarjetas.num_movimientos, tarjetas.imp_movimientos, tarjetas.num_compras, tarjetas.imp_compras, tarjetas.num_devoluciones, tarjetas.imp_devoluciones, 
+        tarjetas.num_disposiciones, tarjetas.imp_disposiciones
+        from da_martalamela.wallet_tarjetas_cod_comprod_basicos clientes 
+        right join (
+                    select cod_idcontra, partition_id, 
+                    case when cast(cod_pgccontr as int)=615 then 'Credito'
+                         when cast(cod_pgccontr as int)=616 then 'Debito'
+                    end as debito_credito,
+                    count(*) as num_movimientos, sum(imp_mvimient) as imp_movimientos,
+                    sum(case when cod_tip_movi like '%0005%' then 1 else 0 end) as num_compras,
+                    sum(case when cod_tip_movi like '%0005%' then imp_mvimient else 0 end) as imp_compras,
+                    sum(case when cod_tip_movi like '%0006%' then 1 else 0 end) as num_devoluciones,
+                    sum(case when cod_tip_movi like '%0006%' then imp_mvimient else 0 end) as imp_devoluciones,
+                    sum(case when cod_tip_movi like '%0007%' then 1 else 0 end) as num_disposiciones,
+                    sum(case when cod_tip_movi like '%0007%' then imp_mvimient else 0 end) as imp_disposiciones
+                    from da_pro.movimientos_tarjetas_detalle_corp
+                    where cod_tip_regi like '%D%' and (cod_tip_movi like '%0005%' or cod_tip_movi like '%0006%' or cod_tip_movi like '%0007%')
+                    group by cod_idcontra, partition_id, cod_pgccontr
+                    ) tarjetas
+        on clientes.cod_idcontra=tarjetas.cod_idcontra
+        where clientes.cod_idcontra is not null")
+
+do.hive("drop table da_mariadrav.wallet_rentab_tarjetas_activas_basicos")  
+do.hive("create table if not exists da_mariadrav.wallet_rentab_tarjetas_activas_basicos as 
+        select cod_pers_trs, categoria_usuario, cod_idcontra, debito_credito, tipo_tarjeta, ideal_partition as partition_id,
+        num_movimientos, imp_movimientos, num_compras, imp_compras, num_devoluciones, imp_devoluciones, 
+        num_disposiciones, imp_disposiciones, case when indic>0 then 1 else 0 end as ind_tarjeta_activa,
+        case when debito_credito='Credito' then 0.003*(imp_compras+imp_devoluciones)
+             when debito_credito='Debito' then 0.002*(imp_compras+imp_devoluciones)
+        end as rentabilidad_nodisp
+        from ( 
+              select *, 
+              sum(case when partition_id is not null then 1 else 0 end) OVER (PARTITION BY cod_idcontra ORDER BY ideal_partition ROWS 2 PRECEDING) as indic
+              FROM (
+                    select distinct tarfechas.cod_idcontra, tarjetas.debito_credito, tarfechas.cod_pers_trs, tarfechas.categoria_usuario,
+                    tarfechas.tipo_tarjeta, tarfechas.ideal_partition, tarjetas.partition_id, 
+                    tarjetas.num_movimientos, tarjetas.imp_movimientos, tarjetas.num_compras, tarjetas.imp_compras, tarjetas.num_devoluciones, 
+                    tarjetas.imp_devoluciones, tarjetas.num_disposiciones, tarjetas.imp_disposiciones
+                    from (
+                          select distinct tarjetas.cod_idcontra, tarjetas.debito_credito, tarjetas.cod_pers_trs, tarjetas.categoria_usuario,
+                          tarjetas.tipo_tarjeta, tarjetas.num_movimientos, tarjetas.imp_movimientos, tarjetas.num_compras, tarjetas.imp_compras, 
+                          tarjetas.num_devoluciones, tarjetas.imp_devoluciones, tarjetas.num_disposiciones, tarjetas.imp_disposiciones,
+                          fechas.partition_id as ideal_partition
+                          from (select distinct partition_id from da_martalamela.wallet_mtdc_cod_comprod_resumen) fechas, da_mariadrav.wallet_rentab_clientes_tarjetas_basicos tarjetas
+                          ) tarfechas 
+                    left join da_mariadrav.wallet_rentab_clientes_tarjetas_basicos tarjetas
+                    on tarfechas.ideal_partition=tarjetas.partition_id and tarfechas.cod_idcontra=tarjetas.cod_idcontra
+                    order by cod_idcontra, ideal_partition
+                  ) tar_fechas_ideal
+              ) fin_tar_fechas where ideal_partition>='20140228'")
+
+
+wallet_rentab_tarjetas_activas_basicos <- qhive("select * from da_mariadrav.wallet_rentab_tarjetas_activas_basicos")
+#write.table(wallet_rentab_tarjetas_activas_basicos,"wallet_rentab_tarjetas_activas_basicos.txt",row.names=FALSE,dec = ",",sep = ";")
+
+```
+
+```{r agrup nivel cte tarjetas, eval=TRUE, echo=TRUE, cache=TRUE}
+
+# análisis tarjetas activas 
+
+tarj_vinc_trans <- qhive("select cod_pers_trs, categoria_usuario, tipo_tarjeta, partition_id, 
+                      sum(num_movimientos) as num_movimientos, sum(imp_movimientos) as imp_movimientos, sum(num_compras) as num_compras, 
+                      sum(imp_compras) as imp_compras, sum(num_devoluciones) as num_devoluciones, sum(imp_devoluciones) as imp_devoluciones,
+                      sum(num_disposiciones) as num_disposiciones, sum(imp_disposiciones) as imp_disposiciones,
+                      ind_tarjeta_activa,
+                      count(distinct cod_idcontra) as num_tarjetas
+                      from da_mariadrav.wallet_rentab_tarjetas_activas
+                      group by cod_pers_trs, categoria_usuario, tipo_tarjeta, partition_id, ind_tarjeta_activa ")
+
+write.table(tarj_vinc_trans,"tarj_vinc_trans.txt",row.names=FALSE,dec = ",",sep = ";")
+
+tarj_bas_prev <- qhive("select cod_pers_trs, categoria_usuario, tipo_tarjeta, partition_id,
+                              sum(num_movimientos) as num_movimientos, sum(imp_movimientos) as imp_movimientos, sum(num_compras) as num_compras, 
+                              sum(imp_compras) as imp_compras, sum(num_devoluciones) as num_devoluciones, sum(imp_devoluciones) as imp_devoluciones,
+                              sum(num_disposiciones) as num_disposiciones, sum(imp_disposiciones) as imp_disposiciones,
+                              ind_tarjeta_activa,
+                              count(distinct cod_idcontra) as num_tarjetas
+                              from da_mariadrav.wallet_rentab_tarjetas_activas_basicos
+                              group by cod_pers_trs, categoria_usuario, tipo_tarjeta, partition_id, ind_tarjeta_activa ")
+write.table(tarj_bas_prev,"tarj_bas_prev.txt",row.names=FALSE,dec = ",",sep = ";")
+
+```
+
+
+```{r agrup nivel cte rentabilidad, eval=TRUE, echo=TRUE, cache=TRUE}
+
+# análisis rentabilidad
+
+rentabilidad <- qhive("select 'Vinculados' as segmento, 
+                       cod_pers_trs, categoria_usuario, partition_id, tipo_tarjeta, debito_credito, ind_tarjeta_activa,
+                       sum(num_compras) as num_compras,
+                       sum(imp_compras) as imp_compras,
+                       sum(num_devoluciones) as num_devoluciones,
+                       sum(imp_devoluciones) as imp_devoluciones,
+                       sum(num_compras) + sum(num_devoluciones) as num_movim_nodisp,
+                       sum(imp_compras) + sum(imp_devoluciones) as imp_movim_nodisp,
+                       sum(rentabilidad_nodisp) as rentabilidad_nodisp
+                       from da_mariadrav.wallet_rentab_tarjetas_activas
+                       group by cod_pers_trs, categoria_usuario, partition_id, tipo_tarjeta, debito_credito, ind_tarjeta_activa
+                       union all
+                      select 'Básicos' as segmento, 
+                      cod_pers_trs, categoria_usuario, partition_id, tipo_tarjeta, debito_credito, ind_tarjeta_activa,
+                       sum(num_compras) as num_compras,
+                       sum(imp_compras) as imp_compras,
+                       sum(num_devoluciones) as num_devoluciones,
+                       sum(imp_devoluciones) as imp_devoluciones,
+                       sum(num_compras) + sum(num_devoluciones) as num_movim_nodisp,
+                       sum(imp_compras) + sum(imp_devoluciones) as imp_movim_nodisp,
+                       sum(rentabilidad_nodisp) as rentabilidad_nodisp
+                       from da_mariadrav.wallet_rentab_tarjetas_activas_basicos
+                       group by cod_pers_trs, categoria_usuario, partition_id, tipo_tarjeta, debito_credito, ind_tarjeta_activa
+                    ")
+write.table(rentabilidad,"rentabilidad.txt",row.names=FALSE,dec = ",",sep = ";")
+
+```
+
+```{r analisis disposiciones, eval=TRUE, echo=TRUE, cache=TRUE}
+total <- qhive("select partition_id, categoria_usuario, avg(imp_movimientos) as avg_imp_movimientos
+                       from da_mariadrav.wallet_rentab_tarjetas_activas
+                       where ind_tarjeta_activa=1
+                       group by partition_id, categoria_usuario")
+
+disposiciones <- qhive("select partition_id, categoria_usuario, avg(imp_disposiciones) as avg_imp_movimientos
+                       from da_mariadrav.wallet_rentab_tarjetas_activas
+                       where ind_tarjeta_activa=1
+                       group by partition_id, categoria_usuario")
+
+```

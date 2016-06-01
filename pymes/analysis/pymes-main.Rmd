@@ -1,0 +1,165 @@
+---
+title: "[Pymes]  Modelo de Prediccion de Valor para No Clientes"
+author: "BBVA D&A - Customer Analytics - César de Pablo Sánchez. María Hernandez"
+date: "14/12/2015"
+output:
+  html_document:
+    theme: cerulean
+    toc: true
+    fig_width: 7 
+    fig_height: 7
+    fig_caption: true
+---
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- '[Pymes] Modelo de Prediccion de Valor para No Clientes'
+keywords  <- 'pymes, sme'  
+
+options(warn=-1, scipen=3, width=120)
+
+```
+
+### 1. Motivación de negocio
+
+Segmento PYMES va a realizar una  **nueva ficha de NO CLIENTES** para la gestión comercial de manera continuada.
+
+Entre los elementos de la ficha desea identificar posibles clientes de valor, propension a diferentes productos, elasticidad al precio entre otros parámetros. 
+
+Este modelo se usara para el cálculo del valor relativo (percentil) de una Pyme.  
+
+![Diseño de la ficha de no clientes](./img/Ficha-NoClientes.png)
+
+
+### 2. Objetivos
+
+Los objetivos del proyecto son: 
+ - Identificar fuentes de datos que puedan servir para caracterizar cualquier empresa respecto al potencial valor del banco.
+ - Definir un modelo estadístico que permita asignar un valor a cualquier empresa, inicialmente representada por un CIF. 
+ - Generar un mecanismo, en este caso el modelo, que permita ordenar por valor los potenciales clientes y que sirva de ayuda en la seleccion de colectivos para la gestion del inventario y las acciones comerciales
+
+### 3. Fuentes de datos
+
+El principal problema a la hora de determinar el valor de los No Clientes es que no tenemos una visión conpleta de ellos, de forma que se tiene que inferir en función de la información disponible. 
+
+Las fuentes de información que se usan para los no clientes son: 
+
+  - Balance y Cuentas de resultado (SABI)
+  - Numero de empleados 
+  - CNAE
+   
+Además para la construcción de los modelos se usa información de clientes: 
+
+  - Rentabilidad (margen)
+  - CIRBE (vinculacion)
+   
+   
+Otras fuentes de información censadas para no clientes, pero que no se han empleado en el modelo de valor
+
+  - Facturación en TPV con tarjetas BBVA
+  - Indicadores de facturacion en TPV de Risk360 - incluyen indicadores que tienen en cuenta el sector
+  - Eventos en BOE/BORME
+  - Información adicional de SABI
+
+
+### 4. Modelo de valor
+
+#### Medida de valor 
+  
+Después de considerar varias medidas de valor se ha elegido el **margen** tal y como se usa en la hoja de rentabilidad de clientes. Este margen se define como: 
+  
+  margen = margen por activos + margen por servicios
+  
+  Se han considerado otras medidas de rentabilidad tales como: 
+
+  - REA
+  - ROA
+  - Margen potencial (definido en Plan Alfa) 
+    
+#### Hipótesis: Correlación entre los gastos financieros de una empresa y el margen
+  
+Para las empresas cliente muy vinculadas con el banco debería existir una correlación alta entre el margen y lo que declaran como gastos financieros. Para calcular la vinculación con el banco se usa el dato de CIRBE y se seleccionan los que tienen **CIRBE > 0.75** 
+  
+
+  
+#### Descripción del modelo
+
+Se ha optado por construir diferentes modelos en función de los datos que tenemos de clientes. El flujo es el siguiente
+
+<img src="./img/Esquema-ModeloValor.jpg" height="600" width="600" alt="Esquema del modelo de valor" style="display: block; margin-left: auto; margin-right: auto;"> 
+
+
+   - 1. **Con Balance**. Se usan los datos de balance más reciente (2014) y el año anterior para calcular el incremento de facturacion. Si no se disponen de balance a 2014 se usan los datos del año anterior. 
+     
+      - 1.1 **Informan Gastos financieros (cuenta_41500) informados.** (aprox. 75% de los que tienen balance). Se construye dos modelos lineales en función de si la empresa aumenta o disminuye la facturacion. Las varia bles empleadas son *Gastos financieros*, *gastos en divisas* y *facturacion* del último balance y su *variación* (var ) respecto al año anterior, que se usa como. Los parámetros del modelo se entrenan y ajustan con los clientes más vinculados.  
+
+        - 1.1.1 *Aumentan facturación*
+        - 1.1.2 *Disminuyen facturación* 
+                        
+     - 1.2. **No informan gastos financieros** (aprox. 25% de los que tenemos balance). Se ha construido un modelo que usa el resto de variables del balance, en particular las rubricas principales que se informan en todos los modelos de balances, además del número de empleados y CNAE. Para entrenar y validar se aplican primero el modelo 1 para calcular el margen. 
+          
+  - 2. **Sin balance**
+     
+     - **facturación en TPV con  tarjetas BBVA** (En desarrollo). El objetivo es predecir el margen a partir de los datos de facturación en TPV con tarjetas BBVA (número de transacciones, volumen de facturación y su variación respecto al año anterior). Disponemos de ese dato tanto para clientes como para no clientes 
+   
+
+### 5. Análisis relacionados
+
+#### 5.1 Relación entre el Margen en el banco y los gastos financieros 
+
+Ver análisis **Pymes_Valor_Correlacion.Rmd**.
+
+```{r child = '~/bda_clarity/analytics_in_Rmd/Pymes_ValorCorrelacion.Rmd', echo=FALSE, eval=FALSE}
+
+```
+
+#### 5.2 Estimación de un modelo a partir de datos de balance básicos: gastos financieros, gastos de divisas y facturacion.  
+
+Ver análisis **Pymes_Valor_Correlacion.Rmd**.
+
+#### 5.3 Estimación de un modelo para los que no informan gastos financieros
+
+Ver análisis **Pymes_Valor_modeloBalances.Rmd**.
+
+```{r child = '~/bda_clarity/analytics_in_Rmd/Pymes_Valor_modeloBalances.Rmd', eval=FALSE, echo=FALSE}
+
+```
+
+<!-- #### 5.4 Combinación de las predicciones -->
+
+### 6. Medicion de los resultados del modelo
+
+- *Enero 2016* - Se ha realizado una accion comercial entre aprox 50K. usando el modelo de valor para seleccionar la mitad de ellos (25K) como criterio de corte. El otro criterio de corte ha sido la cuota objetivo proporcionada por el análisis de Riesgos. 
+
+Se ha introducido un grupo de control con un 10% de los clientes elegidos de forma estratificada entre los que cumplen:
+
+  - Cuota objetivo alta o moderada (>20% )
+  - Puntuacion moderada o baja (1,2,3)
+     
+Para la medicion de la utilidad del modelo de valor, compararemos el número y el margen medio de los clientes nuevos captados en la accion comercial.  Se medira su margen despues de 6 meses desde su fecha de alta, contratando entre los seleccionados por el modelo y los del grupo de control. 
+
+
+```{r child = '~/bda_clarity/analytics_in_Rmd/Pymes_AccionComercialDec2015.Rmd', eval=FALSE, echo=FALSE}
+
+```
+
+Ver análisis **Pymes_AccionComercialDec2015.Rmd**.
+
+### 7. Conclusiones
+
+  - Se dispone de una primera iteración del modelo de valor. La correlación con el margen elegido para los clientes vinculados no es tan alta como se esperaba, sin embargo se ha decidido avanzar con la propuesta y medir los resultados de la accion comercial. 
+  
+
+#### Estimación de impacto
+
+*Enero 2016* - Acción comercial usando modelo de valor para seleccionar clientes de valor (25.000)
+
+#### Siguientes pasos
+
+  - Evaluacion en campañas/accion comercial del modelo
+  - Viabilidad del modelo de valor basado en la facturacion en TPV
+  - Hacer uso de el resto de fuentes de datos 
+  - Extender el modelo para clientes
+  - Simplificar el modelo
+  

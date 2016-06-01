@@ -1,0 +1,496 @@
+---
+title: "Pymes - Valor Cliente - Exploración"
+author: "BBVA D&A - Pymes"
+date: "30/12/2015"
+output:
+  html_document:
+    self_contained: no
+    theme: cerulean
+---
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- '[Pymes]: Valor Cliente - Exploracion'
+keywords  <- 'pymes,smes,valor,value,cliente,customer'  
+```
+
+```{r librerias_y_funciones, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(ggplot2))
+suppressMessages(library(data.table))
+suppressMessages(library(plyr))
+suppressMessages(library(caret))
+suppressMessages(library(kernlab))
+suppressMessages(library(gridExtra))
+suppressMessages(library(scales))
+
+suppressMessages(library(dplyr))
+
+suppressPackageStartupMessages(library('googleVis'))
+suppressPackageStartupMessages(library('ggplot2'))
+op <- options(gvis.plot.tag="chart")
+
+options(warn=-1, scipen=3, width=120)
+source('~/bda_clarity/tools/warehouse_basics.R') ;
+source('~/bda_clarity/tools/write.hive.R') ;
+source('~/bda_clarity/tools/multiplot.R') ;
+source('~/bda_clarity/tools/methods_connect.R') ;
+```
+
+```{r dependencies, echo = FALSE}
+
+# pymes_clientes <- clarity.use_table(DEPENDENCY_OTHER_TABLES,    
+#                                              'da_pymes.tablon_clientes ',    
+#                                              '*', sqname = 'pymes_clientes ')
+
+```
+
+### 1. Motivación de negocio
+
+Se quiere generar un indicador de Valor Potencial para las PYMEs clientes de BBVA.
+
+### 2. Objetivo
+
+En este análisis, el objetivo es analizar cómo se comporta para clientes el modelo de valor realizado para PYMEs no clientes. Veremos cómo se relacionan los gastos financieros y la rentabilidad de las pymes en bbva con el valor estimado en base a ese modelo.
+
+### 3. Fuentes de datos
+
+Se emplean las siguientes tablas
+
+* **da_pymes.tablon_clientes:** Tabla de clientes PYMES con todas sus features. Utiliza datos de:
+  * CNAE, empleados
+  * Estados Financieros (balances eInforma)
+  * Rentabilidad
+
+En esta tabla parece que están todos los clientes, aunque no tengan Plan Uno.
+
+También se utilizarán los modelos entrenados para no clientes.
+
+### 4. Análisis
+
+A continuación se presenta un análisis de los principales resultados obtenidos respondiendo en cada caso a una pregunta concreta.
+
+**Pregunta**
+¿Cuántos clientes con datos informados hay?
+
+**Respuesta**
+```{r rentabilidadGastos}
+q <- "select cod_documps1 as cif, margen_a, 
+  cuenta_41500, cuenta_41700, cuenta_40100, var_40100,
+  empleados, cod_cnae_1, 
+  cuenta_10000, cuenta_11000, cuenta_12000, cuenta_12700, 
+  cuenta_20000, cuenta_31000, cuenta_32000, cuenta_32500, # cuenta_12380 + 
+  cuenta_31220, cuenta_31230, cuenta_32330, cuenta_32320, cuenta_32580,  # Deudas y acreedores
+  cuenta_31500,
+  imp_dridban, imp_dridsba, imp_dridreg
+  from da_pymes.tablon_clientes"
+df.all <- qimpala(q)
+
+```
+
+```{r planuno}
+q <- "select distinct cc.cod_documps1 as cif
+  from da_pymes.tablon_clientes c1 
+  join da_pro.clientes_corp cc on cc.cod_documps1 = c1.cod_documps1 and cc.partition_id = '20151031' and cc.cod_entalfa = '0182'
+  join da_pro.segmento_plan_uno spu on spu.cod_persctpn = cc.cod_persctpn and spu.partition_id = '20151031' and spu.cod_segpref is not null and spu.cod_entalfa = '0182'"
+
+plan.uno <- qimpala(q)
+df.merge <- merge(data.table(df.all), data.table(plan.uno), by="cif")
+```
+
+Algunos números:
+
+* Hay `r nrow(df.all)` clientes en el tablón de clientes
+* De ellos, tienen Plan UNO `r nrow(df.merge)` clientes, un `r percent(nrow(df.merge) / nrow(df.all))`. 
+* De ellos, tienen el CNAE informado `r nrow(subset(df.merge, !is.na(cod_cnae_1) & cod_cnae_1 != "NA"))` clientes, que es un `r percent(nrow(subset(df.merge, !is.na(cod_cnae_1) & cod_cnae_1 != "NA")) / nrow(df.merge))`. 
+
+Nos quedamos con estos clientes:
+
+- Tienen Plan UNO
+- Tienen CNAE Informado
+
+```{r}
+df.cli <- data.frame(subset(df.merge, !is.na(cod_cnae_1) & cod_cnae_1 != "NA"))
+rm(df.merge)
+
+df.cli$gastos_financieros <- ifelse(is.na(df.cli$cuenta_41500), 0, -1 * df.cli$cuenta_41500)
+df.cli$balance_divisa <- ifelse(is.na(df.cli$cuenta_41700),0, -1 * df.cli$cuenta_41700)
+df.cli$balance_facturacion <- ifelse(is.na(df.cli$cuenta_40100), 0, df.cli$cuenta_40100)
+```
+
+
+**Pregunta: ¿Cómo de informados están esos clientes?**
+
+**Respuesta**
+
+```{r, echo=FALSE, fig.width=12}
+head(df.cli)
+
+summary(df.cli)
+```
+
+Vemos que las cuentas 31230, 32330 y 31500 suelen estar bastante vacías.
+
+**Pregunta: ¿Cómo se relacionan los gastos financieros con la rentabilidad?**
+
+**Respuesta**
+
+Este estudio previo se ha realizado con profundidad para entrenar el modelo de valor para Pymes no clientes. Los detalles se pueden encontrar en el análisis **Pymes_ValorCorrelacion**.
+
+```{r readModeloValorNoClientes, cache=TRUE, echo=FALSE}
+
+modelo_valor_lm_incfact_path = "/DYA/xe48636/PymesAnalytics/deploy/valor.lm.incfact.Rda"
+modelo_valor_lm_decfact_path = "/DYA/xe48636/PymesAnalytics/deploy/valor.lm.decfact.Rda"
+modelo_valor_resto_path <- "/DYA/xe48636/PymesAnalytics/deploy/valor.models.0.3.Rda"
+
+
+model.valor_lm_incfact   <- readRDS(modelo_valor_lm_incfact_path)
+model.valor_lm_decfact   <- readRDS(modelo_valor_lm_decfact_path)
+model.valor_resto        <- readRDS(modelo_valor_resto_path) 
+model.valor              <- model.valor_resto['SVM Radial'][[1]]
+```
+
+Ahora aplicamos los modelos lineales que estiman el valor a partir de los gastos financieros, como una multiplicación y una corrección si la facturación aumenta o disminuye:
+```{r modelosValor1}
+# Incrementa facturación
+model.valor_lm_incfact
+
+# Decrementa facturación
+model.valor_lm_decfact
+```
+
+```{r applyValor1}
+
+df.valor <- df.cli[,c('cif', 'cod_cnae_1', 'margen_a', 'gastos_financieros', 'balance_divisa', 'balance_facturacion', 
+                      'var_40100', 'cuenta_41500', 'cuenta_40100')]
+
+df.valor$incfact <- predict.lm(model.valor_lm_incfact, df.valor, na.action = na.pass)
+df.valor$incfact <- ifelse(df.valor$balance_facturacion == 0, NA ,df.valor$incfact) 
+
+df.valor$decfact <- predict.lm(model.valor_lm_decfact, df.cli, na.action = na.pass)          
+df.valor$decfact <- ifelse(df.valor$balance_facturacion == 0,NA,df.valor$decfact)
+
+df.valor$ind_var <- as.factor(ifelse(df.valor$var_40100 > 0, "1", "0"))
+
+```
+
+Si alguno de los datos que hacen falta (gastos financieros, divisas o variación de la facturación) está vacía, el resultado no es válido. **Hay `r sum(is.na(df.valor$incfact))` clientes para los que no se puede estimar así y hay que usar el otro modelo, son el `r percent(sum(is.na(df.valor$incfact)) / nrow(df.valor))`** .
+
+A continuación aplicamos el modelo entrenado para esos casos. Se aplicará a aquellos que tienen las variables del balance informadas. La fórmula que se ha utilizado para entrenar es:
+```{r}
+formula(model.valor$terms)
+```
+donde las variables (tanto la x como la y) están en escala logarítmica (log10).
+
+```{r, echo=FALSE}
+df.transformed <- df.cli
+
+names.numeric <- grep("^cuenta_", names(df.transformed))
+# Poner a 0 los NA
+df.transformed[is.na(df.transformed)]<-0
+# Convertir a logarítmica las cuentas
+df.transformed[,names.numeric] <- log(df.transformed[,names.numeric] + 1, base=10)
+```
+
+```{r applyValor2, cache=TRUE}
+
+df.valor$valor_ngf_log <- predict(model.valor, df.transformed, na.action = na.pass)
+
+```
+
+```{r, echo=FALSE}
+df.valor$valor_ngf <- 10^(df.valor$valor_ngf_log)  # Lo pone en la misma escala que los modelos lineales
+```
+
+Calculamos el score final y añadimos con qué modelo se ha ajustado.
+```{r}
+df.valor$adjusted <- ifelse(df.valor$var_40100 > 0, df.valor$incfact, df.valor$decfact) 
+df.valor$score_valor <- ifelse(is.na(df.valor$cuenta_41500) | is.na(df.valor$var_40100) , df.valor$valor_ngf, df.valor$adjusted)
+df.valor$ind_model <- ifelse(is.na(df.valor$cuenta_41500) | is.na(df.valor$var_40100), "ngf", ifelse(df.valor$var_40100 > 0, "inc", "dec") ) 
+
+```
+
+**Pregunta: ¿Cómo es la estimación con cada modelo?**
+
+**Respuesta**
+
+A continuación se muestran algunos gráficos para ver cuántos clientes se estarían estimando con cada modelo, y cómo es la estimación de cada uno. 
+
+```{r, echo=FALSE, fig.heigth=3, fig.width=8}
+ggplot(df.valor, aes(x=ind_model)) + geom_bar() + 
+  geom_text(aes(y = (..count..),label = scales::percent((..count..)/sum(..count..))), stat="bin",colour="darkblue", vjust=-1) +
+  ggtitle("Clientes estimados con cada modelo") + ylim(0,50000)
+
+ggplot(df.valor, aes(x=score_valor, color=ind_model)) + geom_density() + 
+  coord_cartesian(xlim=c(-1e3, 3e4)) +
+  ggtitle("Densidad de valor estimado con cada modelo")
+  
+ggplot(df.valor, aes(x=ind_model, y=score_valor)) + geom_boxplot() + coord_cartesian(ylim=c(0, 10000)) +
+  ggtitle("Boxplot de valor estimado con cada modelo")
+
+```
+
+Vemos que para el `r percent(nrow(subset(df.valor, ind_model == "ngf"))/nrow(df.valor))` de los clientes que no tienen gastos financieros se estima con el modelo no lineal. 
+
+Vemos también que las estimaciones de los 3 modelos están más o menos en la misma escala, como es deseable. Si no pasara eso, el modelo estaría sesgando la predicción. 
+
+**Pregunta: ¿Cómo de diferente es la estimación cuando aumenta o disminuye la facturación?**
+
+Estamos utilizando una estimación de valor que varía según si la facturación aumenta o disminuye respecto al año anterior. ¿Esto hace que salgan estimaciones muy diferentes? 
+
+**Respuesta**
+
+A priori, sí que debe haber alguna diferencia, ya que los intercept cada modelo son algo diferentes. 
+
+```{r diferenciaModelos, echo=FALSE, fig.height=3, fig.width=8}
+
+ggplot(df.valor, aes(x = decfact, y = incfact, colour = ind_var )) +
+  geom_point(alpha = 0.1) +
+  geom_abline(intercept = 0, slope = 1) +
+  scale_x_log10() +
+  scale_y_log10() + 
+  facet_grid(. ~ ind_var)
+
+ggplot(df.valor, aes(x = incfact-decfact)) + geom_density()
+
+ggplot(subset(df.valor, ind_var == 1), aes(x = incfact, y = incfact-decfact)) +
+  geom_point(alpha = 0.1) + scale_x_log10() + ggtitle("Decfact - Incfact cuando incrementan facturación")
+
+
+ggplot(subset(df.valor, ind_var == 0), aes(x = decfact, y = decfact-incfact)) +
+  geom_point(alpha = 0.1) + scale_x_log10() + ggtitle("Decfact - Incfact cuando decrementan facturación")
+
+```
+
+Lo que vemos es que en general el modelo para cuando se incrementa la facturación estima un valor más elevado que cuando decrementa (valores por encima de la diagonal), lo cual es lo esperado, ya que parece que tiene sentido que si una empresa está aumentando sus ventas, ésta tenga más valor. 
+
+A medida que la facturación (estimada) aumenta, vemos sin embargo que el modelo para los que decrementan facturación produce valores más altos que el modelo para los que incrementan. 
+
+
+**Pregunta:¿Cómo se relaciona el valor estimado con la rentabilidad?**
+
+Ahora vamos a volver a analizar cómo se relaciona la rentabilidad en bbva con el valor que estimamos. El valor se ha definido de forma que ajuste la rentabilidad, sin embargo ya vimos que no hay correlación excesivamente alta por lo que habrá variaciones.
+
+**Respuesta**
+```{r, echo=FALSE}
+df.rent <- subset(df.valor, !is.na(margen_a) & !is.na(score_valor) & margen_a != 0)
+```
+
+Primero, analizamos la rentabilidad, y vemos cómo es la distribución de rentabilidad en los clientes. Hacemos cortes logarítmicos en el margen. 
+
+```{r, echo=FALSE}
+summary(df.rent$margen_a)
+```
+
+```{r rentabilidad, echo=FALSE, fig.height=3, fig.width=10}
+
+b <- c(0, 1, 10, 50, 100, 200, 500, 1000, 2000, 5000, 1e4, 1e8)
+
+#histogram
+ggplot(subset(df.rent, margen_a > 0), aes(x=margen_a)) + 
+  geom_histogram(breaks=b, color="black", fill="blue", alpha=0.5) + 
+  xlim(0, 1e4)
+
+#density
+ggplot(subset(df.rent, margen_a > 0), aes(x=margen_a)) + geom_density() + scale_x_log10(breaks=b[-1], labels=b[-1])
+
+#boxplot
+ggplot(df.rent, aes(x=1, y=margen_a)) + geom_boxplot() + ylim(-1000, 1e4)
+```
+
+Ahora comparamos el margen con el valor estimado. 
+```{r margenValor, echo=FALSE}
+
+#puntos, esperaríamos por encima de la diagonal
+ggplot(df.rent, aes(x=margen_a, y=score_valor)) + geom_point(aes(color=margen_a<score_valor), alpha=0.4) + 
+  geom_abline(intercept=0, slope=1) +
+  coord_cartesian(xlim=c(-2000, 1e4), ylim=c(0, 5e4))
+
+ggplot(df.rent, aes(x=margen_a, y=score_valor)) + geom_point(aes(color=margen_a<score_valor), alpha=0.4) + 
+  geom_abline(intercept=0, slope=1) +
+  coord_cartesian(xlim=c(-2000, 2e4), ylim=c(0, 2e4))
+
+ggplot(df.rent, aes(x=margen_a, y=score_valor)) + #geom_point(aes(color=margen_a<score_valor), alpha=0.4) + 
+  geom_bin2d(binwidth=c(1000, 1000)) + scale_fill_gradientn(colours=rainbow(7)) +
+  geom_abline(intercept=0, slope=1) +
+  coord_cartesian(xlim=c(-2000, 2e4), ylim=c(0, 2e4))
+  
+
+# density2d
+ggplot(df.rent, aes(x=margen_a, y=score_valor)) + geom_density2d() + geom_abline(intercept=0, slope=1)
+
+# count cuantos por encima y cuantos por debajo
+# ggplot(df.rent, aes(x=score_valor > margen_a)) + geom_bar() + 
+#   geom_text(aes(y = (..count..),label = scales::percent((..count..)/sum(..count..))), stat="bin",colour="darkblue", vjust=-1) 
+
+df.raros <- subset(df.rent, score_valor < margen_a)
+
+ggplot(df.rent, aes(x=margen_a/score_valor)) + geom_density() + xlim(-0.5, 1.5)
+ggplot(df.rent, aes(x="Margen sobre valor", y=margen_a/score_valor)) + geom_boxplot() + ylim(-0.5, 1.5) + xlab("")
+
+```
+
+De todos los clientes que tenemos, el `r percent(nrow(df.rent)/nrow(df.valor))` de ellos tienen rentabilidad informada en bbva (`r nrow(df.rent)`). En casi todos el valor estimado es mayor que la rentabilidad actual (`r percent(nrow(subset(df.rent, margen_a > score_valor))/nrow(df.rent))` margen > valor estimado).
+
+**HAY EMPRESAS QUE TIENEN UNA RENTABILIDAD MAYOR AL VALOR ESTIMADO**
+
+Esto tiene sentido, es un modelo estimado, se intenta aproximar esa variable pero no siempre se obtiene el mismo valor. Comparamos algunas cosas.
+
+```{r, echo=FALSE}
+nrow(df.raros)
+head(df.raros, 10)
+
+avg <- mean((df.raros$score_valor - df.raros$margen_a)/df.raros$margen_a)
+median <- median((df.raros$score_valor - df.raros$margen_a)/df.raros$margen_a)
+```
+
+¿Cuánto varían -en porcentaje-?
+
+```{r difValorMargen, echo=FALSE, fig.height=3, fig.width=8}
+
+ggplot(df.raros, aes(x=(score_valor-margen_a)/margen_a)) + geom_histogram(fill="red", alpha=0.3) + 
+  geom_vline(xintercept=avg) + xlim(-2,0) 
+
+ggplot(df.raros, aes(x=margen_a, y=score_valor)) + geom_point(alpha=0.4) 
+ggplot(df.raros, aes(x=margen_a, y=score_valor)) + geom_point(alpha=0.4) + xlim(0, 2e4) + ylim(0, 1e4)
+
+ggplot(df.raros, aes(x=margen_a, y=(margen_a-score_valor)/margen_a)) + geom_point(alpha=0.3) + scale_y_log10()
+ggplot(df.raros, aes(x=margen_a, y=(margen_a-score_valor)/margen_a)) + geom_density2d() + scale_y_log10()
+
+```
+
+**Pregunta: ¿Cómo se relaciona el rank según el valor estimado con el rank según la rentabilidad?**
+
+**Respuesta**
+
+El valor concreto no tiene por qué estimarse con exactitud, pero vamos a ver si el orden, el ranking estimado sí se ajusta más o menos a la rentabildiad.
+  
+  
+```{r rentabilidadRank, echo=FALSE, fig.height=3, fig.width=8}
+df.rent <- df.rent[order(df.rent$score_valor),]
+df.rent$rank_valor <- 1:nrow(df.rent)
+
+df.rent <- df.rent[order(df.rent$margen_a),]
+df.rent$rank_margen <- 1:nrow(df.rent)
+
+head(df.rent)
+
+ggplot(df.rent, aes(x=rank_valor, color=ind_model)) + geom_density()
+ggplot(df.rent, aes(x=rank_valor, fill=ind_model)) + geom_histogram()
+ggplot(df.rent, aes(x=rank_valor, fill=ind_model)) + geom_histogram() + facet_grid(~ind_model)
+
+
+ggplot(df.rent, aes(x=rank_margen, y=rank_valor, color=ind_model)) + geom_point(alpha=0.5) + facet_wrap(~ind_model)
+ggplot(df.rent, aes(x=rank_margen, y=rank_valor, color=ind_model)) + geom_density2d() + facet_wrap(~ind_model)
+
+cor(df.rent$score_valor, df.rent$margen_a) # 0.4003
+cor(df.rent$rank_valor, df.rent$rank_margen) # 0.33159
+```
+
+Vamos a ver ahora cuál es el ranking medio en los primeros k valores. Esto quiere decir, dados los primeros k elementos según el ranking estimado (valor estimado), ¿en qué posición real aparecen esas empresas que se obtienen? Vamos a medirlo con la posición media. Si el orden fuera perfecto, se tendría que el ranking medio sería 
+\[
+\frac{1}{k}\sum_{i=1}^k k = \frac{1}{k} \frac{k(k+1)}{2} = \frac{k+1}2
+\]
+
+```{r averageRank}
+# Calculamos algo similar a Precision@k, es decir, dados los k primeros elementos, ¿qué orden medio (real) tienen?
+
+df.rent <- df.rent[order(df.rent$score_valor),]
+ks <- c(1, 3, 5, 10, 30, 50, 100, 300, 500, 1e3, 3e3, 5e3, 1e4, 3e4, 5e4)
+prec.k <- data.frame(k=numeric(), avg.k=numeric(), p.at.k1=numeric())
+for (k in ks){
+  if (k > nrow(df.rent)){
+    break;
+  }
+  prec.k <- rbind(prec.k, data.frame(k=k,
+                                     avg.k = mean(head(df.rent$rank_margen, k)),
+                                     p.at.k = 0))
+}
+prec.k
+ggplot(prec.k, aes(x=k, y=avg.k)) + geom_point() + geom_line() + geom_line(aes(x=k, y=(k+1)/2), color="blue")
+```
+
+Calculamos ahora precision@k:
+$$
+p@k = \sum_{i=1}^k \mathbb{1}_{R(i) \le k},
+$$
+donde $R(i)$ es la posición real del elemento $i$ y 
+
+\[
+\mathbb{1}_{R(i) \le k} = \Big\{
+\begin{align}
+\ &1, && \text{if}\ R(i) \le k \\
+ &0, && \text{otherwise}
+\end{align}
+\]
+
+
+```{r precissionAtK}
+# Calculamos Precision@k, es decir, dados los k primeros elementos, ¿cuantos de ellos realmente son de los k primeros?
+
+for (k in ks){
+  if (k > nrow(df.rent)){
+    break;
+  }
+  prec.k[prec.k$k == k,]$p.at.k = sum(head(df.rent[order(df.rent$rank_margen),],k)$rank_valor<=k)/k
+}
+prec.k
+ggplot(prec.k, aes(x=k, y=p.at.k)) + geom_point() + geom_line()
+```
+
+
+**Pregunta: ¿Cómo depende de la cuota cirbe?**
+
+```{r}
+df.cli$cirbe_sistema <- pmax(df.cli$imp_dridban, df.cli$imp_dridsba, df.cli$imp_dridreg)
+df.cli$cuota_cirbe <- ifelse(df.cli$cirbe_sistema > 0, df.cli$imp_dridban / df.cli$cirbe_sistema, 0)
+
+
+```
+
+
+```{r, echo=FALSE, fig.width=6, fig.height=5}
+df.cirbe <- df.cli[order(df.cli$cif), c('cif', 'margen_a', 'cirbe_sistema', 'cuota_cirbe', 'imp_dridban', 'imp_dridsba', 'imp_dridreg')]
+df.cirbe$score_valor <- df.valor[order(df.valor$cif),]$score_valor
+df.cirbe$ind_model <- df.valor[order(df.valor$cif),]$ind_model
+
+nrow(df.cirbe)
+summary(df.cirbe$cuota_cirbe)
+
+ggplot(df.cirbe, aes(x=cuota_cirbe)) + geom_density()
+
+```
+
+Vemos que hay empresas con cuota cirbe exacto de 0 (`r percent(nrow(subset(df.cirbe, cuota_cirbe == 0))/nrow(df.cirbe))`) y de 1 (`r percent(nrow(subset(df.cirbe, cuota_cirbe == 1))/nrow(df.cirbe))`) . Quitamos ésas para que no distorsionen porque seguramente haya algo raro con sus datos.
+
+```{r, echo=FALSE, fig.width=8, fig.height=4, message=FALSE, warning=FALSE}
+
+df.cirbe_ajustada <- df.cirbe %>%
+  filter(cuota_cirbe > 0 & cuota_cirbe < 0.95) %>%
+  filter(margen_a > 0)
+
+ggplot(df.cirbe_ajustada, aes(x=cuota_cirbe)) + geom_density()
+
+ggplot(df.cirbe_ajustada, aes(x=cuota_cirbe, y=margen_a/score_valor)) + 
+  geom_point(alpha=0.3) + geom_smooth(size=3) + ylim(0, 2.5)
+
+```
+
+
+Vemos que, en general, a medida que aumenta la vinculación (cirbe), el margen se va acercando al valor estimado (ratio=1), como se esperaría.
+
+### 5. Conclusiones
+
+En este documento hemos analizado cómo se relaciona el valor estimado de una Pyme con el valor actual en bbva, medido como el margen en la rentabilidad. 
+
+El valor estimado se entiende como el Valor Potencial, cuánto puede llegar a ganar BBVA con esa empresa. La rentabilidad representaría cuánto está ganando actualmente. La diferencia sería el potencial que todavía se puede obtener. Con esta visión tiene sentido que, cuanto más vinculada esté una empresa (más cuota cirbe), más cerca estén el margen actual y el valor estimado y menos quede por ganar, ya que BBVA está ya captando casi todo su margen. 
+
+El valor potencial se ha modelado a partir de los gastos financieros, gastos de divisa y un corrector según incremente o decremente la facturación, para tratar de ajustar el margen. Como es un modelo, los valores estimados siempre tienen algún error y por eso puede estimarse el valor potencial por encima del margen actual. Esto pueden ser empresas con las que BBVA está actualmente ganando más de *lo esperado* y hay que verlo como normal. Aún así, no son muchos esos casos. 
+
+Éste es el resultado de aplicar el modelo de valor de no clientes a los clientes, utilizando únicamente los datos disponibles para los no clientes, estados financieros. Sin embargo, para los clientes hay más dato disponible por lo que se generará un modelo teniendo en cuenta también esos nuevos datos.
+
+
+

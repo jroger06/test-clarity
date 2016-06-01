@@ -1,0 +1,229 @@
+---
+title: '[Madiva] Typical use cases '
+author: "Customer analytics"
+date: "27/10/2015"
+output:
+  html_document: 
+    toc: yes
+---
+========================================================
+
+```{r, echo=FALSE}
+title     <- '[Madiva] Typical use cases'
+keywords  <- 'madiva, housing, vivienda, premium'
+contact_person <- 'cesar.depablo.contractor@bbvadata.com'
+```
+
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))  	# This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+source('~/bda_clarity/tools/warehouse_basics.R')
+```
+
+
+## Introduction
+
+[Madiva](http://www.madiva.com/ejemplos-casos-de-exito/) provides a service to estimate the price of a real state property (a house) from the asking price on real state web listings like idealista, fotocasa, etc.
+
+Madiva's data include a dump of Spanish land registry ('catastro') and estimate housing prices and others stats based real state web portals offer. 
+
+Madiva is available in BBVA D&A as a periodic dump (each 6 months, where the last dump is from October 2015)    
+  
+## Example 1: Get the estimated housing price for a client
+
+Prices have been pre-calculated for all adresses in `da_pro.clientes_domicilios`, so if you now the `cod_persctpn` just use the table in `da_valor`.
+
+```sql
+
+SELECT d.des_calleoav, d.cod_numervia, d.des_restodom, d.cod_postal, d.des_ciudadg, 
+       p.price, p.precision, p.num_candidates,
+       p.cod_paisoalf, p.cod_entalfa, p.cod_persctpn, p.cod_domicper  
+FROM da_pro.clientes_domicilios d 
+JOIN da_madiva.address_price p 
+ON (
+  d.cod_paisoalf = p.cod_paisoalf AND
+  d.cod_entalfa = p.cod_entalfa AND 
+  d.cod_persctpn = p.cod_persctpn AND 
+  d.cod_domicper = p.cod_domicper AND
+  d.cod_persctpn = '012323194' AND 
+  d.partition_id = '20150831'
+  );
+  
+```
+
+### Simplified example
+
+Usually, clients may have several addresses so if you just want to use the preferred address in one bank use: 
+  - the preferred `cod_entalfa` (*0182*) and `cod_paisoalf` (*ES*)
+  - the preferred `cod_domicper` (*1*)
+
+In this case, it is posible to simplify it to use the table `address_price`. This is also the value that is calculated in the Clarity attribute `madiva_house_price` 
+
+```sql
+SELECT *
+FROM da_madiva.address_price
+WHERE cod_persctpn = '012323194'
+AND cod_entalfa = '0182'
+AND cod_paisoalf = 'ES'
+AND cod_domicper = '1';
+
+```
+
+### Using Clarity
+
+Or if you just interested in the best address for a client, just use the Clarity attribute. We currently use the first fiscal address that.  
+
+```sql
+
+SELECT *
+FROM clarity_elements.precio_estimado_casa 
+WHERE cod_persona = 12323194;
+
+```
+
+## Example 2: Get the average price for an address (at block number precision)
+
+To calculate the average price of a block (same street and number) we could use the pre-aggregated table `MADIVA_PRICE_AGG_NUMBER`. If we have names for the province, city and street we have to join with the appropiate tables in `madiva_master`.  
+
+
+```sql
+SELECT v.nombrevia, m.nombremuni, p.nombreprov, a.*
+FROM da_madiva.madiva_price_agg_number a
+JOIN madiva_master.tdivia v  
+ON (a.codproine = v.codprovincia
+    AND a.codmunine = v.codmunicipio
+    AND a.codvia = v.codvia
+    AND a.raw_timestamp = v.raw_timestamp 
+    AND a.raw_timestamp = '20151007')
+JOIN madiva_master.tdimunicipio m 
+ON (
+    m.codprovincia = v.codprovincia
+    AND m.codmunicipio = v.codmunicipio
+    AND m.raw_timestamp = v.raw_timestamp 
+    AND m.raw_timestamp = '20151007'
+  )
+JOIN madiva_master.tdiprovincia p 
+ON (
+    p.codprovincia = v.codprovincia
+    AND p.raw_timestamp = v.raw_timestamp 
+    AND p.raw_timestamp = '20151007'
+  )
+WHERE p.nombreprov = "MADRID"
+AND m.nombremuni = "MADRID"
+AND v.nombrevia = "ARROYO MEDIA LEGUA"
+AND a.numero = 20;
+
+```
+
+The table provides average price for a number of properties as well as min, max and std. dev. It is frequent that if this properties are very similar we have the same estimated price for all of them (try number 40 instead). 
+
+## Example 3: Get the average price for another aggregation type (seccion censal). 
+
+If the spatial aggregation level that you require is not provided, for intance for a _seccion censal_ , you could aggregate yourself by using data in `madiva_master`. Table `TDINUMVIAS` provide access to most other aggregations levels (cod_postal, distrito censal, seccion censal) 
+
+
+```sql
+
+SELECT v.seccioncensal, avg(precio)
+FROM madiva_master.tesespacio a
+JOIN madiva_master.tdinumvias v  
+ON (a.codproine = v.codprovincia
+    AND a.codmunine = v.codmunicipio
+    AND a.codvia = v.codvia 
+    AND a.numero = v.numero
+    AND a.raw_timestamp = v.raw_timestamp 
+    AND a.raw_timestamp = '20151007' )
+WHERE iduso = 1 
+AND precio > 0
+GROUP BY v.seccioncensal
+```
+
+Beware of the following quirks: 
+  - Use `iduso = 1` that corresponds to those properties that are used for habitational purposes (VIVIENDA). Price is not consistently estimated for the rest of property uses
+  - ignore properties that have no informed price 
+  - ignore properties which value is zero (`price > 0`) - it is probably not correct.
+  
+
+## Outline of Data Schemas
+
+### MADIVA_MASTER schema 
+
+This schema contains the masterized information ingested from Madiva. A new dump is provided every 6 months and data is partitioned by timestamp (`raw_timestamp`). 
+
+There are two type of tables: 
+  - Spanish cadastre tables: start with `TDI*` and their catalogs `CES*` y `CDI*`  
+  - Data inferred by Madiva: ´TES*´
+
+A brief description of the main tables: 
+
+  - `TESESPACIO` - Unique references to individual properties,identified by `idespacio` but also by the cadastral reference. 
+    - contains the area of a(`supconst`, `supvivienda`, etc)
+    - the estimated price (`price`) and the precision value (`precision`) associated to the number of data points used to calculate the price.
+    - Contain data to group by several spatial hierarchies:
+
+      - provincia, municipio, calle....
+      - finca..., seccion censal, distrito censal a traves de `TRELFINCANUMERO`  
+
+  - `TESESPACIO_ENRIQUECIDO`: resto de variables estimadas por madiva (ej. `renta`,`lineasmoviles`) en base a precio, superficie.    
+  - `TESESLEMENTOESPACIO`: details of the elements of a property 
+  
+For a detailed description and the relationship use [this schema](https://drive.google.com/open?id=0B0tfYkT8WuSRbGwwMDFRcEV3dU1Ya2wydjk1bXZqSjZwRlJZ) or the [associated Power Designer](https://drive.google.com/open?id=0B0tfYkT8WuSRSHBUcHNLN2JQTk0). 
+
+### DA_MADIVA schema
+
+In order to make use of the data we have to link addresses, usually expressed as free form or semistructured records, to records in Madiva `TESESPACIO` that are identified with `idespacio` or a cadastral id. 
+
+This process have been semi-automated for BBVA clients addresses and is available in schema `da_madiva`.
+
+Table descriptions: 
+
+  - `ADDRESS_PRICE`: Estimated prices for adresses in `da_pro.CLIENTES_DOMICILIOS`
+    - `price`: estimated house price as an average of estimated prices to the maximun level of address resolution achieved. 
+    - `precision`:  level of precision achieved when linking the address
+    - `num_candidates`: number of records in `tesespacio` used to estimate the price
+    - PK from `CLIENTES_DOMICILIOS`
+        - `cod_paisoalf` 
+        - `cod_entalfa` 
+        - `cod_persctpn` 
+        - `cod_domicper`
+      
+  - `MADIVA_PRICE_AGG_TOWN`: aggregated price by city or town (`TDIMUNICIPIO`)
+  - `MADIVA_PRICE_AGG_VIA`: aggregated price by street (`TDIVIA`). Used for intermidiate calculations at precision 6. 
+  - `MADIVA_PRICE_AGG_NUMBER`: aggregated price by street and number. Used for intermidiate calculations at precision 4. 
+  - `ADDRESS_LINK` : Intermediate translation table between `CLIENTES DOMICILIOS` and `TESESPACIO`. 
+  
+## Other use cases
+
+### Link a set of adresses 
+
+If you have a set of addresses that is not a subset of `clientes_domicilios`, you have to translate from physical addresses to `TESESPACIO` identifiers, `idespacio` OR cadastral reference (`{refcat_pc1, refcat_pc2, refcat_car, refcat_cc1, refcat_cc2 }`). The process is a fuzzy match that may solve to 0,1 or several adresses depending on the level of the detail of the physical address and should be similar to what have been precalculated for `da_madiva.address_price`. 
+
+This process is available in the project [da_madiva_address_linkage](http://lcm-repositorio-fuentes.igrupobbva/projects/KVBD/repos/da_madiva_address_linkage/). It works in several steps that are detailed in link.sh shell script:
+ 1. A local java program takes a pipe separeated files with the adresses and produces an intermediate file by: 
+    * Links street names, cities and postal codes. It uses an external Lucene index to find a unique `codvia`.
+    * Parses block, stair, floor and letter from an unformatted string like `resto_dom`.
+ 2. The intermediate file is joined (Hive) in a best effort to match against `madiva_master.tesespacio`. If the address is unique uses the record price, otherwise the price is averaged from matching candidates. 
+ 
+Currently, the process depends on low level details and should be adapated for a particular use: 
+  - how the input address is identified - uses `clientes_domicilios` PK
+  - how the physical address is structured and what fields assume identified
+  - specifics of the address matching process
+  - physical parameters - Hive schemas, user directories, etc.
+  - It may require significant disk space to store input and intermediate files.   
+
+Contact if you want to link your set of addresses or you have suggestions to improve the process. 
+
+### Other access methods
+- Use of Madiva [web portal](http://bbvadata.inmoconsulta.com/GesInmo/) and [credentials](https://drive.google.com/open?id=1POih9ra1sje4-iUIGncKQhimYUkOLppQyqd-0XinNxI)
+
+- Use of Madiva [API](https://drive.google.com/open?id=0B3D9nJ5yf5kQVWFqbzBpVlZSMXpNOThEVnF2ZldLSDJLZzR3) 
+
+##  Contact
+
+```{r echo = FALSE}
+print(contact_person)
+```

@@ -1,0 +1,852 @@
+
+Estudio del dato disponible de BBVA Wallet - Acciones comerciales y campañas
+---
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- "[Wallet]: Estudio del dato disponible de BBVA Wallet relativo a acciones comerciales y campañas"
+
+keywords  <- 'wallet, digital, campañas, accion comercial, marketing, captacion, mailing'  
+```
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(grid))
+suppressMessages(library(hexbin))
+suppressMessages(library(lattice))
+suppressMessages(library(reshape))
+suppressMessages(library(plyr))
+
+options(warn=-1, scipen=3, width=150)
+source('~/bda_clarity/tools/methods_connect.R') ;
+source('~/bda_clarity/tools/warehouse_basics.R') ;
+source('~/bda_clarity/tools/write.hive.R') ;
+```
+
+
+TABLA ACCIONES COMERCIALES
+
+Analizar el contenido de las variables interesantes:
+
+Descripcion Accion Comercial: Esta bien vamos a usar el filtro de %WALL% para identificar wallet
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+des_acom_x <- qhive("select des_acom_x, count(distinct cod_acom) as count_distinct_cod_acom
+from sinfo_master.acciones_comerciales
+group by des_acom_x order by count_distinct_cod_acom desc")
+
+des_acom_x_wall <- qhive("select des_acom_x, count(distinct cod_acom) as count_distinct_cod_acom
+from sinfo_master.acciones_comerciales
+where upper(des_acom_x) like '%WALL%'
+group by des_acom_x order by count_distinct_cod_acom desc")
+des_acom_x_wall
+
+# do.hive("create table if not exists da_mariadrav.wall_acc_comercial as
+#         select * from sinfo_master.acciones_comerciales
+#         where upper(des_acom_x) like '%WALL%'")
+
+wall_acc_comercial <- qhive("select *, 
+                            year(fap_acom) as year_fap_acom, month(fap_acom) as month_fap_acom,
+                            year(fvt_acom) as year_fvt_acom, month(fvt_acom) as month_fvt_acom
+                            from sinfo_master.acciones_comerciales
+        where upper(des_acom_x) like '%WALL%'")
+
+wall_acc_comercial$yyyymm_fap_acom <- paste0(wall_acc_comercial$year_fap_acom,
+                                      ifelse(wall_acc_comercial$month_fap_acom>=10,
+                                             wall_acc_comercial$month_fap_acom,
+                                             paste0("0",wall_acc_comercial$month_fvt_acom)))
+
+wall_acc_comercial$yyyymm_fvt_acom <- paste0(wall_acc_comercial$year_fvt_acom,
+                                      ifelse(wall_acc_comercial$month_fvt_acom>=10,
+                                             wall_acc_comercial$month_fvt_acom,
+                                             paste0("0",wall_acc_comercial$month_fvt_acom)))
+
+```
+
+Origen de Campaña: no parece importante
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+cod_oricamp <- ddply(wall_acc_comercial, .(cod_oricamp), summarise, count_distinct_cod_acom=length(unique(cod_acom)))
+
+graph_cod_oricamp <- ggplot(cod_oricamp, aes(x = factor(cod_oricamp), y = count_distinct_cod_acom, fill = cod_oricamp, label=count_distinct_cod_acom, ymax = max(count_distinct_cod_acom))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# acciones distintas") + ggtitle("# Acciones x COD_ORICAMP")  + theme(legend.position="none") + geom_text(aes(y = count_distinct_cod_acom), position = "stack", size = 3.5)
+graph_cod_oricamp
+
+```
+
+Prioridad de accion comercial: Rechazada informada en su mayoría en el valor "0040"
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+cod_prioracc <- ddply(wall_acc_comercial, .(cod_prioracc), summarise, count_distinct_cod_acom=length(unique(cod_acom)))
+
+cod_prioracc <- ggplot(cod_prioracc, aes(x = factor(cod_prioracc), y = count_distinct_cod_acom, fill = cod_prioracc, label=count_distinct_cod_acom, ymax = max(count_distinct_cod_acom))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# acciones distintas") + ggtitle("# Acciones x cod_prioracc")  + theme(legend.position="none") + geom_text(aes(y = count_distinct_cod_acom), position = "stack", size = 3.5)
+cod_prioracc
+
+```
+
+Tipologia medicion de exito: ver si mas adelante resulta relevante
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+cod_tipoaccl <- ddply(wall_acc_comercial, .(cod_tipoaccl), summarise, count_distinct_cod_acom=length(unique(cod_acom)))
+
+cod_tipoaccl <- ggplot(cod_tipoaccl, aes(x = factor(cod_tipoaccl), y = count_distinct_cod_acom, fill = cod_tipoaccl, label=count_distinct_cod_acom, ymax = max(count_distinct_cod_acom))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# acciones distintas") + ggtitle("# Acciones x cod_tipoaccl")  + theme(legend.position="none") + geom_text(aes(y = count_distinct_cod_acom), position = "stack", size = 3.5)
+cod_tipoaccl
+
+```
+
+Objeto acción Comercial: Parece estar bien tenemos que encontrar el catálogo de los valores
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+cod_objetacc <- ddply(wall_acc_comercial, .(cod_objetacc), summarise, count_distinct_cod_acom=length(unique(cod_acom)))
+
+
+cod_objetacc <- ggplot(cod_objetacc, aes(x = factor(cod_objetacc), y = count_distinct_cod_acom, fill = cod_objetacc, label=count_distinct_cod_acom, ymax = max(count_distinct_cod_acom))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# acciones distintas") + ggtitle("# Acciones x Objeto Accion Comercial")  + theme(legend.position="none") + geom_text(aes(y = count_distinct_cod_acom), position = "stack", size = 3.5)
+cod_objetacc
+
+```
+
+## Analizar la informacion de canal:##
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+
+cod_tipcanal <- qhive("select cod_tipcanal, 
+                              cod_mdcanal, 
+                              cod_canal, 
+                              case cod_canal  when '0001' then 'Oficina'
+                                              when '0002' then 'Autoservicio'
+                                              when '0017' then 'Mensajes cortos - BBVA movil'
+                                              when '0101' then 'Wallet'
+                                              when '0019' then 'BBVANet'
+                                              when '0045' then 'e-mail'
+                                              when '0046' then 'DINA4'
+                              end as des_canal,                      
+                              count(distinct cod_acom) as count_wall_dist_cod_acom
+from da_mariadrav.wall_acc_comercial
+group by cod_tipcanal, cod_mdcanal, cod_canal")
+cod_tipcanal
+
+cod_canal <- ggplot(cod_tipcanal, aes(x = factor(des_canal), y = count_wall_dist_cod_acom, fill = des_canal, label=count_wall_dist_cod_acom, ymax = max(count_wall_dist_cod_acom))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# acciones distintas") + ggtitle("# Acciones x Canal")  + theme(legend.position="none") + geom_text(aes(y = count_wall_dist_cod_acom), position = "stack", size = 3.5)
+cod_canal
+
+```
+
+Como se ve que hay una categoria Wallet vamos a analizar la info en oportunidades comerciales
+
+Crear un objeto con las vbles relevantes
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+# do.hive("create table if not exists da_mariadrav.wall_canal_accop as 
+#         select distinct a.cod_acom, a.des_acom_x, year(a.fap_acom) as year_fap_acom, 
+#         month(a.fap_acom) as month_fap_acom, b.cod_persona, b.cod_canal, b.xsn_exito
+#       from da_mariadrav.wall_acc_comercial a left join sinfo_master.oportunidad_comercial b
+#       on a.cod_acom=b.cod_acom
+#       where a.cod_canal='0101' ")
+
+wall_canal_accop <- qhive("select distinct a.cod_acom, a.des_acom_x, 
+                          year(a.fap_acom) as year_fap_acom, month(a.fap_acom) as month_fap_acom, 
+                          year(a.fec_finmed) as year_fec_finmed, month(a.fec_finmed) as month_fec_finmed,
+                          year(a.fec_finexi) as year_fec_finexi, month(a.fec_finexi) as month_fec_finexi,
+                          a.xti_acf, b.cod_persona, b.cod_canal, b.xsn_exito
+      from da_mariadrav.wall_acc_comercial a left join sinfo_master.oportunidad_comercial b
+      on a.cod_acom=b.cod_acom
+      where a.cod_canal='0101'")
+
+# crear campos fechas
+wall_canal_accop$yyyymm_fap_acom <- paste0(wall_canal_accop$year_fap_acom,
+                                      ifelse(wall_canal_accop$month_fap_acom>=10,
+                                             wall_canal_accop$month_fap_acom,
+                                             paste0("0",wall_canal_accop$month_fap_acom)))
+
+wall_canal_accop$yyyymm_fec_finmed <- paste0(wall_canal_accop$year_fec_finmed,
+                                      ifelse(wall_canal_accop$month_fec_finmed>=10,
+                                             wall_canal_accop$month_fec_finmed,
+                                             paste0("0",wall_canal_accop$month_fec_finmed)))
+
+wall_canal_accop$yyyymm_fec_finexi <- paste0(wall_canal_accop$year_fec_finexi,
+                                      ifelse(wall_canal_accop$month_fec_finexi>=10,
+                                             wall_canal_accop$month_fec_finexi,
+                                             paste0("0",wall_canal_accop$month_fec_finexi)))
+
+# Se comprueba que el campo canal de oportunidades solo toma el valor WALLET
+ddply(wall_canal_accop, .(cod_canal), summarise, count_distinct_cod_pers=length(unique(cod_persona)))
+
+# Hay varios cod_acom con la misma descripcion
+unique(wall_canal_accop[, c("des_acom_x", "cod_acom")])
+
+# Nos centramos en las descripciones (des_acom_x)
+```
+
+Unos primeros números de referencia:
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+# Número de clientes
+ddply(wall_canal_accop, .(), summarise, count_distinct_cod_pers=length(unique(cod_persona)))[1,2]
+
+# Número de acciones comerciales
+ddply(wall_canal_accop, .(), summarise, count_distinct_cod_acom=length(unique(cod_acom)))[1,2]
+
+```
+
+Descripciones de acciones comerciales para el canal Wallet
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+des_acom_x_canal <- ddply(wall_canal_accop, .(des_acom_x), summarize, count_dist_cod_pers=length(unique(cod_persona)))
+
+graph_des_acom_x_canal <- ggplot(des_acom_x_canal, aes(x = factor(des_acom_x), y = count_dist_cod_pers, fill = des_acom_x, label=count_dist_cod_pers, ymax = max(count_dist_cod_pers))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# personas distintas") + ggtitle("# personas x des_acom")  + theme(legend.position="none") + geom_text(aes(y = count_dist_cod_pers), position = "stack", size = 3.5)
+graph_des_acom_x_canal
+```
+
+######### num de personas impactadas por las campañas #########
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+des_acom_pers <- ddply(wall_canal_accop, .(des_acom_x), summarise, count_distinct_cod_pers=length(unique(cod_persona)))
+
+graph_des_acom_pers <- ggplot(des_acom_pers, aes(x = factor(des_acom_x), y = count_distinct_cod_pers, fill = des_acom_x, label=count_distinct_cod_pers, ymax = max(count_distinct_cod_pers))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# personas distintas") + ggtitle("# personas x des_acom")  + theme(legend.position="none") + geom_text(aes(y = count_distinct_cod_pers), position = "stack", size = 3.5)
+graph_des_acom_pers
+```
+
+######### Distribucion del numero de cientes impactados por fap_acom #########
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+fap_acom <- ddply(wall_canal_accop, .(yyyymm_fap_acom, des_acom_x), summarise, count_distinct_cod_pers=length(unique(cod_persona)))
+
+# Get the levels for type in the required order
+fap_acom = arrange(fap_acom, yyyymm_fap_acom, des_acom_x)
+
+# Calculate the percentages
+fap_acom = ddply(fap_acom, .(yyyymm_fap_acom), transform, percent_dist_pers = count_distinct_cod_pers/sum(count_distinct_cod_pers) * 100)
+
+# Order
+fap_acom = fap_acom[order(fap_acom$count_distinct_cod_pers),]
+
+graph_fap_acom <- ggplot(fap_acom, aes(x = factor(yyyymm_fap_acom), y = percent_dist_pers, fill = des_acom_x, label=count_distinct_cod_pers, ymax=max(percent_dist_pers))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("% clientes distintos") + ggtitle("% des_acom_x x fecha") + geom_text(aes(y = percent_dist_pers, label = count_distinct_cod_pers), position = "stack", size = 3.5)
+graph_fap_acom
+```
+
+######### ver la tasa de exito #########
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+ddply(wall_canal_accop, .(xsn_exito), summarise, count_distinct_cod_pers=length(unique(cod_persona)))
+
+# Siempre "No" para el cod_canal="0101" (Wallet)
+
+```
+
+######### Investigar sobre fechas de medicion del exito y campañas abiertas #########
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+
+fechas_exito <- ddply(wall_canal_accop, .(yyyymm_fap_acom, yyyymm_fec_finmed), summarise, count_distinct_cod_pers=length(unique(cod_persona)))
+
+cast (fechas_exito, yyyymm_fap_acom ~ yyyymm_fec_finmed, fun.aggregate=sum, value="count_distinct_cod_pers")
+# parece que la fecha de medicion de exito no esta informada
+
+# Indicador de accion finalizada
+accion_fin <- ddply(wall_canal_accop, .(yyyymm_fap_acom, xti_acf), summarise, count_distinct_cod_pers=length(unique(cod_persona)))
+
+# Get the levels for type in the required order
+accion_fin = arrange(accion_fin, yyyymm_fap_acom, xti_acf)
+
+# Calculate the percentages
+accion_fin = ddply(accion_fin, .(yyyymm_fap_acom), transform, percent_dist_pers = count_distinct_cod_pers/sum(count_distinct_cod_pers) * 100)
+accion_fin$label_percent_dist_pers = paste0(sprintf("%.0f", accion_fin$percent_dist_pers), "%")
+
+# Order
+accion_fin = accion_fin[order(accion_fin$percent_dist_pers),]
+
+graph_accion_fin <- ggplot(accion_fin, aes(x = factor(yyyymm_fap_acom), y = percent_dist_pers, fill = xti_acf, label=label_percent_dist_pers, ymax=max(percent_dist_pers))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("% clientes distintos") + ggtitle("% clientes x ind accion finalizada") + geom_text(aes(y = percent_dist_pers, label = label_percent_dist_pers), position = "stack", size = 3.5)
+graph_accion_fin
+
+# hay campañas tanto finalizadas como no. A ver si la fecha FEC_FINEXI esta informada (fecha teorica de la medicion del exito de la campaña)
+
+fechas_exito_teor <- ddply(wall_canal_accop, .(yyyymm_fap_acom, yyyymm_fec_finexi), summarise, count_distinct_cod_pers=length(unique(cod_persona)))
+
+cast (fechas_exito_teor, yyyymm_fap_acom ~ yyyymm_fec_finexi, fun.aggregate=sum, value="count_distinct_cod_pers")
+# parece que la fecha de medicion teorica de exito tampoco esta informada
+```
+
+
+######### numero medio de campañas por persona. trabajar con cod_acom ahora y no descripcion #########
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+#Se ve que hay duplicados de campañas donde la variable xti_acf aparece una vez como S y otra como N
+pers_acom2 <- ddply(wall_canal_accop, .(yyyymm_fap_acom, cod_persona), summarize, count_dist_acom=length(cod_acom))
+wall_canal_accop[wall_canal_accop$cod_persona=="000004998",]
+
+pers_acom1 <- ddply(wall_canal_accop, .(yyyymm_fap_acom, cod_persona), summarize, count_dist_acom=length(unique(cod_acom)))
+pers_acom <- ddply(pers_acom1, .(yyyymm_fap_acom), summarize, mean_pers_acom=mean(count_dist_acom))
+                  
+graph_pers_acom <- ggplot(pers_acom, aes(x = factor(yyyymm_fap_acom), y = mean_pers_acom, fill = mean_pers_acom, label=mean_pers_acom, ymax=max(mean_pers_acom))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("clientes distintos") + ggtitle("Media de acciones comerciales x cliente") + geom_text(aes(y = mean_pers_acom, label = mean_pers_acom), position = "stack", size = 3.5)
+graph_pers_acom
+```
+
+Fecha inicio accion comercial: OK 
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+fap_acom <- ddply(wall_acc_comercial, .(yyyymm_fap_acom), summarize, count_dist_acom=length(unique(cod_acom)))
+
+graph_fap_acom <- ggplot(data=fap_acom, aes(x = yyyymm_fap_acom, y = count_dist_acom,
+                                label=count_dist_acom, 
+                                ymax = max(count_dist_acom))) + 
+            geom_line(aes(group=1), colour="#66CC99") + 
+            geom_point(colour="#66CC99") + 
+            theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + 
+            ylab("# acciones distintas") + 
+            ggtitle("# Acciones x fecha inicio acom")  
+            geom_text(aes(y = count_dist_acom), position = "stack", size = 3.5)
+graph_fap_acom
+
+```
+
+Fecha fin accion comercial: OK
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+fvt_acom <- ddply(wall_acc_comercial, .(yyyymm_fvt_acom), summarize, count_dist_acom=length(unique(cod_acom)))
+
+graph_fvt_acom <- ggplot(data=fvt_acom, aes(x = yyyymm_fvt_acom, y = count_dist_acom,
+                                label=count_dist_acom, 
+                                ymax = max(count_dist_acom))) + 
+            geom_line(aes(group=1), colour="#66CC99") + 
+            geom_point(colour="#66CC99") + 
+            theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + 
+            ylab("# acciones distintas") + 
+            ggtitle("# Acciones x fecha fin acom")  
+            geom_text(aes(y = count_dist_acom), position = "stack", size = 3.5)
+graph_fvt_acom
+
+```
+
+Area de negocio para ver si solo hay particulares. Son todos area 13.
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+ddply(wall_acc_comercial, .(cod_areanego), summarize, count_dist_acom=length(unique(cod_acom)))
+
+
+```
+
+Motivo acción comercial: practicamente igual que des_acom_x
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+des_motivacl <- ddply(wall_acc_comercial, .(yyyymm_fap_acom, des_motivacl), summarize, count_dist_acom=length(unique(cod_acom)))
+
+cast(des_motivacl, des_motivacl ~ yyyymm_fap_acom, fun.aggregate=sum, value="count_dist_acom")
+```
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+# ver las descripciones anteriores cruzando con canal wallet
+des_motivacl_can <- qhive("select year(fap_acom) as year_fap_acom, month(fap_acom) as month_fap_acom, des_motivacl, count(distinct cod_acom) as count_wall_dist_cod_acom
+from da_mariadrav.wall_acc_comercial where cod_canal='0101'
+group by year(fap_acom), month(fap_acom), des_motivacl")
+
+des_motivacl_can$yyyymm <- paste0(des_motivacl_can$year_fap_acom,
+                                      ifelse(des_motivacl_can$month_fap_acom>=10,
+                                             des_motivacl_can$month_fap_acom,
+                                             paste0("0",des_motivacl_can$month_fap_acom)))
+
+cast(des_motivacl_can, des_motivacl ~ yyyymm, fun.aggregate=sum, value="count_wall_dist_cod_acom")
+
+```
+
+Estrategia de Campaña: Parece que se puede usar, tenemos que encontrar el catálogo de los valores
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+cod_estrcamp <- ddply(wall_acc_comercial, .(cod_estrcamp), summarize, count_dist_acom=length(unique(cod_acom)))
+
+graph_cod_estrcamp <- ggplot(cod_estrcamp, aes(x = factor(cod_estrcamp), y = count_dist_acom, fill = cod_estrcamp, label=count_dist_acom, ymax = max(count_dist_acom))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# acciones distintas") + ggtitle("# Acciones x Esrtategia de Campaña")  + theme(legend.position="none") + geom_text(aes(y = count_dist_acom), position = "stack", size = 3.5)
+graph_cod_estrcamp
+```
+
+Grupo de Campaña: Parece que se puede usar, tenemos que encontrar el catálogo de los valores
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+cod_grucamp <- ddply(wall_acc_comercial, .(cod_grucamp), summarize, count_dist_acom=length(unique(cod_acom)))
+
+graph_cod_grucamp <- ggplot(cod_grucamp, aes(x = factor(cod_grucamp), y = count_dist_acom, fill = cod_grucamp, label=count_dist_acom, ymax = max(count_dist_acom))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# acciones distintas") + ggtitle("# Acciones x Grupo de Campaña")  + theme(legend.position="none") + geom_text(aes(y = count_dist_acom), position = "stack", size = 3.5)
+graph_cod_grucamp
+```
+
+Tipo accion comercial:  OK Encontrar el catalogo
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+cod_tipolacc <- ddply(wall_acc_comercial, .(cod_tipolacc), summarize, count_dist_acom=length(unique(cod_acom)))
+
+cod_tipolacc <- ggplot(cod_tipolacc, aes(x = factor(cod_tipolacc), y = count_dist_acom, fill = cod_tipolacc, label=count_dist_acom, ymax = max(count_dist_acom))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# acciones distintas") + ggtitle("# Acciones x Tipo Accion Comercial")  + theme(legend.position="none") + geom_text(aes(y = count_dist_acom), position = "stack", size = 3.5)
+cod_tipolacc
+
+```
+
+
+
+
+Otras no informadas:
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+ddply(wall_acc_comercial, .(des_tacom), summarize, count_dist_acom=length(unique(cod_acom)))
+
+ddply(wall_acc_comercial, .(cod_objcampa), summarize, count_dist_acom=length(unique(cod_acom)))
+
+#solo hay datos de 4/14 - 10/14
+ddply(wall_acc_comercial, .(fmo_informac), summarize, count_dist_acom=length(unique(cod_acom)))
+
+ddply(wall_acc_comercial, .(cod_tipogest), summarize, count_dist_acom=length(unique(cod_acom)))
+
+# No se que es cod_oport ¿Esta relacionado con la tabla de oportunidades?
+cod_oport <- ddply(wall_acc_comercial, .(cod_oport), summarize, count_dist_acom=length(unique(cod_acom)))
+graph_cod_oport <- ggplot(cod_oport, aes(x = factor(cod_oport), y = count_dist_acom, fill = cod_oport, label=count_dist_acom, ymax = max(count_dist_acom))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# acciones distintas") + ggtitle("# Acciones x Oportunidad Comercial")  + theme(legend.position="none") + geom_text(aes(y = count_dist_acom), position = "stack", size = 3.5)
+graph_cod_oport
+
+# cod_agruprod: Casi todo sin informar
+cod_agruprod <- ddply(wall_acc_comercial, .(cod_agruprod), summarize, count_dist_acom=length(unique(cod_acom)))
+graph_cod_agruprod <- ggplot(cod_agruprod, aes(x = factor(cod_agruprod), y = count_dist_acom, fill = cod_agruprod, label=count_dist_acom, ymax = max(count_dist_acom))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# acciones distintas") + ggtitle("# Acciones x Agrupacion Producto")  + theme(legend.position="none") + geom_text(aes(y = count_dist_acom), position = "stack", size = 3.5)
+graph_cod_agruprod
+
+ddply(wall_acc_comercial, .(cod_suceso), summarize, count_dist_acom=length(unique(cod_acom)))
+      
+ddply(wall_acc_comercial, .(imp_suceso), summarize, count_dist_acom=length(unique(cod_acom)))
+
+ddply(wall_acc_comercial, .(xti_contlmk), summarize, count_dist_acom=length(unique(cod_acom)))
+
+ddply(wall_acc_comercial, .(cod_agrcont), summarize, count_dist_acom=length(unique(cod_acom)))
+
+ddply(wall_acc_comercial, .(imp_umbralm), summarize, count_dist_acom=length(unique(cod_acom)))
+
+ddply(wall_acc_comercial, .(por_umbralm), summarize, count_dist_acom=length(unique(cod_acom)))
+
+```
+
+
+TABLA OPORTUNIDAD COMERCIAL
+
+La tabla tiene muchos registros asi que primero se cruza con acciones comerciales para filtrar los registros wallet.
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+# Hay registros repetidos en acciones comerciales:
+#dupli_acc <- qhive("select cod_camp, cod_acom, fap_acom, count(*) as conteo
+#        from sinfo_master.acciones_comerciales
+#        where upper(des_acom_x) like '%WALL%'
+#        group by cod_camp, cod_acom, fap_acom
+#        having count(fap_acom)>1 ")  
+
+# El unico campo que cambia es el del nombre de un fichero que parece ser fuente del dato
+qhive ("select * from sinfo_master.acciones_comerciales 
+        where cod_acom in ('S570101001', 'A237601024')")
+```
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+# Hay registros repetidos en oportunidades comerciales:
+#dupli_opo <- qhive("select cod_acom, cod_persona
+#        from sinfo_master.oportunidad_comercial
+#        group by cod_acom, cod_persona
+#        having count(cod_persona)>1")
+
+# El unico campo que cambio es el del nombre de un fichero que parece ser fuente del dato
+qhive(" select * from sinfo_master.oportunidad_comercial
+        where (cod_acom='O491000001' and cod_persona='000545354') or
+              (cod_acom='S228001019' and cod_persona='001012716')
+        order by cod_acom, cod_persona")
+```
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+#Realizar el cruce
+do.hive(" create table if not exists da_mariadrav.wallet_accop_comercial as 
+select distinct a.cod_acom,
+                a.cod_camp,
+                a.cod_objetacc,
+                a.cod_tipoaccl,
+                a.cod_tipcanal,
+                a.cod_mdcanal,
+                a.cod_canal,
+                a.des_acom_x,
+                a.fap_acom ,
+                a.fvt_acom ,
+                a.cod_estrcamp,
+                a.cod_grucamp,
+                a.cod_tipolacc,
+                a.cod_agruprod,
+                a.xti_acf,
+                b.cod_persona,
+                b.xsn_noclien,
+                b.fec_respz,
+                b.cod_prodofe,
+                b.cod_respz,
+                b.des_colectiv,
+                b.des_products,
+                b.imp_sumfact,
+                b.imp_inici,
+                b.imp_final,
+                b.por_increm,
+                b.xsn_exito,
+                b.cod_prodof,
+                b.xti_conutil,
+                b.xti_exprod,
+                b.cod_seglobal
+from sinfo_master.acciones_comerciales a left join sinfo_master.oportunidad_comercial b
+on a.cod_acom=b.cod_acom
+where upper(a.des_acom_x) like '%WALL%' ")
+```
+
+
+Tenemos **`r qhive("select count(distinct cod_persona) from da_mariadrav.wallet_accop_comercial")`** clientes distintos que han recibido cualquiera de las **`r qhive("select count(distinct cod_acom) from da_mariadrav.wallet_accop_comercial")`** acciones comerciales etiquetadas como Wallet y que pertenecen a **`r qhive("select count(distinct cod_camp) from da_mariadrav.wallet_accop_comercial")`** distintas campañas. Todas ellas se realizan entre las fechas **`r qhive(" select MIN(fap_acom) from da_mariadrav.wallet_accop_comercial")`** y **`r qhive("select MAX(fap_acom) from da_mariadrav.wallet_accop_comercial")`**. Hay **`r qhive("select count(distinct cod_acom) from da_mariadrav.wallet_accop_comercial where cod_persona is NULL")`** acciones comerciales sin codigo persona asignado. Las filtrare de los analisis
+
+Analizar el contenido de las variables interesantes:
+
+
+Indicador cliente no cliente
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+xsn_noclien <- qhive("select xsn_noclien, count(distinct cod_persona) as count_dist_cod_pers
+from da_mariadrav.wallet_accop_comercial
+where cod_persona != ''
+group by xsn_noclien ")
+
+# xsn_noclien <- ddply(wallet_accop_comercial[wallet_accop_comercial$cod_persona != '',],  .(xsn_noclien), summarize, count_dist_cod_pers = length(unique(cod_persona)))
+
+xsn_noclien <- ggplot(xsn_noclien, aes(x = factor(xsn_noclien), y = count_dist_cod_pers, fill = xsn_noclien, label=count_dist_cod_pers, ymax = max(count_dist_cod_pers))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# personas distintas") + ggtitle("Distribucion de Clientes / No Clientes")  + theme(legend.position="none") + geom_text(aes(y = count_dist_cod_pers), position = "stack", size = 3.5)
+xsn_noclien
+
+# Son todos clientes
+```
+
+Analisis de fec_respz
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+######### Distribucion del numero de cientes impactados por fec_respz #########
+fec_respz_canal <- qhive("select  year(fec_respz) as year_fec_respz,
+                            month(fec_respz) as month_fec_respz,
+                            case when cod_canal='0101' then 'Wallet' else 'No Wallet' end as canal, 
+                            count(distinct cod_persona) as conteo
+from da_mariadrav.wallet_accop_comercial
+where cod_persona != ''
+group by year(fec_respz),  month(fec_respz), case when cod_canal='0101' then 'Wallet' else 'No Wallet' end")
+
+fec_respz_canal$yyyymm <- paste0(fec_respz_canal$year_fec_respz,
+                                      ifelse(fec_respz_canal$month_fec_respz>=10,
+                                             fec_respz_canal$month_fec_respz,
+                                             paste0("0",fec_respz_canal$month_fec_respz)))
+
+#Calcular el agregado de canal (Wallet + No Wallet)
+fec_respz = unique(ddply(fec_respz_canal, .(yyyymm), transform, count_dist_cod_pers = sum(conteo))[,c("yyyymm","count_dist_cod_pers")])
+
+graph_fec_respz <- ggplot(data=fec_respz, aes(x=yyyymm, y=count_dist_cod_pers, ymax = max(count_dist_cod_pers))) + geom_line(aes(group=1), colour="#66CC99") + geom_point(colour="#66CC99") + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + ylab("# clientes distintos") + ggtitle("# Clientes con respuesta en accion comercial") + geom_text(aes(y = count_dist_cod_pers, label=count_dist_cod_pers), position = "stack", size = 3.5)
+graph_fec_respz
+
+
+######### Distribucion del numero de cientes impactados por fec_respz y canal Wallet o No Wallet #########
+
+# Get the levels for type in the required order
+fec_respz_canal = arrange(fec_respz_canal, yyyymm, canal)
+
+# Calculate the percentages
+fec_respz_canal = ddply(fec_respz_canal, .(yyyymm), transform, percent_dist_cod_pers = conteo/sum(conteo) * 100)
+
+# Order
+fec_respz_canal = fec_respz_canal[order(fec_respz_canal$percent_dist_cod_pers),]
+
+#Graph
+graph_fec_respz_canal <- ggplot(fec_respz_canal, aes(x = factor(yyyymm), y = percent_dist_cod_pers, fill = canal, label=conteo, ymax=max(percent_dist_cod_pers))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("% clientes distintos") + ggtitle("% canal Wallet x fecha repuesta") + 
+  geom_text(aes(y = percent_dist_cod_pers, label = conteo), position = "stack", size = 3.5)
+graph_fec_respz_canal
+
+#Parece que no hay información para los registros con canal Wallet.
+```
+
+cod_prodofe: Producto de la campaña
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+cod_prodofe <- qhive("select cod_prodofe, des_products, count(distinct cod_persona) as count_dist_cod_pers
+from da_mariadrav.wallet_accop_comercial
+where cod_persona != ''
+group by cod_prodofe, des_products ")
+
+graph_cod_prodofe <- ggplot(cod_prodofe, aes(x = factor(cod_prodofe), y = count_dist_cod_pers, fill = cod_prodofe, label=count_dist_cod_pers, ymax = max(count_dist_cod_pers))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# personas distintas") + ggtitle("# Clientes unicos x producto de la campaña")  + theme(legend.position="none") + geom_text(aes(y = count_dist_cod_pers), position = "stack", size = 3.5)
+graph_cod_prodofe
+
+# No esta informada
+```   
+
+des_colectiv: Colectivo de clientes
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+des_colectiv <- qhive("select des_colectiv, count(distinct cod_persona) as count_dist_cod_pers
+from da_mariadrav.wallet_accop_comercial
+where cod_persona != ''
+group by des_colectiv")
+
+graph_des_colectiv <- ggplot(des_colectiv, aes(x = factor(des_colectiv), y = count_dist_cod_pers, fill = des_colectiv, label=count_dist_cod_pers, ymax = max(count_dist_cod_pers))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# personas distintas") + ggtitle("# Clientes unicos x colectivo")  + theme(legend.position="none") + geom_text(aes(y = count_dist_cod_pers), position = "stack", size = 3.5)
+graph_des_colectiv
+
+# No esta informada
+```   
+
+
+des_products: Producto de la campaña
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+des_products_canal <- qhive("select des_products,
+                              case when cod_canal='0101' then 'Wallet' else 'No Wallet' end as canal, 
+                              count(distinct cod_persona) as count_distinct_cod_pers
+from da_mariadrav.wallet_accop_comercial
+where cod_persona != ''
+group by des_products, case when cod_canal='0101' then 'Wallet' else 'No Wallet' end")
+
+# Get the levels for type in the required order
+des_products_canal = arrange(des_products_canal, des_products, canal)
+
+# Calculate the percentages
+des_products_canal = ddply(des_products_canal, .(des_products), transform, percent_dist_pers = count_distinct_cod_pers/sum(count_distinct_cod_pers) * 100)
+
+# Order
+des_products_canal = des_products_canal[order(des_products_canal$percent_dist_pers),]
+
+#Graph
+graph_des_products_canal <- ggplot(des_products_canal, aes(x = des_products, y = percent_dist_pers, fill = canal, label=count_distinct_cod_pers, ymax=max(percent_dist_pers))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("% clientes distintos") + ggtitle("% canal Wallet x producto") + 
+  geom_text(aes(y = percent_dist_pers, label = count_distinct_cod_pers), position = "stack", size = 3.5)
+graph_des_products_canal
+
+# las campañas sin producto son las unicas con canal wallet (tiene sentido)
+```   
+
+
+Variables de importes
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+ # importe facturación campañas: no informada
+qhive("select 'IMP_SUMFACT' as vble,
+              sum(case when IMP_SUMFACT>0 then 1 else 0 end) as conteo_pos,
+              sum(case when IMP_SUMFACT<0 then 1 else 0 end) as conteo_neg ,
+              sum(case when IMP_SUMFACT=0 then 1 else 0 end) as conteo_cer 
+      from da_mariadrav.wallet_accop_comercial
+      
+      union all
+      
+      select 'imp_inici' as vble,
+              sum(case when imp_inici>0 then 1 else 0 end) as conteo_pos,
+              sum(case when imp_inici<0 then 1 else 0 end) as conteo_neg ,
+              sum(case when imp_inici=0 then 1 else 0 end) as conteo_cer 
+      from da_mariadrav.wallet_accop_comercial
+      
+      union all
+      
+      select 'imp_final' as vble,
+              sum(case when imp_final>0 then 1 else 0 end) as conteo_pos,
+              sum(case when imp_final<0 then 1 else 0 end) as conteo_neg ,
+              sum(case when imp_final=0 then 1 else 0 end) as conteo_cer 
+      from da_mariadrav.wallet_accop_comercial
+      
+      union all
+      
+      select 'por_increm' as vble,
+              sum(case when por_increm>0 then 1 else 0 end) as conteo_pos,
+              sum(case when por_increm<0 then 1 else 0 end) as conteo_neg ,
+              sum(case when por_increm=0 then 1 else 0 end) as conteo_cer 
+      from da_mariadrav.wallet_accop_comercial
+           
+      ")
+
+#Ninguna esta informada
+```           
+
+Indicador del exito
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+xsn_exito_canal <- qhive("select  xsn_exito, 
+                            case when cod_canal='0101' then 'Wallet' else 'No Wallet' end as canal, 
+                            count(distinct cod_persona) as count_distinct_cod_pers
+from da_mariadrav.wallet_accop_comercial
+where cod_persona != ''
+group by xsn_exito, case when cod_canal='0101' then 'Wallet' else 'No Wallet' end ")
+
+# Get the levels for type in the required order
+xsn_exito_canal = arrange(xsn_exito_canal, xsn_exito, canal)
+
+# Calculate the percentages
+xsn_exito_canal = ddply(xsn_exito_canal, .(xsn_exito), transform, percent_dist_pers = count_distinct_cod_pers/sum(count_distinct_cod_pers) * 100)
+
+# Order
+xsn_exito_canal = xsn_exito_canal[order(xsn_exito_canal$percent_dist_pers),]
+
+# graph
+graph_xsn_exito_canal <- ggplot(xsn_exito_canal, aes(x = factor(xsn_exito), y = percent_dist_pers, fill = canal, label=count_distinct_cod_pers, ymax=max(percent_dist_pers))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("% clientes distintos") + ggtitle("% exito x canal") + geom_text(aes(y = percent_dist_pers, label = count_distinct_cod_pers), position = "stack", size = 3.5)
+graph_xsn_exito_canal
+
+```
+
+cod_prodof: Producto Ofertado
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+cod_prodof <- qhive("select cod_prodof, des_products, count(distinct cod_persona) as count_distinct_cod_pers
+from da_mariadrav.wallet_accop_comercial
+where cod_persona != ''
+group by cod_prodof, des_products")
+
+graph_cod_prodof <- ggplot(cod_prodof, aes(x = factor(des_products), y = count_distinct_cod_pers, fill = cod_prodof, label=count_distinct_cod_pers, ymax = max(count_distinct_cod_pers))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# personas distintas") + ggtitle("# Clientes unicos x producto ofertado")  + theme(legend.position="none") + geom_text(aes(y = count_distinct_cod_pers), position = "stack", size = 3.5)
+graph_cod_prodof
+
+```   
+
+xti_conutil: Contacto util (Activo/Inactivo)
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+xti_conutil_canal <- qhive("select xti_conutil, 
+                     case when cod_canal = '0101' then 'Wallet' else 'No wallet' end as canal,
+                     count(distinct cod_persona) as count_distinct_cod_pers
+from da_mariadrav.wallet_accop_comercial
+where cod_persona != ''
+group by xti_conutil, case when cod_canal = '0101' then 'Wallet' else 'No wallet' end")
+
+#Calcular el agregado de canal (Wallet + No Wallet)
+xti_conutil = unique(ddply(xti_conutil_canal, .(xti_conutil), transform, count_distinct_cod_pers = sum(count_distinct_cod_pers))[,c("xti_conutil","count_distinct_cod_pers")])
+
+#graph 
+graph_xti_conutil <- ggplot(xti_conutil, aes(x = factor(xti_conutil), y = count_distinct_cod_pers, fill = xti_conutil, label=count_distinct_cod_pers, ymax = max(count_distinct_cod_pers))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# personas distintas") + ggtitle("# Clientes unicos x Indicador contacto util")  + theme(legend.position="none") + geom_text(aes(y = count_distinct_cod_pers), position = "stack", size = 3.5)
+graph_xti_conutil
+
+##### verlo por canal #####
+
+# graph
+graph_xti_conutil_canal <- ggplot(xti_conutil_canal, aes(x = factor(xti_conutil), y = count_distinct_cod_pers, fill = canal, label=count_distinct_cod_pers, ymax=max(count_distinct_cod_pers))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# clientes distintos") + ggtitle("indicador contacto util x canal") + geom_text(aes(y = count_distinct_cod_pers, label = count_distinct_cod_pers), position = "stack", size = 3.5)
+graph_xti_conutil_canal
+
+```   
+
+xti_exprod: Indicador exito producto
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+xti_exprod_canal <- qhive("select xti_exprod, 
+                    case when cod_canal = '0101' then 'Wallet' else 'No wallet' end as canal,
+                    count(distinct cod_persona) as count_distinct_cod_pers
+from da_mariadrav.wallet_accop_comercial
+where cod_persona != ''
+group by xti_exprod, case when cod_canal = '0101' then 'Wallet' else 'No wallet' end")
+
+#Calcular el agregado de canal (Wallet + No Wallet)
+xti_exprod = unique(ddply(xti_exprod_canal, .(xti_exprod), transform, count_distinct_cod_pers = sum(count_distinct_cod_pers))[,c("xti_exprod","count_distinct_cod_pers")])
+
+graph_xti_exprod <- ggplot(xti_exprod, aes(x = factor(xti_exprod), y = count_distinct_cod_pers, fill = xti_exprod, label=count_distinct_cod_pers, ymax = max(count_distinct_cod_pers))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# personas distintas") + ggtitle("# Clientes unicos x Indicador exito producto")  + theme(legend.position="none") + geom_text(aes(y = count_distinct_cod_pers), position = "stack", size = 3.5)
+graph_xti_exprod
+
+##### verlo por canal #####
+
+# graph
+graph_xti_exprod_canal <- ggplot(xti_exprod_canal, aes(x = factor(xti_exprod), y = count_distinct_cod_pers, fill = canal, label=count_distinct_cod_pers, ymax=max(count_distinct_cod_pers))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# clientes distintos") + ggtitle("indicador exito producto x canal") + geom_text(aes(y = count_distinct_cod_pers, label = count_distinct_cod_pers), position = "stack", size = 3.5)
+graph_xti_exprod_canal
+
+# no se si esta bien informada
+```   
+
+cod_seglobal: Segmento
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+cod_seglobal_canal<- qhive("select cod_seglobal, des_sgmento as des_seglobal,
+                                  case when cod_canal = '0101' then 'Wallet' else 'No wallet' end as canal,
+                                  count(distinct cod_persona) as count_distinct_cod_pers
+from da_mariadrav.wallet_accop_comercial a left join da_catalogos.segmentacion_global b
+on a.cod_seglobal=b.cod_sgmento
+where cod_persona != ''
+group by cod_seglobal, des_sgmento, case when cod_canal = '0101' then 'Wallet' else 'No wallet' end")
+
+#Calcular el agregado de canal (Wallet + No Wallet)
+cod_seglobal = unique(ddply(cod_seglobal_canal, .(des_seglobal), transform, count_distinct_cod_pers = sum(count_distinct_cod_pers))[,c("des_seglobal","count_distinct_cod_pers")])
+
+graph_cod_seglobal <- ggplot(cod_seglobal, aes(x = factor(des_seglobal), y = count_distinct_cod_pers, fill = des_seglobal, label=count_distinct_cod_pers, ymax = max(count_distinct_cod_pers))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# personas distintas") + ggtitle("# Clientes unicos x Segmento")  + theme(legend.position="none") + geom_text(aes(y = count_distinct_cod_pers), position = "stack", size = 3.5)
+graph_cod_seglobal
+
+##### verlo por canal #####
+
+# graph
+graph_cod_seglobal_canal <- ggplot(cod_seglobal_canal, aes(x = factor(des_seglobal), y = count_distinct_cod_pers, fill = canal, label=count_distinct_cod_pers, ymax=max(count_distinct_cod_pers))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# clientes distintos") + ggtitle("Segmento x canal") + geom_text(aes(y = count_distinct_cod_pers, label = count_distinct_cod_pers), position = "stack", size = 3.5)
+graph_cod_seglobal_canal
+
+# no se si esta bien informada
+```   
+
+
+
+
+
+
+
+
+
+Ver el ratio de campañas por cliente y mes:
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+camp_x_clie <- qhive("select  cod_persona,
+                              year(fap_acom) as year_fap_acom,
+                              month(fap_acom) as month_fap_acom,
+                              count(distinct cod_acom) as count_camp_x_clie
+                       from  da_mariadrav.wallet_accop_comercial      
+                       group by cod_persona, year(fap_acom), month(fap_acom) 
+                       order by count_camp_x_clie desc
+                     ")
+
+camp_x_clie$yyyymm <- paste0(camp_x_clie$year_fap_acom,
+                                      ifelse(camp_x_clie$month_fap_acom>=10,
+                                             camp_x_clie$month_fap_acom,
+                                             paste0("0",camp_x_clie$month_fap_acom)))
+                                             
+cast(camp_x_clie, ~ yyyymm, fun.aggregate=mean, value="count_camp_x_clie")
+
+```
+
+
+
+
+
+
+
+
+
+
+Cruzar canal wallet y descripcion wallet sobre tablas originales
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+do.hive("create table if not exists da_mariadrav.canal_des_acom as 
+        select distinct
+        a.cod_acom, a.des_acom_x, a.cod_objetacc, a.cod_tipoaccl, 
+        a.cod_canal, case a.cod_canal  when '0002' then 'Autoservicio'
+                                       when '0017' then 'Mensajes cortos - BBVA movil'
+                                       when '0101' then 'Wallet'
+                                       when '0019' then 'BBVANet'
+                                        when '0045' then 'e-mail'
+                                        when '0046' then 'DINA4'
+          end as des_canal,
+          year(a.fap_acom) as year_fap_acom, month(a.fap_acom) as month_fap_acom,
+          year(a.fvt_acom) as year_fvt_acom, month(a.fvt_acom) as month_fvt_acom,
+          a.cod_estrcamp, a.cod_grucamp, a.cod_tipolacc, a.xti_acf, b.cod_persona, 
+          year(b.fec_respz) as year_fec_respz, month(b.fec_respz) as month_fec_respz,
+          b.cod_respz, b.des_products, b.cod_prodof, b.xsn_exito, b.xti_conutil, b.xti_exprod, b.cod_seglobal
+          from sinfo_master.acciones_comerciales a left join sinfo_master.oportunidad_comercial b
+                     on a.cod_acom=b.cod_acom
+                     where a.cod_canal in ('0101' '0045') or upper(a.des_acom_x) like '%WALL%'")
+
+
+```
+Analisis filtrando por:
+upper(des_acom_x) like '%WALL%' or des_canal in ("Wallet", "e-mail") 
+
+Hay **`r qhive("select count(distinct cod_acom) from da_mariadrav.canal_des_acom") `** acciones distintas con descripción que contiene la palabra Wallet o por canal wallet o e-mail y hay **`r qhive("select count(distinct cod_persona) from da_mariadrav.canal_des_acom") `** clientes distintos que han recibido al menos una de las anteriores acciones.  
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+#Cruzar objetivo por productos por si podemos intuir algun codigo de cod_objetacc
+
+objetacc_prod <- qhive("select des_products, cod_objetacc, count(distinct cod_persona) as count_dist_cod_pers
+                      from da_mariadrav.canal_des_acom
+                      group by des_products, cod_objetacc ")
+
+
+cast (objetacc_prod, des_products ~ cod_objetacc, fun.aggregate=sum, value="count_dist_cod_pers")
+```
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+# ver el num de clientes distintos por campaña y canal
+cod_pers <- qhive("select des_acom_x, des_canal, count(distinct cod_persona) as count_dist_cod_pers
+                      from da_mariadrav.canal_des_acom
+                      group by des_acom_x, des_canal ")
+
+cast (cod_pers, des_acom_x ~ des_canal, fun.aggregate=sum, value="count_dist_cod_pers")
+
+
+cod_respz <- qhive("select des_canal, cod_respz, count(distinct cod_persona) as count_dist_cod_pers
+                      from da_mariadrav.canal_des_acom
+                      group by des_canal, cod_respz ")
+ 
+cast(cod_respz, des_canal ~ cod_respz, fun.aggregate=sum, value="count_dist_cod_pers")
+
+qhive("select count(distinct cod_persona) as count_dist_cod_pers
+      from da_mariadrav.canal_des_acom
+      where cod_canal='0101' ")
+
+```

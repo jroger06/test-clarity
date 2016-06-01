@@ -1,0 +1,783 @@
+---
+title: "[Valor 2.0] : Score: Integration of housing score"
+author: "Alberto Font, César de Pablo"
+date: "01/09/2015"
+output:
+  html_document:
+    self_contained: no
+  pdf_document: default
+---
+
+Valor: Integration of housing score
+-------------------
+  
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- "[Valor 2.0] Score: Integration of housing score"
+
+# Keywords. Text separated by commas. E.g. keywords <- 'customer health, recibos' 
+# Keywords can classify the attribute in categories such as 'valor, vinculación, digitalidad', describe used tables such as 'recibos, 
+# transacciones tarjetas, segmento plan uno' or include other relevant info. Search keywords in the portal to find commonly used terms
+# and create new keywords only if justified.
+
+keywords  <- 'housing, vivienda, casa, resudebcia, living, score, valor, laboral'  
+```
+
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+source('~/bda_clarity/tools/warehouse_basics.R')
+suppressPackageStartupMessages(library('ggplot2'))
+suppressPackageStartupMessages(library('plyr'))
+suppressPackageStartupMessages(library('dplyr'))
+suppressPackageStartupMessages(library('data.table'))
+suppressPackageStartupMessages(library('googleVis'))
+op <- options(gvis.plot.tag="chart")
+
+doit = FALSE
+```
+
+
+```{r echo=FALSE}
+labels_euro <- function(x) {# no rounding
+paste0(format(x, big.mark = ",", decimal.mark = ".", trim = TRUE,
+    scientific = FALSE), " €")
+} 
+
+```
+
+### Crear un modelo que sea de aporte la evaluación de usuarios
+
+El objetivo consiste en analizar como era el modelo anterior y los resultados obtenidos a día de hoy con las mismas variables. Incorporaremos trasladar una metodología similar a la hora de tener en cuenta el score pasado en la información de vivienda de madiva.
+
+```{r echo=FALSE, eval=TRUE, warning=FALSE, message=FALSE}
+# Carga de datos en las variables
+
+dd <- qhive('select is_in_tpv, score_tpv, is_in_rec, score_rec, segmento5c, score from valor.clientes_score')
+
+dd3A <- qhive('select cod_persona, is_in_tpv, score_tpv, is_in_rec, score_rec, is_in_mad, score_mad, segmento5c from da_afont.scoresdd3A')
+dd3D1 <- qhive('select  cod_persona, is_in_tpv, score_tpv, is_in_rec, score_rec, is_in_mad, score_mad, segmento5c from da_afont.scoresdd3D1')
+dd3D2 <- qhive('select  cod_persona, is_in_tpv, score_tpv, is_in_rec, score_rec, is_in_mad, score_mad, segmento5c from da_afont.scoresdd3D2')
+dd3 <- qhive('select is_in_tpv, score_tpv, is_in_rec, score_rec, is_in_mad, score_mad, segmento5c from da_afont.scores3')
+dd3A$is_in_mad[dd3A$score_mad == 0] <- 0 # Lo usamos para el A
+dd3B <- dd3A[dd3A$is_in_rec==1|dd3A$is_in_tpv==1|dd3A$is_in_mad==1,] # Lo usamos para sacar B
+set.seed(42)
+dd3C <- dd3B[unique(c(sample(which(dd3B$is_in_tpv==1|dd3B$is_in_rec==1),4*length(which(dd3B$is_in_mad==1))),which(dd3B$is_in_mad==1))),]
+
+
+ddalt <- dd3A[dd3A$is_in_tpv == 1|dd3A$is_in_rec == 1,c("is_in_tpv", "score_tpv", "is_in_rec", "score_rec", "segmento5c")]
+
+dim (dd)
+dim(dd3A)
+dim(dd3A)
+dim(ddalt)
+
+maxs <- pmax(dd$score_tpv, dd$score_rec)
+maxsalt <- pmax(ddalt$score_tpv, ddalt$score_rec)
+maxs3_dd3A <- pmax(dd3A$score_tpv, dd3A$score_rec, dd3A$score_mad)
+maxs3_dd3B <- pmax(dd3B$score_tpv, dd3B$score_rec, dd3B$score_mad)
+maxs3_dd3C <- pmax(dd3C$score_tpv, dd3C$score_rec, dd3C$score_mad)
+maxs3_dd3D1 <- pmax(dd3D1$score_tpv, dd3D1$score_rec, dd3D1$score_mad)
+maxs3_dd3D2 <- pmax(dd3D2$score_tpv, dd3D2$score_rec, dd3D2$score_mad)
+
+lambda <- c(1, 1)
+#lambda4 <- c(1,1,1,1)
+
+```
+
+La formula que se usa para el score antiguo es:
+
+ $$max(subscore_{i}) + \lambda\frac{\sigma \sum_{i=i}^{2} isIn_{i} +subscore_{i}}{2}$$
+ 
+ 
+ |       i     |   Subscore    |
+ |:-----------:| :------------:|
+ |       1     |     TPV       |
+ |       2     |     RECIBO    |
+
+La i puede representar el score de TPV y el score de Recibos.
+
+Se ha de escoger unos valores adecuados de  $\lambda$ y de $\sigma$ que garanticen un score correlado con el propio segmento proveniente de segmento global único.
+
+Para ello el problema se aborda trabajando un algoritmo que modifica los valores en busca de un máximo local. Se escogía unas magnitudes similares que encuentren este máximo local. La correlación es 50% de Pearson y 50% de Spearman. El motivo de la elección es debido a que por un lado se usa una variable prácticamente continua y por otro lado se usa una categórica ordenada. Aunque las diferencias entre las mismas son prácticamente nulas
+ 
+Siguiendo la misma sintonía para el score de valor se usa
+
+ $$max(subscore_{i}) + \lambda\frac{\sigma \sum_{i=i}^{3} isIn_{i} +subscore_{i}}{3}$$
+
+donde
+
+ |       i     |   Subscore    |
+ |:-----------:| :------------:|
+ |       1     |     TPV       |
+ |       2     |     RECIBO    |
+ |       3     |     VIVIENDA  |
+
+Para determinar cual es el score de valor se prueban los reusltados con varios subsscores:
+
+ |     tipo    |   Descripción                                                                   |
+ |:-----------:| :------------------------------------------------------------------------------:|
+ |       A     | Se usan todos todas las viviendas encontradas para la correlación.              |
+ |             | De esta manera las viviendas normales, también influyen en los parámetros       |
+ |       B     | Se usan sólo los valores de la gente que tiene algún subscore                   |
+ |       C     | Se trabaja con un sample de TPVs y recibo tratando de asegurar los ratios       |
+ |       D1    | Se relaja la condición de precio  a un 75% de su valor (0.75*489,000)           |
+ |       D2    | Se mantiene el precio en 489000 pero se quita las restricciones de los filtros  |
+
+
+```{r echo=FALSE, eval=TRUE}
+# Se definenen
+eval <- function(lambda)
+{
+	sc <- maxs + lambda[1]*(lambda[2]*dd$is_in_tpv + dd$score_tpv + lambda[2]*dd$is_in_rec + dd$score_rec)/2
+	-(cor(sc, dd$segmento5c, method = "pearson") + cor(sc, dd$segmento5c, method = "spearman"))
+}
+
+evalalt <- function(lambda){
+  scalt <- maxsalt + lambda[1]*(lambda[2]*ddalt$is_in_tpv + ddalt$score_tpv + lambda[2]*ddalt$is_in_rec + ddalt$score_rec)/2
+  -(cor(scalt, ddalt$segmento5c, method = "pearson") + cor(scalt, ddalt$segmento5c, method = "spearman"))
+}
+
+eval3_dd3A <- function(lambda)
+{
+  sc3 <- maxs3_dd3A + lambda[1]*(lambda[2]*dd3A$is_in_tpv + dd3A$score_tpv + lambda[2]*dd3A$is_in_rec + dd3A$score_rec + lambda[2]*dd3A$is_in_mad + dd3A$score_mad)/3
+  -(cor(sc3, dd3A$segmento5c, method = "pearson") + cor(sc3, dd3A$segmento5c, method = "spearman"))
+}
+
+eval3_dd3B <- function(lambda)
+{
+  sc3 <- maxs3_dd3B + lambda[1]*(lambda[2]*dd3B$is_in_tpv + dd3B$score_tpv + lambda[2]*dd3B$is_in_rec + dd3B$score_rec + lambda[2]*dd3B$is_in_mad + dd3B$score_mad)/3
+  -(cor(sc3, dd3B$segmento5c, method = "pearson") + cor(sc3, dd3B$segmento5c, method = "spearman"))
+}
+
+eval3_dd3C <- function(lambda)
+{
+  sc3 <- maxs3_dd3C + lambda[1]*(lambda[2]*dd3C$is_in_tpv + dd3C$score_tpv + lambda[2]*dd3C$is_in_rec + dd3C$score_rec + lambda[2]*dd3C$is_in_mad + dd3C$score_mad)/3
+  -(cor(sc3, dd3C$segmento5c, method = "pearson") + cor(sc3, dd3C$segmento5c, method = "spearman"))
+}
+
+eval3_dd3D1 <- function(lambda)
+{
+  sc3 <- maxs3_dd3D1 + lambda[1]*(lambda[2]*dd3D1$is_in_tpv + dd3D1$score_tpv + lambda[2]*dd3D1$is_in_rec + dd3D1$score_rec + lambda[2]*dd3D1$is_in_mad + dd3D1$score_mad)/3
+  -(cor(sc3, dd3D1$segmento5c, method = "pearson") + cor(sc3, dd3D1$segmento5c, method = "spearman"))
+}
+
+eval3_dd3D2 <- function(lambda)
+{
+  sc3 <- maxs3_dd3D2 + lambda[1]*(lambda[2]*dd3D2$is_in_tpv + dd3D2$score_tpv + lambda[2]*dd3D2$is_in_rec + dd3D2$score_rec + lambda[2]*dd3D2$is_in_mad + dd3D2$score_mad)/3
+  -(cor(sc3, dd3D2$segmento5c, method = "pearson") + cor(sc3, dd3D2$segmento5c, method = "spearman"))
+}
+
+#eval3bis <- function(lambda)
+#{
+#  sc3 <- maxs3 + lambda[1]*(lambda[2]*dd3D2$is_in_tpv + dd3D2$score_tpv + lambda[2]*dd3D2$is_in_rec + dd3D2$score_rec)/3+lambda[3]*(lambda[4]*dd3D2$is_in_tpv + dd3D2$score_tpv)/3
+#  -(cor(sc3, dd3D2$segmento5c, method = "pearson") + cor(sc3, dd3D2$segmento5c, method = "spearman"))
+#}
+```
+
+
+
+```{r echo=FALSE, eval=TRUE, warning=FALSE, message=FALSE}
+lambda <- c(1, 0.5)
+minl <- nlm(f = eval, p = lambda, print.level = 2)
+
+#iteration = 3
+#Parameter:
+#  [1] 0.9181728 0.4191280
+#Function Value
+#[1] -0.8290542
+#Gradient:
+#  [1] 0.0002916383 0.0003945378
+
+lambda <- c(1, 0.5)
+minlalt <- nlm(f = evalalt, p = lambda, print.level = 2)
+
+#iteration = 1
+#Parameter:
+#  [1] 1.0000001 0.5000007
+#Function Value
+#[1] -0.7959861
+#Gradient:
+#  [1] -0.024837481  0.007244324
+
+#unicos en piso
+#dim(dd3D2[dd3D2$is_in_rec == 1|dd3D2$is_in_tpv == 1,c("is_in_tpv", "score_tpv", "is_in_rec", "score_rec", "segmento5c")])
+#summary(factor(dd3C$segmento5c[dd3C$is_in_mad == 1]))
+#summary(factor(dd3B$segmento5c[dd3B$is_in_mad == 1]))
+lambda <- c(1, 0.5)
+
+minl_dd3A <- nlm(f = eval3_dd3A, p = lambda, print.level = 2)
+minl_dd3B <- nlm(f = eval3_dd3B, p = lambda, print.level = 2)
+minl_dd3C <- nlm(f = eval3_dd3C, p = lambda, print.level = 2)
+minl_dd3D1 <- nlm(f = eval3_dd3D1, p = lambda, print.level = 2)
+minl_dd3D2 <- nlm(f = eval3_dd3D2, p = lambda, print.level = 2)
+
+#Caso A
+#iteration = 24
+#Parameter:
+#  [1] 2.3310487 0.1117356
+#Function Value
+#[1] -0.7853362
+#Gradient:
+#  [1] 0.00001431123 0.00042788016
+
+#Caso B
+#iteration = 3
+#Parameter:
+#  [1] 1.0000009 0.5000009
+#Function Value
+#[1] -0.754886
+#Gradient:
+#  [1] 0.006409974 0.007706169
+
+#Caso C
+#iteration = 7
+#Parameter:
+#  [1] 0.9773615 0.4788522
+#Function Value
+#[1] -0.7498372
+#Gradient:
+#  [1] -0.01447933  0.02111674
+
+#Caso D1
+#iteration = 1
+#Parameter:
+#  [1]  1.0000005 0.5000008
+#Function Value
+#[1] -0.7903709
+#Gradient:
+#  [1] 0.003393475 0.010886036
+
+#Caso D2
+#iteration = 7
+#Parameter:
+#  [1] 1.075298 0.530663
+#Function Value
+#[1] -0.7299423
+#Gradient:
+#  [1] -0.0001918157  0.0038213116
+
+
+######################################################
+```
+
+Para los nuevos casos de los subscors se calculan cuales serían los parametros calculados
+
+```{r PropuestasTipo, results='asis', tidy=FALSE, echo=FALSE, fig.width=8}
+(lambda0 <- minl$estimate[1])
+(step0   <- minl$estimate[2])
+
+(lambdaalt <- minlalt$estimate[1])
+(stepalt <- minlalt$estimate[2])
+
+lambda3_dd3A <- minl_dd3A$estimate[1]
+step3_dd3A <- minl_dd3A$estimate[2]
+
+lambda3_dd3B <- minl_dd3B$estimate[1]
+step3_dd3B <- minl_dd3B$estimate[2]
+
+lambda3_dd3C <- minl_dd3C$estimate[1]
+step3_dd3C <- minl_dd3C$estimate[2]
+
+lambda3_dd3D1 <- minl_dd3D1$estimate[1]
+step3_dd3D1 <- minl_dd3D1$estimate[2]
+
+lambda3_dd3D2 <- minl_dd3D2$estimate[1]
+step3_dd3D2 <- minl_dd3D2$estimate[2]
+
+df_atributos = data.table(algoritmo=c("A","B","C","D1","D2"), lamda=c(lambda3_dd3A, lambda3_dd3B, lambda3_dd3C, lambda3_dd3D1, lambda3_dd3D2),
+sigma = c(step3_dd3A, step3_dd3B, step3_dd3C, step3_dd3D1, step3_dd3D2))
+
+Vis_tipo_propuesta_CMC <- gvisTable(df_atributos, options=list( title="atributos"), chartid="atributos")
+#plot(Vis_clientes_CMC)
+print(Vis_tipo_propuesta_CMC, 'chart')
+
+```
+
+Adicionalmente normalizamos los scores para que el minimo valor sea 0 y el máximo sea 1. Para ello hacemos una transformada de las variables a dichos ejes. De los 5 vamos a comprobar sus dispersiones
+
+```{r echo=FALSE, eval=TRUE}
+sc <- maxs + lambda0*(step0*dd$is_in_tpv + dd$score_tpv + step0*dd$is_in_rec + dd$score_rec)/2
+dd$score <- (maxs + lambda0*(step0*dd$is_in_tpv + dd$score_tpv + step0*dd$is_in_rec + dd$score_rec)/2 - floor(100*summary(sc)[[1]])/100) / (ceiling(100*summary(sc)[[6]])/100-floor(100*summary(sc)[[1]])/100)
+
+scalt <- maxsalt + lambdaalt*(stepalt*ddalt$is_in_tpv + ddalt$score_tpv + stepalt*ddalt$is_in_rec + ddalt$score_rec)/2
+ddalt$score <- (maxsalt + lambdaalt*(stepalt*ddalt$is_in_tpv + ddalt$score_tpv + stepalt*ddalt$is_in_rec + ddalt$score_rec)/2 - floor(100*summary(scalt)[[1]])/100) / (ceiling(100*summary(scalt)[[6]])/100-floor(100*summary(scalt)[[1]])/100)
+
+sc3 <- maxs3_dd3A + lambda3_dd3A*(step3_dd3A*dd3A$is_in_tpv + dd3A$score_tpv + step3_dd3A*dd3A$is_in_rec + dd3A$score_rec+ step3_dd3A*dd3A$is_in_mad + dd3A$score_mad)/3
+dd3A$score <-(maxs3_dd3A + lambda3_dd3A*(step3_dd3A*dd3A$is_in_tpv + dd3A$score_tpv + step3_dd3A*dd3A$is_in_rec + dd3A$score_rec+ step3_dd3A*dd3A$is_in_mad + dd3A$score_mad)/3 - floor(100*summary(sc3)[[1]])/100) / (ceiling(100*summary(sc3)[[6]])/100-floor(100*summary(sc3)[[1]])/100)
+
+sc3 <- maxs3_dd3B + lambda3_dd3B*(step3_dd3B*dd3B$is_in_tpv + dd3B$score_tpv + step3_dd3B*dd3B$is_in_rec + dd3B$score_rec+ step3_dd3B*dd3B$is_in_mad + dd3B$score_mad)/3
+dd3B$score <-(maxs3_dd3B + lambda3_dd3B*(step3_dd3B*dd3B$is_in_tpv + dd3B$score_tpv + step3_dd3B*dd3B$is_in_rec + dd3B$score_rec+ step3_dd3B*dd3B$is_in_mad + dd3B$score_mad)/3 - floor(100*summary(sc3)[[1]])/100) / (ceiling(100*summary(sc3)[[6]])/100-floor(100*summary(sc3)[[1]])/100)
+
+sc3 <- maxs3_dd3C + lambda3_dd3C*(step3_dd3C*dd3C$is_in_tpv + dd3C$score_tpv + step3_dd3C*dd3C$is_in_rec + dd3C$score_rec+ step3_dd3C*dd3C$is_in_mad + dd3C$score_mad)/3
+dd3C$score <-(maxs3_dd3C + lambda3_dd3C*(step3_dd3C*dd3C$is_in_tpv + dd3C$score_tpv + step3_dd3C*dd3C$is_in_rec + dd3C$score_rec+ step3_dd3C*dd3C$is_in_mad + dd3C$score_mad)/3 - floor(100*summary(sc3)[[1]])/100) / (ceiling(100*summary(sc3)[[6]])/100-floor(100*summary(sc3)[[1]])/100)
+
+sc3 <- maxs3_dd3D1 + lambda3_dd3D1*(step3_dd3D1*dd3D1$is_in_tpv + dd3D1$score_tpv + step3_dd3D1*dd3D1$is_in_rec + dd3D1$score_rec+ step3_dd3D1*dd3D1$is_in_mad + dd3D1$score_mad)/3
+dd3D1$score <-(maxs3_dd3D1 + lambda3_dd3D1*(step3_dd3D1*dd3D1$is_in_tpv + dd3D1$score_tpv + step3_dd3D1*dd3D1$is_in_rec + dd3D1$score_rec+ step3_dd3D1*dd3D1$is_in_mad + dd3D1$score_mad)/3 - floor(100*summary(sc3)[[1]])/100) / (ceiling(100*summary(sc3)[[6]])/100-floor(100*summary(sc3)[[1]])/100)
+
+sc3 <- maxs3_dd3D2 + lambda3_dd3D2*(step3_dd3D2*dd3D2$is_in_tpv + dd3D2$score_tpv + step3_dd3D2*dd3D2$is_in_rec + dd3D2$score_rec+ step3_dd3D2*dd3D2$is_in_mad + dd3D2$score_mad)/3
+dd3D2$score <-(maxs3_dd3D2 + lambda3_dd3D2*(step3_dd3D2*dd3D2$is_in_tpv + dd3D2$score_tpv + step3_dd3D2*dd3D2$is_in_rec + dd3D2$score_rec+ step3_dd3D2*dd3D2$is_in_mad + dd3D2$score_mad)/3 - floor(100*summary(sc3)[[1]])/100) / (ceiling(100*summary(sc3)[[6]])/100-floor(100*summary(sc3)[[1]])/100)
+
+#-(cor(sc, dd$segmento5c, method = "pearson") + cor(sc, dd$segmento5c, method = "spearman"))
+#-(cor(scalt, ddalt$segmento5c, method = "pearson") + cor(scalt, ddalt$segmento5c, method = "spearman"))
+#-(cor(sc3, dd3C$segmento5c, method = "pearson") + cor(sc3, dd3C$segmento5c, method = "spearman")
+
+print(summary(dd3A$score))
+print(summary(dd3B$score))
+print(summary(dd3C$score))
+print(summary(dd3D1$score))
+print(summary(dd3D2$score))
+
+```
+
+Procedemos a visualizar la dispersión entre los distintos scores 
+
+```{r echo=FALSE, eval=TRUE}
+
+
+dd3AB <- inner_join(dd3A,dd3B,by="cod_persona")
+dd3AC <- inner_join(dd3A,dd3C,by="cod_persona")
+dd3AD1 <- inner_join(dd3A,dd3D1,by="cod_persona")
+dd3AD2 <- inner_join(dd3A,dd3D2,by="cod_persona")
+
+dd3BC <- inner_join(dd3B,dd3C,by="cod_persona")
+dd3BD1 <- inner_join(dd3B,dd3D1,by="cod_persona")
+dd3BD2 <- inner_join(dd3B,dd3D2,by="cod_persona")
+
+dd3CD1 <- inner_join(dd3C,dd3D1,by="cod_persona")
+dd3CD2 <- inner_join(dd3C,dd3D2,by="cod_persona")
+
+dd3D1D2 <- inner_join(dd3D1,dd3D2,by="cod_persona")
+
+dd3AB[is.na(dd3AB)] <- 0
+dd3AC[is.na(dd3AC)] <- 0
+dd3AD1[is.na(dd3AD1)] <- 0
+dd3AD2[is.na(dd3AD2)] <- 0
+dd3BC[is.na(dd3BC)] <- 0
+dd3BD1[is.na(dd3BD1)] <- 0
+dd3BD2[is.na(dd3BD2)] <- 0
+dd3CD1[is.na(dd3CD1)] <- 0
+dd3CD2[is.na(dd3CD2)] <- 0
+dd3D1D2[is.na(dd3D1D2)] <- 0
+
+dd3AB$dif <- dd3AB$score.x - dd3AB$score.y 
+dd3AC$dif <- dd3AC$score.x - dd3AC$score.y 
+dd3AD1$dif <- dd3AD1$score.x - dd3AD1$score.y 
+dd3AD2$dif <- dd3AD2$score.x - dd3AD2$score.y 
+dd3BC$dif <- dd3BC$score.x - dd3BC$score.y 
+dd3BD1$dif <- dd3BD1$score.x - dd3BD1$score.y 
+dd3BD2$dif <- dd3BD2$score.x - dd3BD2$score.y 
+dd3CD1$dif <- dd3CD1$score.x - dd3CD1$score.y 
+dd3CD2$dif <- dd3CD2$score.x - dd3CD2$score.y 
+dd3D1D2$dif <- dd3D1D2$score.x - dd3D1D2$score.y
+
+library(ggplot2)
+library(gridExtra)
+hisAB <- ggplot (dd3AB, aes(x=dif)) + geom_histogram() + xlim(c(-1,1))
+hisAC <- ggplot (dd3AC, aes(x=dif)) + geom_histogram() + xlim(c(-1,1))
+hisAD1 <- ggplot (dd3AD1, aes(x=dif)) + geom_histogram() + xlim(c(-1,1))
+hisAD2 <- ggplot (dd3AD2, aes(x=dif)) + geom_histogram() + xlim(c(-1,1))
+hisBC <- ggplot (dd3BC, aes(x=dif)) + geom_histogram() + xlim(c(-1,1))
+hisBD1 <- ggplot (dd3BD1, aes(x=dif)) + geom_histogram() + xlim(c(-1,1))
+hisBD2 <- ggplot (dd3BD2, aes(x=dif)) + geom_histogram() + xlim(c(-1,1))
+hisCD1 <- ggplot (dd3CD1, aes(x=dif)) + geom_histogram() + xlim(c(-1,1))
+hisCD2 <- ggplot (dd3CD2, aes(x=dif)) + geom_histogram() + xlim(c(-1,1))
+hisD1D2 <- ggplot (dd3D1D2, aes(x=dif)) + geom_histogram() + xlim(c(-1,1))
+blankPanel <- grid.rect(gp=gpar(col="white"))
+
+grid.arrange(blankPanel,hisAB,hisAC,hisAD1,hisAD2,blankPanel,blankPanel,hisBC,hisBD1,hisBD2,blankPanel,blankPanel,blankPanel,hisCD1,hisCD2,blankPanel,blankPanel,blankPanel,blankPanel,hisD1D2, ncol=5)
+```
+
+
+Vemos como son las dispersiones de los scores. Es importante tener en cuenta que aunque los subscores sean una ordenación, el score completo no lo es. 
+
+Nota: A medida que se introduczcan más subscores el efecto aumentará
+
+```{r echo=FALSE, eval=TRUE}
+dd <- dd[,c("is_in_tpv", "score_tpv", "is_in_rec", "score_rec","segmento5c", "score")]
+ddalt <- ddalt[,c("is_in_tpv", "score_tpv", "is_in_rec", "score_rec", "segmento5c", "score")]
+dd <- cbind(dd, 0)
+ddalt <- cbind(ddalt,0)
+colnames(dd) <- c("is_in_tpv", "score_tpv", "is_in_rec", "score_rec", "segmento5c", "score", "score4c")
+colnames(ddalt) <- c("is_in_tpv", "score_tpv", "is_in_rec", "score_rec", "segmento5c", "score", "score4c")
+
+dd3A <- dd3A[,c("is_in_tpv", "score_tpv", "is_in_rec", "score_rec", "is_in_mad", "score_mad","segmento5c", "score")]
+dd3B <- dd3B[,c("is_in_tpv", "score_tpv", "is_in_rec", "score_rec", "is_in_mad", "score_mad","segmento5c", "score")]
+dd3C <- dd3C[,c("is_in_tpv", "score_tpv", "is_in_rec", "score_rec", "is_in_mad", "score_mad","segmento5c", "score")]
+dd3D1 <- dd3D1[,c("is_in_tpv", "score_tpv", "is_in_rec", "score_rec", "is_in_mad", "score_mad","segmento5c", "score")]
+dd3D2 <- dd3D2[,c("is_in_tpv", "score_tpv", "is_in_rec", "score_rec", "is_in_mad", "score_mad","segmento5c", "score")]
+
+dd3A <- cbind(dd3A,0)
+dd3B <- cbind(dd3B,0)
+dd3C <- cbind(dd3C,0)
+dd3D1 <- cbind(dd3D1,0)
+dd3D2 <- cbind(dd3D2,0)
+colnames(dd3A) <- c("is_in_tpv", "score_tpv", "is_in_rec", "score_rec", "is_in_mad", "score_mad","segmento5c", "score", "score4c")
+colnames(dd3B) <- c("is_in_tpv", "score_tpv", "is_in_rec", "score_rec", "is_in_mad", "score_mad","segmento5c", "score", "score4c")
+colnames(dd3C) <- c("is_in_tpv", "score_tpv", "is_in_rec", "score_rec", "is_in_mad", "score_mad","segmento5c", "score", "score4c")
+colnames(dd3D1) <- c("is_in_tpv", "score_tpv", "is_in_rec", "score_rec", "is_in_mad", "score_mad","segmento5c", "score", "score4c")
+colnames(dd3D2) <- c("is_in_tpv", "score_tpv", "is_in_rec", "score_rec", "is_in_mad", "score_mad","segmento5c", "score", "score4c")
+
+plot(sort(dd3A$score))
+plot(sort(dd3B$score))
+plot(sort(dd3C$score))
+plot(sort(dd3D2$score))
+plot(sort(dd3D2$score))
+
+```
+
+
+Procedemos a binear los resultados en función del score que hayan sacado tenido.
+
+```{r echo=FALSE, eval=TRUE}
+dd$score4c[dd$score > 0.0] <- 1
+dd$score4c[dd$score > 0.1] <- 2
+dd$score4c[dd$score > 0.2] <- 3
+dd$score4c[dd$score > 0.3] <- 4
+dd$score4c[dd$score > 0.4] <- 5
+dd$score4c[dd$score > 0.5] <- 6
+dd$score4c[dd$score > 0.6] <- 7
+dd$score4c[dd$score > 0.7] <- 8
+dd$score4c[dd$score > 0.8] <- 9
+dd$score4c[dd$score > 0.9] <- 10
+
+ddalt$score4c[ddalt$score > 0.0] <- 1
+ddalt$score4c[ddalt$score > 0.1] <- 2
+ddalt$score4c[ddalt$score > 0.2] <- 3
+ddalt$score4c[ddalt$score > 0.3] <- 4
+ddalt$score4c[ddalt$score > 0.4] <- 5
+ddalt$score4c[ddalt$score > 0.5] <- 6
+ddalt$score4c[ddalt$score > 0.6] <- 7
+ddalt$score4c[ddalt$score > 0.7] <- 8
+ddalt$score4c[ddalt$score > 0.8] <- 9
+ddalt$score4c[ddalt$score > 0.9] <- 10
+
+dd3A$score4c[dd3A$score > 0.0] <- 1
+dd3A$score4c[dd3A$score > 0.1] <- 2
+dd3A$score4c[dd3A$score > 0.2] <- 3
+dd3A$score4c[dd3A$score > 0.3] <- 4
+dd3A$score4c[dd3A$score > 0.4] <- 5
+dd3A$score4c[dd3A$score > 0.5] <- 6
+dd3A$score4c[dd3A$score > 0.6] <- 7
+dd3A$score4c[dd3A$score > 0.7] <- 8
+dd3A$score4c[dd3A$score > 0.8] <- 9
+dd3A$score4c[dd3A$score > 0.9] <- 10
+
+dd3A$score4cmadiva <- 0
+dd3A$score4cmadiva[dd3A$score_mad > 0.0] <- 1
+dd3A$score4cmadiva[dd3A$score_mad > 0.1] <- 2
+dd3A$score4cmadiva[dd3A$score_mad > 0.2] <- 3
+dd3A$score4cmadiva[dd3A$score_mad > 0.3] <- 4
+dd3A$score4cmadiva[dd3A$score_mad > 0.4] <- 5
+dd3A$score4cmadiva[dd3A$score_mad > 0.5] <- 6
+dd3A$score4cmadiva[dd3A$score_mad > 0.6] <- 7
+dd3A$score4cmadiva[dd3A$score_mad > 0.7] <- 8
+dd3A$score4cmadiva[dd3A$score_mad > 0.8] <- 9
+dd3A$score4cmadiva[dd3A$score_mad > 0.9] <- 10
+
+dd3B$score4c[dd3B$score > 0.0] <- 1
+dd3B$score4c[dd3B$score > 0.1] <- 2
+dd3B$score4c[dd3B$score > 0.2] <- 3
+dd3B$score4c[dd3B$score > 0.3] <- 4
+dd3B$score4c[dd3B$score > 0.4] <- 5
+dd3B$score4c[dd3B$score > 0.5] <- 6
+dd3B$score4c[dd3B$score > 0.6] <- 7
+dd3B$score4c[dd3B$score > 0.7] <- 8
+dd3B$score4c[dd3B$score > 0.8] <- 9
+dd3B$score4c[dd3B$score > 0.9] <- 10
+
+dd3B$score4cmadiva <- 0
+dd3B$score4cmadiva[dd3B$score_mad > 0.0] <- 1
+dd3B$score4cmadiva[dd3B$score_mad > 0.1] <- 2
+dd3B$score4cmadiva[dd3B$score_mad > 0.2] <- 3
+dd3B$score4cmadiva[dd3B$score_mad > 0.3] <- 4
+dd3B$score4cmadiva[dd3B$score_mad > 0.4] <- 5
+dd3B$score4cmadiva[dd3B$score_mad > 0.5] <- 6
+dd3B$score4cmadiva[dd3B$score_mad > 0.6] <- 7
+dd3B$score4cmadiva[dd3B$score_mad > 0.7] <- 8
+dd3B$score4cmadiva[dd3B$score_mad > 0.8] <- 9
+dd3B$score4cmadiva[dd3B$score_mad > 0.9] <- 10
+
+dd3C$score4c[dd3C$score > 0.0] <- 1
+dd3C$score4c[dd3C$score > 0.1] <- 2
+dd3C$score4c[dd3C$score > 0.2] <- 3
+dd3C$score4c[dd3C$score > 0.3] <- 4
+dd3C$score4c[dd3C$score > 0.4] <- 5
+dd3C$score4c[dd3C$score > 0.5] <- 6
+dd3C$score4c[dd3C$score > 0.6] <- 7
+dd3C$score4c[dd3C$score > 0.7] <- 8
+dd3C$score4c[dd3C$score > 0.8] <- 9
+dd3C$score4c[dd3C$score > 0.9] <- 10
+
+dd3C$score4cmadiva <- 0
+dd3C$score4cmadiva[dd3C$score_mad > 0.0] <- 1
+dd3C$score4cmadiva[dd3C$score_mad > 0.1] <- 2
+dd3C$score4cmadiva[dd3C$score_mad > 0.2] <- 3
+dd3C$score4cmadiva[dd3C$score_mad > 0.3] <- 4
+dd3C$score4cmadiva[dd3C$score_mad > 0.4] <- 5
+dd3C$score4cmadiva[dd3C$score_mad > 0.5] <- 6
+dd3C$score4cmadiva[dd3C$score_mad > 0.6] <- 7
+dd3C$score4cmadiva[dd3C$score_mad > 0.7] <- 8
+dd3C$score4cmadiva[dd3C$score_mad > 0.8] <- 9
+dd3C$score4cmadiva[dd3C$score_mad > 0.9] <- 10
+
+dd3D1$score4c[dd3D1$score > 0.0] <- 1
+dd3D1$score4c[dd3D1$score > 0.1] <- 2
+dd3D1$score4c[dd3D1$score > 0.2] <- 3
+dd3D1$score4c[dd3D1$score > 0.3] <- 4
+dd3D1$score4c[dd3D1$score > 0.4] <- 5
+dd3D1$score4c[dd3D1$score > 0.5] <- 6
+dd3D1$score4c[dd3D1$score > 0.6] <- 7
+dd3D1$score4c[dd3D1$score > 0.7] <- 8
+dd3D1$score4c[dd3D1$score > 0.8] <- 9
+dd3D1$score4c[dd3D1$score > 0.9] <- 10
+
+dd3D1$score4cmadiva <- 0
+dd3D1$score4cmadiva[dd3D1$score_mad > 0.0] <- 1
+dd3D1$score4cmadiva[dd3D1$score_mad > 0.1] <- 2
+dd3D1$score4cmadiva[dd3D1$score_mad > 0.2] <- 3
+dd3D1$score4cmadiva[dd3D1$score_mad > 0.3] <- 4
+dd3D1$score4cmadiva[dd3D1$score_mad > 0.4] <- 5
+dd3D1$score4cmadiva[dd3D1$score_mad > 0.5] <- 6
+dd3D1$score4cmadiva[dd3D1$score_mad > 0.6] <- 7
+dd3D1$score4cmadiva[dd3D1$score_mad > 0.7] <- 8
+dd3D1$score4cmadiva[dd3D1$score_mad > 0.8] <- 9
+dd3D1$score4cmadiva[dd3D1$score_mad > 0.9] <- 10
+
+dd3D2$score4c[dd3D2$score > 0.0] <- 1
+dd3D2$score4c[dd3D2$score > 0.1] <- 2
+dd3D2$score4c[dd3D2$score > 0.2] <- 3
+dd3D2$score4c[dd3D2$score > 0.3] <- 4
+dd3D2$score4c[dd3D2$score > 0.4] <- 5
+dd3D2$score4c[dd3D2$score > 0.5] <- 6
+dd3D2$score4c[dd3D2$score > 0.6] <- 7
+dd3D2$score4c[dd3D2$score > 0.7] <- 8
+dd3D2$score4c[dd3D2$score > 0.8] <- 9
+dd3D2$score4c[dd3D2$score > 0.9] <- 10
+
+dd3D2$score4cmadiva <- 0
+dd3D2$score4cmadiva[dd3D2$score_mad > 0.0] <- 1
+dd3D2$score4cmadiva[dd3D2$score_mad > 0.1] <- 2
+dd3D2$score4cmadiva[dd3D2$score_mad > 0.2] <- 3
+dd3D2$score4cmadiva[dd3D2$score_mad > 0.3] <- 4
+dd3D2$score4cmadiva[dd3D2$score_mad > 0.4] <- 5
+dd3D2$score4cmadiva[dd3D2$score_mad > 0.5] <- 6
+dd3D2$score4cmadiva[dd3D2$score_mad > 0.6] <- 7
+dd3D2$score4cmadiva[dd3D2$score_mad > 0.7] <- 8
+dd3D2$score4cmadiva[dd3D2$score_mad > 0.8] <- 9
+dd3D2$score4cmadiva[dd3D2$score_mad > 0.9] <- 10
+
+dd_ <- dd[dd$score4c > 0, ]
+ddalt_ <- ddalt[ddalt$score4c > 0, ]
+dd3A_ <- dd3A[dd3A$score4c > 0, ]
+dd3B_ <- dd3B[dd3B$score4c > 0, ]
+dd3C_ <- dd3C[dd3C$score4c > 0, ]
+dd3D1_ <- dd3D1[dd3D1$score4c > 0, ]
+dd3D2_ <- dd3D2[dd3D2$score4c > 0, ]
+dd3A_m <- dd3A[dd3A$score4cmadiva > 0, ]
+dd3B_m <- dd3B[dd3B$score4cmadiva > 0, ]
+dd3C_m <- dd3C[dd3C$score4cmadiva > 0, ]
+dd3D1_m <- dd3D1[dd3D1$score4cmadiva > 0, ]
+dd3D2_m <- dd3D2[dd3D2$score4cmadiva > 0, ]
+
+tab <- table(dd_$score4c, dd_$segmento5c)
+tab_alt <- table(ddalt_$score4c, ddalt_$segmento5c)
+tab_dd3A <- table(dd3A_$score4c, dd3A_$segmento5c)
+tab_dd3B <- table(dd3B_$score4c, dd3B_$segmento5c)
+tab_dd3C <- table(dd3C_$score4c, dd3C_$segmento5c)
+tab_dd3D1 <- table(dd3D1_$score4c, dd3D1_$segmento5c)
+tab_dd3D2 <- table(dd3D2_$score4c, dd3D2_$segmento5c)
+tab_dd3Am <- table(dd3A_m$score4cmadiva, dd3A_m$segmento5c)
+tab_dd3Bm <- table(dd3B_m$score4cmadiva, dd3B_m$segmento5c)
+tab_dd3Cm <- table(dd3C_m$score4cmadiva, dd3C_m$segmento5c)
+tab_dd3D1m <- table(dd3D1_m$score4cmadiva, dd3D1_m$segmento5c)
+tab_dd3D2m <- table(dd3D2_m$score4cmadiva, dd3D2_m$segmento5c)
+
+tab0 <- addmargins(tab)
+
+#addmargins(prop.table(tab, 1))
+#addmargins(prop.table(tab_dd3C, 1))
+
+pt <- prop.table(tab, 1)
+pt_ddalt <- prop.table(tab_alt, 1)
+pt_dd3A <- prop.table(tab_dd3A,1)
+pt_dd3B <- prop.table(tab_dd3B,1)
+pt_dd3C <- prop.table(tab_dd3C,1)
+pt_dd3D1 <- prop.table(tab_dd3D1,1)
+pt_dd3D2 <- prop.table(tab_dd3D2,1)
+pt_dd3Am <- prop.table(tab_dd3Am,1)
+pt_dd3Bm <- prop.table(tab_dd3Bm,1)
+pt_dd3Cm <- prop.table(tab_dd3Cm,1)
+pt_dd3D1m <- prop.table(tab_dd3D1m,1)
+pt_dd3D2m <- prop.table(tab_dd3D2m,1)
+
+v <- pt[,3]
+av  <- pt[,4]
+pat <- pt[,5]
+v_ddalt <- pt_ddalt[,3]
+av_ddalt <- pt_ddalt[,4]
+pat_ddalt <- pt_ddalt[,5]
+
+v_dd3A <- pt_dd3A[,3]
+av_dd3A <- pt_dd3A[,4]
+pat_dd3A <- pt_dd3A[,5]
+v_dd3B <- pt_dd3B[,3]
+av_dd3B <- pt_dd3B[,4]
+pat_dd3B <- pt_dd3B[,5]
+v_dd3C <- pt_dd3C[,3]
+av_dd3C <- pt_dd3C[,4]
+pat_dd3C <- pt_dd3C[,5]
+v_dd3D1 <- pt_dd3D1[,3]
+av_dd3D1 <- pt_dd3D1[,4]
+pat_dd3D1 <- pt_dd3D1[,5]
+v_dd3D2 <- pt_dd3D2[,3]
+av_dd3D2 <- pt_dd3D2[,4]
+pat_dd3D2 <- pt_dd3D2[,5]
+```
+
+Una vez bineados imprimimos la distribución para cada uno de los scores
+
+```{r echo=FALSE, eval=TRUE}
+library(ggplot2)
+
+#barplot(v, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = " valor")
+#barplot(av, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = "Alto valor")
+#barplot(pat, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = "Patrimonio")
+
+ggplot(as.data.frame(pt), aes(x=Var1, y=Freq, fill=factor(Var2), order=desc(Var2)))+
+  geom_bar(stat="identity")+
+  scale_fill_brewer()+
+  ggtitle("Score completo. Caso pre")
+
+#barplot(v_ddalt, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = " valor")
+#barplot(av_ddalt, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = "Alto valo3")
+#barplot(pat_ddalt, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = "Patrimonio3")
+
+ggplot(as.data.frame(pt_ddalt), aes(x=Var1, y=Freq, fill=factor(Var2), order=desc(Var2)))+
+  geom_bar(stat="identity")+
+  scale_fill_brewer()+
+  ggtitle("Score completo. Caso pre a 300k")
+
+#barplot(v_dd3A, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = " valor")
+#barplot(av_dd3A, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = "Alto valo3")
+#barplot(pat_dd3A, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = "Patrimonio3")
+
+ggA <- ggplot(as.data.frame(pt_dd3A), aes(x=Var1, y=Freq, fill=factor(Var2), order=desc(Var2)))+
+  geom_bar(stat="identity")+
+  scale_fill_brewer() + 
+  ggtitle("Score completo. Caso A")
+
+ggAm <- ggplot(as.data.frame(pt_dd3Am), aes(x=Var1, y=Freq, fill=factor(Var2), order=desc(Var2)))+
+  geom_bar(stat="identity")+
+  scale_fill_brewer(palette="Oranges")+
+  ggtitle("Score madiva. Caso A")
+
+library(grid)
+grid.arrange(ggA, ggAm, ncol=2)
+
+#barplot(v_dd3B, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = " valor")
+#barplot(av_dd3B, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = "Alto valo3")
+#barplot(pat_dd3B, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = "Patrimonio3")
+
+
+ggB <- ggplot(as.data.frame(pt_dd3B), aes(x=Var1, y=Freq, fill=factor(Var2), order=desc(Var2)))+
+  geom_bar(stat="identity")+
+  scale_fill_brewer()+
+  ggtitle("Score completo. Caso B")
+
+ggBm <- ggplot(as.data.frame(pt_dd3Bm), aes(x=Var1, y=Freq, fill=factor(Var2), order=desc(Var2)))+
+  geom_bar(stat="identity")+
+  scale_fill_brewer(palette="Oranges")+
+  ggtitle("Score madiva. Caso B")
+
+grid.arrange(ggB, ggBm, ncol=2)
+
+#barplot(v_dd3C, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = " valor")
+#barplot(av_dd3C, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = "Alto valo3")
+#barplot(pat_dd3C, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = "Patrimonio3")
+
+ggC <- ggplot(as.data.frame(pt_dd3C), aes(x=Var1, y=Freq, fill=factor(Var2), order=desc(Var2)))+
+  geom_bar(stat="identity")+
+  scale_fill_brewer()+
+  ggtitle("Score completo. Caso C")
+
+ggCm <- ggplot(as.data.frame(pt_dd3Cm), aes(x=Var1, y=Freq, fill=factor(Var2), order=desc(Var2)))+
+  geom_bar(stat="identity")+
+  scale_fill_brewer(palette="Oranges")+
+  ggtitle("Score madiva. Caso C")
+
+grid.arrange(ggC, ggCm, ncol=2)
+
+#barplot(v_dd3D1, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = " valor")
+#barplot(av_dd3D1, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = "Alto valo3")
+#barplot(pat_dd3D1, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = "Patrimonio3")
+
+ggD1 <- ggplot(as.data.frame(pt_dd3D1), aes(x=Var1, y=Freq, fill=factor(Var2), order=desc(Var2)))+
+  geom_bar(stat="identity")+
+  scale_fill_brewer()+  
+  ggtitle("Score completo. Caso D1")
+
+ggD1m <- ggplot(as.data.frame(pt_dd3D1m), aes(x=Var1, y=Freq, fill=factor(Var2), order=desc(Var2)))+
+  geom_bar(stat="identity")+
+  scale_fill_brewer(palette="Oranges")+
+  ggtitle("Score madiva. Caso D1")
+
+grid.arrange(ggD1, ggD1m, ncol=2)
+
+#barplot(v_dd3D2, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = " valor")
+#barplot(av_dd3D2, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = "Alto valo3")
+#barplot(pat_dd3D2, names.arg = c(">0.6", ">0.7", ">0.8", ">0.9"), legend.text = "Patrimonio3")
+
+ggD2 <- ggplot(as.data.frame(pt_dd3D2), aes(x=Var1, y=Freq, fill=factor(Var2), order=desc(Var2)))+
+  geom_bar(stat="identity")+
+  scale_fill_brewer()+
+  ggtitle("Score completo. Caso D2")
+
+ggD2m <- ggplot(as.data.frame(pt_dd3D2m), aes(x=Var1, y=Freq, fill=factor(Var2), order=desc(Var2)))+
+  geom_bar(stat="identity")+
+  scale_fill_brewer(palette="Oranges")+
+  ggtitle("Score madiva. Caso D2")
+
+grid.arrange(ggD2, ggD2m, ncol=2)
+
+```
+
+Sobre los 300k clientes analizados, usando el score B
+Sacar algunos datos:
+Numero de gente con scores de madiva: **`r dim(dd3B[dd3B$score_mad > 0.0,])[[1]]`** 
+Numero de gente con score de madiva y alguno otro: **`r dim(dd3B[dd3B$score_mad > 0.0& (dd3B$score_rec > 0.0 |dd3B$score_tpv > 0.0),])[[1]]`**
+Numero de gente con score de madiva y alguno otro, breakdown por segmentos: **`r addmargins(table(factor(dd3B$segmento5c[dd3B$score_mad > 0.0 & (dd3B$score_rec > 0.0 |dd3B$score_tpv > 0.0)])))`**
+Numero de gente con score de madiva y NO están en otros, breakdown por segmentos: **`r addmargins(table(factor(dd3B$segmento5c[dd3B$score_mad > 0.0 & (dd3B$score_rec == 0.0 &dd3B$score_tpv == 0.0)])))`**
+
+```{r echo=FALSE, eval=FALSE}
+# numero de gente con score de madiva
+dim(dd3B[dd3B$score_mad > 0.0,])[[1]] 
+# numero de gente con score de madiva y alguno otro
+dim(dd3B[dd3B$score_mad > 0.0& (dd3B$score_rec > 0.0 |dd3B$score_tpv > 0.0),])[[1]]
+# numero de gente con score de madiva y alguno otro, breakdown por segmentos
+addmargins(table(factor(dd3B$segmento5c[dd3B$score_mad > 0.0 & (dd3B$score_rec > 0.0 |dd3B$score_tpv > 0.0)])))
+# numero de gente con score de madiva y NO están en otros, breakdown por segmentos
+addmargins(table(factor(dd3B$segmento5c[dd3B$score_mad > 0.0 & (dd3B$score_rec == 0.0 &dd3B$score_tpv == 0.0)]))) 
+
+pop <- 7854065
+priors <- c(3073018,3688812,961489,124521,6225)/pop
+
+(ggB_ <- ggplot(as.data.frame(pt_dd3B), aes(x=factor(Var1,labels=(c(".0-.1",".1-.2",".2-.3",".3-.4",".4-.5",".5-.6",".6-.7",".7-.8",".8-.9",".9-1"))),
+                                           y=Freq, fill=factor(Var2, labels=c("Young & old","Not premium","Value","High value","Patrimony")), order=desc(Var2)))+
+   geom_bar(stat="identity")+
+   scale_fill_brewer()+
+   ggtitle("Complete Score. Case B")+
+   labs(fill="Segment")+
+   theme(legend.title=element_text(size=14),
+         legend.text=element_text(size=14),
+         axis.title=element_text(size=14),
+         axis.text.y=element_text(size=16))+
+   xlab("Score grade")+
+   ylab("Probability")
+)
+```

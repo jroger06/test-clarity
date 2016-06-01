@@ -1,0 +1,1333 @@
+---
+output:
+  html_document:
+    self_contained: no
+---
+
+Digital On-Boarding 
+-------------------
+
+
+_**1st report iteration**_
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- "[Digital On-boarding]: Who are the clients of digital onboarding? Basic differences from traditional registrations."
+
+# Keywords. Text separated by commas. E.g. keywords <- 'customer health, recibos' 
+# Keywords can classify the attribute in categories such as 'valor, vinculación, digitalidad', describe used tables such as 'recibos, 
+# transacciones tarjetas, segmento plan uno' or include other relevant info. Search keywords in the portal to find commonly used terms
+# and create new keywords only if justified.
+
+keywords  <- 'digitalidad, contratacion tarjetas, contratacion cuenta corriente, bbva.es, nuevo cliente, alta cliente, adquisición cliente, oficina, sociodemo'  
+```
+
+
+
+```{r echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(grid))
+suppressMessages(library(hexbin))
+suppressMessages(library(lattice))
+
+options(warn=-1, scipen=3, width=350)
+source('~/bda_clarity/tools/warehouse_basics.R') ;
+
+chname <- function(df)
+{
+  rex <- '^[[:alnum:]_]+\\.([[:alnum:]_]+)$'
+  nam <- colnames(df)
+  ix  <- which(grepl(rex, nam))
+  
+  nam[ix] <- gsub(rex, '\\1', nam[ix])
+  
+  colnames(df) <- nam
+  
+  df
+};
+
+```
+
+
+
+Los posibles codigos evento de la tabla TxC , que nos pueden interesar en el dado análisis: 
+
+| cod_eve_trn |   Descripción evento    |
+|:-----------:| :----------------------:|
+|     0118    | SOLICITUD ALTA CLIENTE  |
+|     0236    | CONTRATACION DE CUENTA  |
+
+
+A nivel de codigo detalle evento tenemos:
+
+| cod_deve_trn |             Descripción evento        |
+|:------------:| :------------------------------------:|
+|     0758     |             ALTA DE CLIENTE           |
+|     0239     | SOLICITUD ALTA CLIENTE DESDE BBVA.ES  |
+
+
+** PREGUNTA:** ¿Sería posible identificar en TxC las solicitudes de las altas hechas desde bbva.es?
+
+
+Comprobamos si hay datos en la tabla transacciones_por_canal (TxC) con el codigo detalle evento 239 a Octubre 2014:
+
+```{r cache=TRUE}
+
+qhive(" SELECT cod_geve_trn, cod_eve_trn, cod_serv_dv, cod_medio_dv, COUNT(*) recuento 
+        FROM da_pro.transacciones_por_canal 
+        WHERE partition_id = '20141031' AND trim(cod_deve_trn) RLIKE '^.*(239)$' 
+        GROUP BY cod_geve_trn, cod_eve_trn, cod_serv_dv, cod_medio_dv ")
+
+```
+Resultado: no se usa el dado codigo de detalle evento en TxC. Hay que buscar las vias alternativas para identificar las altas digitales. 
+
+************************************************* GESTOR VIRTUAL **************************************************
+
+Averiguamos contrataciones de las cuentas corrientes y/o tarjetas realizadas con el gestor virtual.
+Para esto buscamos los codigos del gestor virtual, que suponemos que tambien aparecen en canal Oficina. 
+Según el sentido común en caso de un gestor virtual ocurren muchas mas transacciones que en caso de los gestores humanos. 
+
+********************************************************************************************************************
+
+```{r cache=TRUE}
+
+ qhive(" SELECT cod_user, COUNT(*) row_count       
+         FROM da_pro.transacciones_por_canal
+       
+         WHERE CAST(cod_geve_trn AS INT) in (1,2,3) AND CAST(cod_enta_trs AS INT) = 182 AND partition_id = '20141031' 
+       
+         GROUP BY cod_user
+         ORDER BY row_count desc
+       
+         LIMIT 20 ")
+```
+
+En base de resultado vemos que los gestores virtuales son 'UWEBXXX', 'NETP', 'SSTT'. 
+
+El siguiente paso muestra si hay contrataciones realizadas por los gestores virtuales FUERA del canal Net:
+
+```{r eval=FALSE, echo=FALSE}
+
+do.hive(" CREATE TABLE IF NOT EXISTS elmi.virtual_gestor_prueba AS 
+
+        SELECT * 
+        FROM da_pro.transacciones_por_canal 
+
+        WHERE (TRIM(cod_user) LIKE 'UWEB%' OR TRIM(cod_user) LIKE 'SSTT' or TRIM(cod_user) LIKE 'NET%' ) 
+
+               AND CAST(cod_geve_trn AS INT) = 3 AND CAST(cod_enta_trs AS INT) = 182   AND   partition_id = '20141031'               
+               AND CAST(trim(cod_eve_trn) AS INT) in (40, 236, 118)  ")
+
+```
+
+```{r cache=TRUE}
+
+qhive(" select cod_canal_dv, 
+               count(*) rows_count, 
+               count(distinct cod_pers_trs) dist_cod_pers_trs
+        from elmi.virtual_gestor_prueba 
+        group by cod_canal_dv ")
+```
+
+**CONCLUSION**: este tipo de gestores virtuales UWEB.., SSTT, NET.. siempre tienen operaciones en canal Net en caso de contratacion de tarjeta o cuenta.
+Además, todas las contrataciones en BBVA.Net de tarjetas o cuentas estan realizadas con la ayuda de los gestores virtuales
+(ha sido comprobado en una consulta aparte).
+
+
+
+
+******************************************** **LA HORA "RARA" - Contratación en modo Batch** **************************************
+
+En esta seccion se aspira averiguar si hay contrataciones de tarjetas y/o cuentas corrientes realizadas fuera de canal BBVA.Net 
+a la hora "rara". Es decir, a las 00:00:00 (HMS). 
+Este tipo de contratación puede significar el procesamiento en modo "batch" de las contrataciones online de cuentas corrientes 
+y de las tarjetas en un canal alternativo. 
+
+*******************************************************************************************************************************
+
+``` {r cache=TRUE}
+
+qhive(" SELECT hm_cut FROM 
+
+               (SELECT jj.*, 
+               CONCAT(HOUR(hms_soli_trn), ':', MINUTE(hms_soli_trn)) as hm_cut
+            
+               FROM (SELECT *
+
+                     FROM da_pro.transacciones_por_canal  
+                     WHERE CAST(cod_geve_trn AS INT) = 3
+                     AND CAST(cod_enta_trs AS INT) = 182
+                     AND partition_id = '20141031'               
+                     AND CAST(trim(cod_eve_trn) AS INT) in (40, 236, 118) 
+                     AND CAST(cod_canal_dv AS INT) != 4 ) jj
+      
+               ) inn 
+      
+        WHERE hm_cut LIKE '%0:00%'
+       
+        GROUP BY hm_cut
+        ORDER BY hm_cut  ")
+```
+
+**CONCLUSION**: No se presentan las transacciones de contratación bajo interes fuera de canal BBVA.NET, 
+con eso concluimos que no se hacen las contrataciones en modo batch en cualquier canal alernativo. 
+
+
+
+************************************************ **LOS NUEVOS DATOS - solicitudes y altas efectivas** *****************************************************
+
+
+Subimos al cluster el dato que nos ha llegado del equipo del digital on-boarding. Son las listas de personas, que solicitaron la alta como cliente de BBVA en curso de 2014.
+
+Primero de todo, subimos a Hive la lista de los clientes que tienen el codigo de cliente asignado tras iniciar el proceso de alta como cliente de BBVA.
+
+``` {r eval=FALSE, echo=FALSE, cache=TRUE}
+
+do.hive(" CREATE TABLE IF NOT EXISTS elmi_new.contrataciones_bbvaes_2014 
+        
+(N_Cuenta string,
+NIF string,
+Nombre string,
+COD_IDEFISCA string,
+COD_PERSONA int,
+IN_SOLICITUD string,
+ESTADO_SOLICITUD string,
+nfc int,
+i_nomina int,
+i_plazo int,
+i_fondo int,
+i_hipoteca int,
+i_consumo int,
+i_recibos int,
+i_segsalud int,
+i_segauto int,
+i_seghogar int,
+i_segvida int,
+i_cuenta int,
+i_tcredito int,
+i_tdebito int,
+i_ppi int,
+i_mail int,
+i_movil int)
+COMMENT 'la lista de altas finalizadas'
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '\t'
+STORED AS TEXTFILE ") ;
+
+
+do.hive(" LOAD DATA INPATH    '/tmp/load_hive/contrataciones_bbvaes.txt'    OVERWRITE INTO TABLE  elmi_new.contrataciones_bbvaes_2014 "); 
+
+do.hive(" CREATE TABLE elmi.contratacion_bbvaes_2014 AS
+        
+          SELECT * 
+          FROM elmi_new.contrataciones_bbvaes_2014 
+          WHERE trim(in_solicitud) NOT LIKE 'IN_SOLICITUD'
+        ");
+
+do.hive(" DROP TABLE elmi_new.contrataciones_bbvaes_2014 ")
+
+```
+
+El número de clientes en la tabla que acabamos de crear es **`r qhive("SELECT COUNT(distinct cod_persona) FROM elmi.contratacion_bbvaes_2014")`**.
+
+Y después subimos el dato de todas las solicitudes de altas de cliente hechas a través de bbva.es. 
+
+```{r eval=FALSE, echo=FALSE, cache=TRUE}
+
+do.hive(" CREATE TABLE elmi_new.solicitudes_bbvaes_2014 
+(Cod_referencia string,
+Fecha string,
+Hora string,
+N_Cuenta string,
+NIF string,
+Nombre string,
+Estado string)
+COMMENT 'la lista de solicitudes de alta como clientes'
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '\t'
+STORED AS TEXTFILE "); 
+
+do.hive(" LOAD DATA INPATH  '/tmp/load_hive/solicitudes_bbvaes.txt'   OVERWRITE INTO TABLE  elmi_new.solicitudes_bbvaes_2014 ");
+
+do.hive(" CREATE TABLE elmi.solicitudes_bbvaes_2014 AS
+        
+          SELECT * 
+          FROM elmi_new.solicitudes_bbvaes_2014 
+          WHERE trim(cod_referencia) NOT LIKE 'Cod_referencia'
+        ");
+
+do.hive(" DROP TABLE  elmi_new.solicitudes_bbvaes_2014 ")
+
+```
+
+El número de clientes en la tabla de las solicitudes de alta es **`r qhive("SELECT COUNT(distinct nif) FROM elmi.solicitudes_bbvaes_2014")`**. Las solicitudes de las altas
+por bbva.es se han realizado entre las fechas: **`r qhive(" SELECT MIN(to_date(fecha)) FROM elmi.solicitudes_bbvaes_2014")`** y **`r qhive(" SELECT MAX(to_date(fecha)) FROM elmi.solicitudes_bbvaes_2014")`**, 
+que equivale en promedio a **`r round( qhive("SELECT COUNT(distinct nif) FROM elmi.solicitudes_bbvaes_2014") / qhive(" SELECT COUNT(*) FROM (SELECT MONTH(to_date(fecha)) FROM elmi.solicitudes_bbvaes_2014 GROUP BY MONTH(to_date(fecha)) ) uu "), 0 )`** nuevas solicitudes al mes. 
+
+
+En el siguiente paso estudiamos de manera preliminar las solicitudes de altas de cliente hechas a través de bbva.es:
+
+```{r cache=TRUE, echo=FALSE, cache=TRUE}
+
+f <- qhive(" SELECT MONTH(fecha) mes_fecha, COUNT(distinct nif) nif_count
+        FROM elmi.solicitudes_bbvaes_2014
+        GROUP BY MONTH(fecha) ")
+f 
+
+library(ggplot2)
+
+p <- ggplot(data=f, aes(x=mes_fecha, y=nif_count) ) + geom_line()
+
+g <- p + coord_cartesian() + scale_x_discrete() + scale_y_continuous(breaks = seq(0, max(f$nif_count), by = 100))
+
+g
+
+```
+ 
+Dada gráfica muestra las anteriormente calculadas 390 solicitudes al mes en promedio (con un alto grado de volatilidad entre los meses distintos).
+
+
+
+ **CHEQUEO:** _que rastro han dejado estos clientes en TxC ?
+
+Chequeando cuantas transacciones ha hecho un cliente aleatorio, que se ha dado de alta en bbva.es el día de 17/11/2014 (según los datos en Excel recibido): 
+
+```{r cache=TRUE, cache=TRUE}
+
+qhive(" SELECT cod_pers_trs, fec_soli_trn, COUNT(*) num_tx
+      
+        FROM da_pro.transacciones_por_canal 
+        WHERE CAST(cod_pers_trs AS INT) = 27565150 AND partition_id >= '20131231'
+      
+        GROUP by cod_pers_trs, fec_soli_trn
+        ORDER BY cod_pers_trs, fec_soli_trn
+      
+        limit 45  ")
+
+```
+
+Se ve que esta persona estaba realizando las transacciones mucho antes de su fecha de alta digital realizada en bbva.es. 
+Esto significa que no es un cliente completamente nuevo para el banco. 
+
+Comprobamos el dato de este cliente en la tabla "clientes_corp":
+
+```{r cache=TRUE}
+
+qhive(" SELECT cod_persctpn, fec_cierre, fec_altapers, des_nombfj, des_unoapell, des_dosapell,  xti_csexof, partition_id
+       
+        FROM da_pro.clientes_corp        
+       
+        WHERE CAST(cod_persctpn AS INT) = 27565150        
+       
+        GROUP BY cod_persctpn, fec_cierre, fec_altapers, des_nombfj, des_unoapell, des_dosapell,  xti_csexof, partition_id
+        ORDER BY cod_persctpn, fec_cierre, fec_altapers, des_nombfj, des_unoapell, des_dosapell,  xti_csexof, partition_id ")
+
+```
+
+La base de datos de clientes contiene la información de este cliente en todas sus particiones existentes. Con esto hacemos conclusion que algunos clientes no son nuevas altas y hay que tratar la población con cierto grado de cautela eliminando algunos casos que NO han tenido un periodo de inactividad como cliente entre la presencia antigua y su segunda alta (digital). 
+
+
+Para finalizar la definición del grupo de solicitudes digitales, excluimos desde grupo aquellos clientes que NO HAN TENIDO el periodo de 6 meses de inactividad en TxC justo antes de la fecha de alta digital. 
+
+``` {r eval=FALSE, echo=FALSE, cache=TRUE}
+
+do.hive(" CREATE TABLE IF NOT EXISTS elmi.altas_bbvaes_all AS 
+        
+           SELECT cod_persona, nombre, nif, MIN(fecha) fecha_sol
+        
+           FROM (SELECT aa.cod_persona, aa.nombre, aa.nif, bb.fecha
+        
+                 FROM elmi.contratacion_bbvaes_2014 aa
+                 JOIN elmi.solicitudes_bbvaes_2014 bb ON aa.nif = bb.nif ) bii
+        
+           GROUP BY cod_persona, nombre, nif ")
+```
+
+Y después expulsamos a clientes quienes NO tenían 6 meses inactivos antes de su fecha de solicitud (usamos como la partición de TxC Junio 2013 porque esto es el primer periodo de 6 meses atras respecto la primera fecha de alta digital).
+  
+``` {r eval=FALSE, echo=FALSE, cache=TRUE}
+
+do.hive(" CREATE TABLE IF NOT EXISTS elmi.6m_inactivos_altas_dig_1 AS
+        
+          SELECT tt.cod_persona, tt.nombre, tt.nif, tt.fecha_sol, hh.fec_soli_trn, hh.num_tx        
+          FROM elmi.altas_bbvaes_all tt
+        
+          JOIN (SELECT cod_pers_trs, fec_soli_trn, COUNT(*) num_tx 
+                FROM da_pro.transacciones_por_canal        
+                WHERE partition_id >= '20130630' AND cod_pers_trs RLIKE '^[0-9]*[1-9][0-9]*$' 
+                        AND CAST(cod_entalfa AS INT) = 182        
+               GROUP BY cod_pers_trs, fec_soli_trn) hh   ON   tt.cod_persona = hh.cod_pers_trs
+          
+          GROUP BY tt.cod_persona, tt.nombre, tt.nif, tt.fecha_sol, hh.fec_soli_trn, hh.num_tx ")
+```
+
+
+```{r eval=FALSE, echo=FALSE, cache=TRUE}
+
+do.hive(" CREATE TABLE IF NOT EXISTS elmi.6m_inactivos_altas_dig_2 AS 
+         
+          SELECT aan.cod_persona, aan.nombre, aan.nif, aan.fecha_sol, aan.fec_soli_trn, aan.num_tx
+        
+          FROM  elmi.6m_inactivos_altas_dig_1 aan
+        
+          LEFT OUTER JOIN (SELECT inn.cod_persona  FROM
+        
+                               (SELECT *, DATE_SUB(fecha_sol, 180) as fecha_benchmark
+                                FROM elmi.6m_inactivos_altas_dig_1 ) inn  
+        
+                           WHERE inn.fec_soli_trn  BETWEEN inn.fecha_benchmark AND inn.fecha_sol         
+                           GROUP BY inn.cod_persona) expu ON  aan.cod_persona = expu.cod_persona 
+          
+          WHERE expu.cod_persona IS NULL        
+          GROUP BY aan.cod_persona, aan.nombre, aan.nif, aan.fecha_sol, aan.fec_soli_trn, aan.num_tx  ")
+
+```
+
+Con esto tenemos la lista depurada de las altas digitales que contiene **`r qhive("select count(distinct cod_persona) from elmi.6m_inactivos_altas_dig_2")`** individuos con las fechas de alta entre **`r qhive(" select MIN(fecha_sol) from elmi.6m_inactivos_altas_dig_2")`** y **`r qhive("select MAX(fecha_sol) from elmi.6m_inactivos_altas_dig_2")`**. 
+
+
+
+********************************** **CONTROL GROUP - ALTAS 'HABITUALES' (por Oficina)** *******************************************
+
+
+Pasamos a la construcción de grupo de nuevas altas "habituales" - es decir, aquellas personas, que se han dado de alta como clientes a través de la red de sucursales de BBVA. 
+El objetivo es obtener el grupo de control respecto los clientes, que se han dado de alta en bbva.es.
+
+El intuitivo criterio de definición del grupo de control es `COD_EVE_TRN = 0118 AND COD_SERV_DV = 1` (las solicitudes de las altas de cliente realizadas por canal oficina). Comprobamos la validez y el uso del dicho criterio en la tabla de transacciones:
+
+```{r cache=TRUE}
+
+qhive(" SELECT cod_geve_trn, cod_deve_trn, cod_serv_dv, cod_medio_dv, COUNT(*) recuento 
+        FROM da_pro.transacciones_por_canal 
+        WHERE partition_id = '20140731' AND trim(cod_eve_trn) RLIKE '^.*(118)$' 
+        GROUP BY cod_geve_trn, cod_deve_trn, cod_serv_dv, cod_medio_dv ")
+
+```
+
+**Resultado**: Vemos que el codigo de evento 118 no se usa en la tabla TxC para designar las solicitudes de alta de cliente. 
+
+Probamos el otro camino. 
+
+Primero, construimos la población de las altas habituales partiendo del criterio "han contratado una cuenta corriente en Oficina durante 2014 y como mínimo 6 meses antes de la dicha contratación estaban inactivos (no hay registros en TxC para dicha fecha y 6 meses atrás)". 
+
+ 
+```{r eval=FALSE, cache=TRUE}  
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elmi.altas_habit_contratacion_cuentas AS
+         
+           SELECT cod_pers_trs, fec_soli_trn, cod_deve_trn, cod_eve_trn
+         
+           FROM da_fro.transacciones_por_canal
+         
+           WHERE partition_id >= '20140131'  AND  CAST(cod_entalfa AS INT) = 182  AND cod_pers_trs RLIKE '^[0-9]*[1-9][0-9]*$' 
+                 AND CAST(cod_canal_dv AS INT) = 1 AND 
+         
+                 (CAST(cod_deve_trn AS INT) = 758 OR CAST(cod_eve_trn as int) = 236) 
+         
+           GROUP BY cod_pers_trs, fec_soli_trn, cod_deve_trn, cod_eve_trn");
+```
+
+**686.192** clientes / (2014-01-01 - 2014-11-30)
+
+
+Nos limitamos con los clientes particulares de Banca Comercial:
+
+
+``` {r eval=FALSE, cache=TRUE}
+
+do.hive(" CREATE TABLE IF NOT EXISTS elmi.altas_habit_contratacion_cuentas_particul AS 
+        
+          SELECT main.*
+        
+          FROM elmi.altas_habit_contratacion_cuentas main
+        
+          JOIN (SELECT cod_persctpn FROM da_pro.segmento_global
+                WHERE partition_id >= '20140131' AND CAST(cod_entalfa AS INT) = 182 
+                AND CAST(cod_segmsubo AS INT) in (56, 61, 55, 41, 42, 43) 
+                GROUP BY cod_persctpn) segm
+        
+                                  ON CAST(main.cod_pers_trs AS INT) = CAST(segm.cod_persctpn AS INT)        
+           ")
+
+```
+**531.196** clientes / (2014-01-01 - 2014-11-30)
+
+Expulsamos a los clientes que tenían las transacciones (registros en TxC) antes de la fecha (del mes) de la contratación de cuenta corriente (cod_eve_trn=236) o de la solicitud de alta cliente (cod_deve_trn=758).
+
+
+```{r eval=FALSE, echo=FALSE, cache=TRUE}
+
+do.hive(" CREATE TABLE IF NOT EXISTS elmi.6m_inactivos_altas_habit_1 AS        
+          SELECT tt.cod_pers_trs as cod_persona, tt.fec_soli_trn as fecha_contrat, hh.fec_soli_trn as fecha_tx, hh.num_tx   
+  	  
+          FROM elmi.altas_habit_contratacion_cuentas_particul  tt
+        
+          JOIN (SELECT cod_pers_trs, fec_soli_trn, COUNT(*) num_tx 		  
+                FROM da_pro.transacciones_por_canal 				
+                WHERE partition_id >= '20130630' AND cod_pers_trs RLIKE '^[0-9]*[1-9][0-9]*$' 
+                        AND CAST(cod_entalfa AS INT) = 182        
+                GROUP BY cod_pers_trs, fec_soli_trn)   hh   ON   tt.cod_pers_trs = hh.cod_pers_trs
+          
+          GROUP BY tt.cod_pers_trs, tt.fec_soli_trn, hh.fec_soli_trn, hh.num_tx ");
+
+
+do.hive(" CREATE TABLE IF NOT EXISTS elmi.6m_inactivos_altas_habit_2 AS        
+          SELECT aan.cod_persona, aan.fecha_contrat, aan.fecha_tx, aan.num_tx 
+  	  
+          FROM  elmi.6m_inactivos_altas_habit_1  aan        
+          LEFT OUTER JOIN ( SELECT gg.cod_persona FROM (SELECT inn.*, DATE_SUB(min_fec_contrat, 180) as fecha_benchmark  FROM
+		  
+                               (SELECT *, MIN(fecha_contrat) OVER (PARTITION BY cod_persona) min_fec_contrat 
+                                FROM elmi.6m_inactivos_altas_habit_1 ) inn  ) gg
+        
+                           WHERE gg.fecha_tx > gg.fecha_benchmark AND gg.fecha_tx < gg.min_fec_contrat         
+                           GROUP BY gg.cod_persona ) expu ON  aan.cod_persona = expu.cod_persona 
+          
+          WHERE expu.cod_persona IS NULL		  
+          GROUP BY aan.cod_persona, aan.fecha_contrat, aan.fecha_tx, aan.num_tx  ")
+
+```
+
+**331.689** clientes. 
+
+Segundo, para fortificar el criterio de alta habitual hecha en Oficina empleamos el criterio AUXILIAR de la tenencia de segmento PLAN UNO (en realidad no tiene que producir muchos cambios en el criterio número 1, porque los clientes que transaccionan caen dentro del Plan Uno).
+
+Creamos la lista de los clientes que HAN OBTENIDO (= han empezado O han vuelto a tener) el segmento Plan Uno dentro del periodo analizado (2014). Lo consideramos como una parte del criterio de la alta nueva "habitual". 
+
+
+```{r eval=FALSE, cache=TRUE}
+
+do.hive(" CREATE TABLE IF NOT EXISTS elmi.altas_habit_planuno AS
+
+          SELECT jj.cod_persctpn, jj.partition_id, CASE WHEN jj.cod_segpref IS NULL THEN 0 ELSE 1 END AS flag
+        
+          FROM  (SELECT cod_persctpn , partition_id, cod_segpref         
+                FROM da_pro.segmento_plan_uno
+                WHERE CAST(cod_entalfa AS INT) = 182
+                GROUP BY cod_persctpn, partition_id, cod_segpref) jj        
+           ");
+
+```
+
+--> mirar en que momento deja de tener 0 y cambia a 1 (si cambia en absoluto) --> será la alta o "re-activación" de un cliente antiguo, equivalente a la alta ... 
+
+```{r eval=FALSE, echo=FALSE, cache=TRUE} 
+
+do.hive(" CREATE TABLE IF NOT EXISTS elmi.altas_habit_planuno_2 AS
+         
+          SELECT aa.cod_persctpn, aa.partition_id, SUM(aa.flag) flagsum2
+          FROM elmi.altas_habit_planuno aa 
+          
+          JOIN (SELECT ty.* FROM (
+                                 SELECT cod_persctpn, partition_id, SUM(flag) flagsum
+                                 FROM elmi.altas_habit_planuno 
+                                 GROUP BY cod_persctpn, partition_id) ty                               
+                WHERE ty.flagsum > 0 ) bb   ON  aa.cod_persctpn = bb.cod_persctpn
+          
+          GROUP BY aa.cod_persctpn, aa.partition_id 
+        ");
+
+
+do.hive(" CREATE TABLE IF NOT EXISTS elmi.altas_habit_planuno_3 AS          
+          SELECT * FROM elmi.altas_habit_planuno_2 WHERE flagsum2 < 9 ");
+
+```
+
+Y ahora buscamos el periodo mas temprano donde el cliente tenía el cambio de flag de 0 a valor positivo. 
+
+``` {r cache=TRUE }
+
+qhive(" SELECT cod_persctpn, min_partition FROM
+      
+             ( SELECT cod_persctpn, MIN(partition_id) OVER (PARTITION BY cod_persctpn) as min_partition
+               FROM elmi.altas_habit_planuno_3
+               WHERE flagsum2 > 0 
+               GROUP BY cod_persctpn, partition_id )  uu 
+      
+         GROUP BY cod_persctpn, min_partition
+      
+        LIMIT 5 ")
+```
+
+Finalmente, depuramos la población de 331.689 clientes de Banca Comercial generada anteriormente, con el dato que acabamos de introducir. 
+
+```{r eval=FALSE, echo=FALSE, cache=TRUE}
+
+do.hive(" CREATE TABLE IF NOT EXISTS elmi.altas_habit_depuradas_1 AS
+         
+          SELECT main.cod_persona, MIN(main.fecha_contrat) as min_fec_contrat, chan.partition_year, chan.partition_month
+        
+          FROM  elmi.6m_inactivos_altas_habit_2   main
+        
+          JOIN (SELECT cod_persctpn, SUBSTR(min_partition,  1, 4) as partition_year, SUBSTR(min_partition, 5, 2) as partition_month
+  			 
+                       FROM ( SELECT cod_persctpn, MIN(partition_id) OVER (PARTITION BY cod_persctpn) as min_partition
+                             FROM elmi.altas_habit_planuno_3
+                             WHERE flagsum2 > 0 
+                             GROUP BY cod_persctpn, partition_id )  uu 
+							 
+                       GROUP BY cod_persctpn, SUBSTR(min_partition,  1, 4), SUBSTR(min_partition, 5, 2) )   chan   ON  main.cod_persona   =   chan.cod_persctpn
+					   
+		      GROUP BY main.cod_persona, main.fecha_contrat, chan.partition_year, chan.partition_month
+        ");
+
+  
+do.hive(" CREATE TABLE IF NOT EXISTS elmi.altas_habit_depuradas_2 AS
+        
+          SELECT aa.*
+          FROM         (SELECT cod_persona, 
+                               MONTH(min_fec_contrat) as month_min_fec_contr, 
+                               YEAR(min_fec_contrat) as year_min_fec_contr,
+                               partition_year , partition_month
+                      
+                        FROM elmi.altas_habit_depuradas_1) aa 
+          WHERE month_min_fec_contr = partition_month AND  year_min_fec_contr = partition_year     
+        ")
+
+```
+
+
+Ahora tenemos la población de nuevas altas "habituales" hecha. Nos queda solamente samplearla para hacer el tamaño de la muestra comparable con 2011 clientes de la muestra de las altas digitales.
+
+``` {r echo=FALSE, cache=TRUE}
+
+hiveDescribe <- function (table)
+{
+  if (grepl("^([[:alnum:]_]+)\\.([[:alnum:]_]+)$", table))
+	{
+		schema <- gsub("^([[:alnum:]_]+)\\.([[:alnum:]_]+)$", "\\1", table);
+		name   <- gsub("^([[:alnum:]_]+)\\.([[:alnum:]_]+)$", "\\2", table)
+	}
+	else
+	{
+		schema <- "default";
+		name   <- table
+	};
+	
+	do.hive(paste("use", schema)) -> null;
+	
+	header <- as.character(qhive(paste("describe", name))[[1]]);
+	
+	if (length(header) == 1 && grepl("does not exist$", header))
+	{
+		warning (paste("Table", table , "does not exist."));
+		header <- ""		
+	};
+	
+	gsub("[[:blank:]]", "", header)
+};
+
+
+
+
+drop.table <- function (table)
+{
+  do.hive(paste("drop table", full.schema(table))) -> null
+};
+
+
+
+full.schema <- function (table)
+{
+  if (grepl("^([[:alnum:]_]+)\\.([[:alnum:]_]+)$", table))
+	{
+		schema <- gsub("^([[:alnum:]_]+)\\.([[:alnum:]_]+)$", "\\1", table);
+		name   <- gsub("^([[:alnum:]_]+)\\.([[:alnum:]_]+)$", "\\2", table)
+	}
+	else
+	{
+		schema <- "default";
+		name   <- table
+	};
+	
+	paste(schema, name, sep = ".")
+};
+
+
+
+
+hiveNewTable_Sample <- function(sourcetable, newtable, varlist = "*", vartype = NULL, numsamp, where = NULL, numelse = 0, override = TRUE)
+{
+  do.hive("use elmi") -> null;
+	
+	if (override) drop.table(newtable);
+	
+	if (is.null(where)) 
+	{
+		ntot  <- qhive(paste("select count(*) from", sourcetable));
+		ncond <- NULL
+	} 
+	else 
+	{
+		nw <- length(where);
+		qs <- "select count(*)";
+		for (i in 1:nw) qs <- paste(qs, paste("sum(case when(", where[i], ")then 1 else 0 end)", sep = ""), sep = ",")
+		qs <- paste(qs, " from ", sourcetable, sep = "");
+		qq <- qhive(qs);
+		
+		ntot  <- qq[1];
+		ncond <- qq[2:length(qq)]
+	};
+	
+	if ((length(varlist) == 1) && (varlist[1] == "*")) varlist <- hiveDescribe(sourcetable);
+	nv <- length(varlist);
+
+	qs <- paste("create table", full.schema(newtable), "as select");
+	
+	if (is.null(vartype))
+	{
+		qs <- paste(qs, varlist[1], sep = " ")
+		if (nv > 1) for (i in 2:nv) qs <- paste(qs, varlist[i], sep = ",")
+	}
+	else
+	{			
+		vartype <- rep(vartype, length.out = nv);
+	
+		qs <- paste(qs, " cast(", varlist[1], " as ", vartype[1], ") as ", varlist[1], sep = "");
+		if (nv > 1) for (i in 2:nv) qs <- paste(qs, paste("cast(", varlist[i], " as ", vartype[i], ") as ", varlist[i], sep = ""), sep = ",")
+	};
+	qs <- paste(qs, "from", sourcetable);
+	
+	if (is.null(where)) qs <- paste(qs, "where rand() <", numsamp/ntot)
+	else
+	{
+		numsamp <- rep(numsamp, length.out = nw);
+		pr <- numsamp/ncond;
+		pr[ncond < 1] <- 1;
+		cl <- paste("((", where, ") and (rand() < ", pr, "))", sep = "")
+		qs <- paste(qs, "where", cl[1]);
+		
+		if (nw > 1) for (i in 2:nw) qs <- paste(qs, cl[i], sep = " or ");
+		
+		if (numelse > 0)
+		{
+			nn <- ntot - sum(ncond);
+			if (nn > 0)
+			{
+				pr <- numelse/nn 
+			};
+			ccl <- paste("(", where[1], ")", sep = "");
+			if (nw > 1) for (i in 2:nw) ccl <- paste(ccl, paste("(", where[i], ")", sep = ""), sep = " or ");
+			ccl <- paste("(!(", ccl, ") and (rand() < ", pr, "))", sep = "");
+			
+			qs <- paste(qs, ccl, sep = " or ")
+		}
+	};
+	
+	qq <- do.hive(qs);
+	
+	min(colnames(as.matrix(qq)) == as.matrix(varlist)) == 1   
+};
+
+```
+
+
+```{r eval=FALSE, cache=TRUE}
+
+hiveNewTable_Sample("elmi.altas_habit_depuradas_2", "elmi.altas_habit_depuradas_2_sample", varlist="*", numsamp=2500);
+
+```
+
+Se ha creado una tabla de la muestra aleatoria de la población de las altas "habituales". El tamaño de la muestra es **`r qhive("select count(*) from elmi.altas_habit_depuradas_2_sample")`** clientes. 
+
+En el siguiente paso juntamos en una lista las altas digitales y habituales. 
+
+``` {r eval=FALSE, echo=FALSE, cache=TRUE}
+
+do.hive("CREATE TABLE IF NOT EXISTS elmi.poblacion_digital_onboarding AS
+          
+         SELECT BLABLA.* FROM (
+        
+         SELECT cod_persona, CAST(fecha_sol AS DATE) as fecha_alta,  'bbva.es' as alta_type 
+         FROM elmi.6m_inactivos_altas_dig_2
+         GROUP BY cod_persona, fecha_sol, 'bbva.es'
+        
+         UNION ALL
+        
+                   SELECT CAST(aa.cod_persona AS INT) as cod_persona, MIN(CAST(bb.min_fec_contrat AS DATE)) as fecha_alta , 'oficina' as alta_type
+                   FROM elmi.altas_habit_depuradas_2_sample aa 
+                   JOIN elmi.altas_habit_depuradas_1 bb ON aa.cod_persona = bb.cod_persona
+                   GROUP BY aa.cod_persona
+         ) BLABLA ")
+
+```
+
+La muestra tiene **`r qhive("select count(*) recc from elmi.poblacion_digital_onboarding")`** registros, que se dividen por el tipo de alta de la siguiente manera:
+
+``` {r echo=FALSE, cache=TRUE}
+
+qhive(" select alta_type, count(distinct cod_persona) num_clientes from elmi.poblacion_digital_onboarding group by alta_type ")
+
+```
+
+Creamos la tabla con los datos sociodemograficos para la muestra generada.
+
+``` {r eval=FALSE, echo=FALSE, cache=TRUE}
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboarding_sociodemo_1  AS 
+
+           SELECT aa.cod_persona, aa.fecha_alta, aa.alta_type, 
+
+                bb.fec_altapers as fec_altapers, bb.qnu_empledos, bb.cod_formcli, bb.cod_paisores, bb.cod_paisonac , bb.cod_tip_ocup, bb.cod_tiporol, bb.xti_persona, bb.cod_estcivil, bb.xti_csexof, bb.xti_robinson, bb.cod_clienvip, bb.qnu_ninoscar, bb.qnu_adultcar, bb.xti_moragrup , bb.des_provnacm,
+          
+                cc.qnu_edad as edad
+
+           FROM elmi.poblacion_digital_onboarding aa
+           LEFT OUTER JOIN da_pro.clientes_corp bb ON aa.cod_persona = CAST(bb.cod_persctpn AS INT)
+           LEFT OUTER JOIN da_pro.calculo_corp_cliente_edad cc ON aa.cod_persona = CAST(cc.cod_persctpn AS INT)
+         
+           WHERE CAST(bb.cod_entalfa AS INT) = 182 AND bb.partition_id = '20141130'
+             AND CAST(cc.cod_entalfa AS INT) = 182 AND cc.partition_id = '20141130'
+         
+         GROUP BY aa.cod_persona, aa.fecha_alta, aa.alta_type, 
+
+                bb.fec_altapers, bb.qnu_empledos, bb.cod_formcli, bb.cod_paisores, bb.cod_paisonac , bb.cod_tip_ocup, bb.cod_tiporol, bb.xti_persona, bb.cod_estcivil, bb.xti_csexof, bb.xti_robinson, bb.cod_clienvip, bb.qnu_ninoscar, bb.qnu_adultcar, bb.xti_moragrup , bb.des_provnacm,
+          
+                cc.qnu_edad ")
+
+```
+
+--------------------------------------------------------------------------------------------------------------
+*********************************** **SOCIODEMOGRAPHIC ANALYSIS** *******************************************                                         
+--------------------------------------------------------------------------------------------------------------
+
+In this part of a document the sociodemographic caracteristics of the population are being analyzed by calculating and visualizing main distributions.
+
+``` {r cache=TRUE, echo=FALSE, cache=TRUE}
+
+sociodemo <- qhive(" SELECT * FROM elmi.digital_onboarding_sociodemo_1 ")
+sociodemo <- sociodemo[sociodemo$xti_persona == 'F', ]
+
+```
+
+``` {r echo=FALSE, cache=TRUE}
+
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  require(grid)
+  
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+  
+  numPlots = length(plots)
+  
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                     ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+  
+  if (numPlots==1) {
+    print(plots[[1]])
+    
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+      
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+} 
+
+```
+
+In a first place, we present distribution by age on a total level and in a breakdown of 2 main client registration types ("bbva.es" - "branch"):
+
+``` {r echo=FALSE, fig.height=7, fig.width=7, cache=TRUE}
+
+gg3 <- ggplot(sociodemo, aes(x=edad)) + geom_histogram(binwidth=2) + ggtitle("General distribution by age");
+
+sociodemo$alta_type <- factor(sociodemo$alta_type);
+
+ff3 <- ggplot(sociodemo, aes(x=edad, fill=alta_type)) + geom_histogram(binwidth=2, position="identity", alpha=0.4) + ggtitle("Distribution by age and client registration type") + scale_fill_discrete(name="Registration \n type");
+
+suppressMessages(multiplot(gg3, ff3));
+
+```
+
+On the second histogram it's seen that the sub-population of the digital customer registrations has noticeably more compact distribution than the one of traditional registrations (branch).In one part it is caused by the minimum age limitation (>18 years) in the conditions of registration in bbva.es and from another - it is not possible to impose the multiownership of a contract, the thing what older individuals tend to do regarding their family members.  
+
+Checking the average age in breakdown of 2 groups:
+
+```{r echo=FALSE, cache=TRUE}
+
+v <- aggregate(sociodemo$edad, by=list(sociodemo$alta_type), FUN=mean, na.rm=TRUE) 
+
+colnames(v) = c("tipo_alta", "edad_media")
+
+v <- data.frame(v, row.names=NULL)
+
+v
+
+```
+
+Average age of new customers who apply through the webpage bbva.es is **`r round(mean(sociodemo$edad[sociodemo$alta_type == 'bbva.es']), 0)`** years against the **`r round(mean(sociodemo$edad[sociodemo$alta_type == 'oficina']), 0)`** years of an average customer applied for registration in the branch. Both numbers are quite similar and it has sense to observe the main statistics like, i.e. quartiles (boxplot below). 
+
+``` {r echo=FALSE, fig.width=6, fig.height=6, cache=TRUE}
+
+boxplot(sociodemo$edad ~ as.factor(sociodemo$alta_type), col="light blue", xlab="registration type", ylab="age", varwidth=TRUE)
+
+``` 
+
+The figure shows the spread of the age values (the distance between the 1st and 3rd quartiles, which are the upper and bottom sides of blue boxes)  is much wider in case of the client registrations in Branch, especially in the upper direction from the mean (~older than 36 years). The age spread of the customers registered via web (bbva.es) is much more compact and shows that the people are mostly of the age approximate to the mean itself (32 years). 
+
+The quartiles for 2 groups are following:
+
+_Branch_
+```{r echo=FALSE, cache=TRUE}  
+u <- quantile(sociodemo$edad[sociodemo$alta_type == 'oficina'])
+u
+```
+_bbva.es_
+```{r echo=FALSE, cache=TRUE}  
+y <- quantile(sociodemo$edad[sociodemo$alta_type == 'bbva.es'])
+y
+```
+Thus, we can see that the 75% percentile in case of Branch is 50 years opposed to 37 years of the digital customer registrations. The conclusion is obvious: the individuals with digital registrations are all of a very similar age and in their biggest part are younger than the individuals with branch registrations who sparsely belong to very different age groups.  
+
+Next, we take into consideration the distribution of analyzed individuals by gender. 
+
+``` {r echo=FALSE, cache=TRUE}
+
+t <- table(sociodemo$alta_type, sociodemo$xti_csexof)
+r <- as.data.frame(t)
+
+ y <- aggregate(r$Freq, by=list(Sexo = r$Var2), FUN=sum)
+
+
+     ti <- as.data.frame(t(y));     
+       ti <- ti[-1, ]
+
+
+ rr <- matrix(t, byrow=T, nrow=2)
+
+   pep <- as.data.frame(cbind(rr, t(ti[1, ])))
+   colnames(pep) <- c("bbva.es", "branch", "total")
+   rownames(pep) <- c("female", "male")
+
+yy <- aggregate(r$Freq, by=list(Reg_channel = r$Var1), FUN=sum)
+
+  
+   pip <- as.data.frame(cbind(t(yy), sum(yy$x)))[2, ]
+   colnames(pip) <- colnames(pep)
+   rownames(pip) <- "total"
+   pup <- rbind(pep, pip)
+ 
+pup
+
+```
+It is seen that women comprise **40%** _(803 / 2009)_ of all new applicants on the web (Bbva.es).
+
+Joint distribution by gender and age:
+
+``` {r echo=FALSE, cache=TRUE}
+
+ggplot(sociodemo, aes(x=edad, fill=xti_csexof)) + geom_density(binwidth=2, position="identity", alpha=0.4) + facet_grid(. ~ alta_type) + scale_fill_discrete(name="Gender")
+
+```
+
+There is no significant difference between the distributions by age between men and women for both digital (bbva.es) and traditional (branch) ways of new customer registration, however, there is a fundamental difference in age distribution in breakdown of registration type itself. 
+
+Next step is to observe the distribution of the new customers by their civil status. 
+
+```{r echo=FALSE, cache=TRUE}
+
+estado_civil <- matrix(nrow=(nrow(sociodemo)), ncol=1)
+ c1 <- sociodemo[, "cod_estcivil"] == 'C'
+  estado_civil[c1, ] <- 'Married'
+
+ c2 <- sociodemo[, "cod_estcivil"] == 'S'
+  estado_civil[c2, ] <- 'Single'
+
+ c3 <- is.na(estado_civil)
+  estado_civil[c3, ] <- 'Others'
+ sociodemo <- cbind(sociodemo, estado_civil)
+
+```
+
+
+The major civil status types present in the dataset are:
+
+``` {r echo=FALSE, cache=TRUE}
+
+table(sociodemo$estado_civil)
+
+```
+
+The percentual distribution of the new clients by civil status and the registration method:
+
+``` {r echo=FALSE, fig.width=5, fig.height=4, cache=TRUE}
+
+ re <- aggregate(sociodemo$cod_persona, by=list(sociodemo$alta_type, sociodemo$estado_civil), FUN=length)  
+ colnames(re) <- c("reg_type", "civil_state", "num_clients")
+
+
+library(plyr)
+ce <- ddply(re, "reg_type", transform, percent_num_clients = num_clients / sum(num_clients) * 100)
+
+ggplot(ce, aes(x=reg_type, y=percent_num_clients, fill=civil_state)) + geom_bar(width= 0.6, stat="identity") 
+
+```
+
+The image received is not surprising - there were more married individuals applying for a new client status in a branch in 2014. The web users were in bigger part singles (this is also inline with previously discovered age trends - people marry every time at an older age). 
+
+
+And after adding the gender dimension to the same picture we see that there were slightly smaller share of single women (63%) among the digital registrations than single men (70%): 
+
+``` {r echo=FALSE, fig.width=7, fig.height=6, cache=TRUE}
+
+ re <- aggregate(sociodemo$cod_persona, by=list(sociodemo$alta_type, sociodemo$estado_civil, sociodemo$xti_csexof), FUN=length)  
+ colnames(re) <- c("reg_type", "civil_state", "gender", "num_clients")
+
+
+library(plyr)
+ce <- ddply(re, c("reg_type", "gender"), transform, percent_num_clients = num_clients / sum(num_clients) * 100)
+
+ce <- ddply(ce, c("reg_type", "gender"), transform, label_y = cumsum(percent_num_clients))
+
+ggplot(ce, aes(x=reg_type, y=percent_num_clients, fill=civil_state)) + geom_bar(width= 0.6, stat="identity")  + facet_grid(. ~ gender) + geom_text(aes(y = label_y, label = floor(percent_num_clients)), vjust=1.5, size=4, colour="white" )
+
+```
+
+Continuing with the analysis of the occupational status of the population. The main distribution by the type of professional occupation on general level and in breakdown of 2 groups is following: 
+
+``` {r echo=FALSE, cache=TRUE}
+
+resu <- as.data.frame(qhive(" SELECT aa.cod_tip_ocup, bb.des_tipo_ocupacion, COUNT(distinct cod_persona) num_clients
+             
+                                     FROM elmi.digital_onboarding_sociodemo_1 aa
+                                     JOIN da_catalogos.tipo_ocupacion bb ON trim(aa.cod_tip_ocup) = trim(bb.cod_tipo_ocupacion)
+                            
+                                     WHERE aa.xti_persona = 'F' AND bb.partition_id = '20141130' 
+                                   
+                                     GROUP BY aa.cod_tip_ocup, bb.des_tipo_ocupacion
+                            
+                            "))
+
+resu2 <- resu
+resu2[ , "perc_share"] <- round( resu$num_clients / sum(resu$num_clients) * 100 , 2) ; 
+
+resu3 <- resu2[order(-resu2$perc_share), ]
+
+resu3
+
+```
+
+The percentual distribution of new clients by (professional) occupational status and the registration method:
+
+``` {r echo=FALSE, cache=TRUE}
+
+we <- as.data.frame(chname(qhive(" SELECT aa.alta_type, aa.cod_tip_ocup, bb.des_tipo_ocupacion as ocup_type, COUNT(distinct cod_persona) num_clients
+             
+                            FROM elmi.digital_onboarding_sociodemo_1 aa
+                            JOIN da_catalogos.tipo_ocupacion bb ON trim(aa.cod_tip_ocup) = trim(bb.cod_tipo_ocupacion)
+                            
+                            WHERE aa.xti_persona = 'F' AND bb.partition_id = '20141130' 
+                                   
+                            GROUP BY aa.alta_type, aa.cod_tip_ocup, bb.des_tipo_ocupacion
+                            
+                            "))); 
+library(plyr)
+
+ce <- ddply(we, "alta_type", transform, percent_num_clients = num_clients / sum(num_clients) * 100) ;
+
+ce$ocup_type[which(ce$percent_num_clients < 3)] <- "OTROS"
+
+gg1 <- ggplot(ce, aes(x=alta_type, y=percent_num_clients, fill=ocup_type)) + geom_bar(width= 0.3, stat="identity") 
+
+gg1
+
+```
+
+As it is seen on the figure, in case of digital registrations ther is a higher share of students, unemployed individuals and permanent workers whereas the traditional registrations stand out by the high share of retired individuals and temporal workers... Interesting to mention there are no Freelance workers within the registrations in Branch in contrast to digital registrations. This, in one part, can be caused by margin errors in the sampling of traditional registrations, and in other part, shows that the registration as a Freelancer in the Branch is in general very low. 
+
+
+And after adding the gender dimension to the comparison we get in relative and absolute terms:
+
+``` {r echo=FALSE, cache=TRUE, fig.width=14, fig.height=6, cache=TRUE}
+
+je <- as.data.frame(chname(qhive(" SELECT aa.alta_type, aa.xti_csexof as gender, aa.cod_tip_ocup, bb.des_tipo_ocupacion as ocup_type, COUNT(distinct cod_persona) num_clients
+             
+                            FROM elmi.digital_onboarding_sociodemo_1 aa
+                            JOIN da_catalogos.tipo_ocupacion bb ON trim(aa.cod_tip_ocup) = trim(bb.cod_tipo_ocupacion)
+                            
+                            WHERE aa.xti_persona = 'F' AND bb.partition_id = '20141130' 
+                                   
+                            GROUP BY aa.alta_type, aa.xti_csexof, aa.cod_tip_ocup, bb.des_tipo_ocupacion
+                            
+                            "))); 
+library(plyr)
+
+ce <- ddply(je, c("alta_type", "gender"), transform, percent_num_clients = num_clients / sum(num_clients) * 100)
+
+ce$ocup_type[which(ce$percent_num_clients < 3)] <- "OTROS"
+
+ce <- ddply(ce, c("alta_type", "gender"), transform, label_y = cumsum(percent_num_clients))
+
+arr <- ggplot(ce, aes(x=alta_type, y=percent_num_clients, fill=ocup_type)) + geom_bar(width= 0.6, stat="identity")  + facet_grid(. ~ gender);
+
+
+
+be <- ddply(je, c("alta_type", "gender"), transform, percent_num_clients = num_clients / sum(num_clients) * 100)
+
+be$ocup_type[which(be$percent_num_clients < 3)] <- "OTROS"
+
+ass <- ggplot(be, aes(x=alta_type, y=num_clients, fill=ocup_type)) + geom_bar(width= 0.6, stat="identity")  + facet_grid(. ~ gender);
+
+multiplot(arr, ass, cols=2);
+
+```
+
+
+**CONCLUSIONS:**
+
+1) all Housekeepers in population are of female gender
+2) all Freelancers presented in population are males
+3) there are significantly higher share (and quantity) of male Retired individuals than female ones in case of branch registrations
+4) there are significantly higher share (and quantity) of  Unemployed males than females among digital registrations (partially due to the presence of the Housekeeper occupation in the list)
+5) Retired women DID NOT register as new clients via bbva.es, but only in the branches
+
+-------------------------------------------------------------------------------------------------------------------------
+ 
+ In the next section we analyze basic types of transactions in BBVA channels between 2 groups of client registrations.
+ 
+ 
+--------------------------------------------------------------------------------------------------------------
+********************************* **ANALYSIS OF BANK TRANSACTIONS** ******************************************                                         
+--------------------------------------------------------------------------------------------------------------
+ 
+ 4 main event types and 3 main BBVA channels have been used to perform the analysis in current step.
+ 
+ _MAIN EVENT TYPES_
+ 
+| cod_geve_trn |        Descripción tipo evento        |
+|:------------:| :------------------------------------:|
+|     0001     |                 QUERIES               |
+|     0002     |                OPERATIONS             |
+|     0003     |               CONTRACTING             |
+|     0004     |             SALES - ACTIONS*          |
+
+* - openings and follow-up payments to investment funds and pension plans, also other operations with investment portfolios.
+
+The SALES - ACTIONS event group comprises following event types:
+
+``` {r echo=FALSE, cache=TRUE}
+
+qhive(" select cod_eve_trn_mod, CASE WHEN trim(cod_eve_trn_mod) LIKE '%2571%' THEN 'ALTAS / APORTACIONES FI y PP'
+                                     WHEN trim(cod_eve_trn_mod) LIKE '%2771%' THEN 'ALTA ORDEN COMPRA/VENTA DE VALORES'
+                                     ELSE bb.des_evento_trn END AS description
+      
+        from elmi.digital_onboard_tx_basicas_2 aa
+        left outer join da_catalogos.evento_trn bb ON CAST(trim(aa.cod_eve_trn_mod) as int) = CAST(trim(bb.cod_evento_trn) as int)
+      
+        where cast(cod_geve_trn_mod as int) = 4 AND CAST(cod_eve_trn_mod AS INT) not in (2, 75)
+        group by cod_eve_trn_mod, bb.des_evento_trn ")
+
+```
+
+ _MAIN CHANNELS_
+ 
+| cod_canal_dv |           Descripción CANAL           |
+|:------------:| :------------------------------------:|
+|     0001     |         BRANCH  / BBVA CONTIGO        |
+|     0002     |                   ATM                 |
+|     0004     |                BBVA.NET               |
+
+
+ 
+``` {r echo=FALSE, eval=FALSE, cache=TRUE}
+ 
+   do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboard_tx_basicas AS 
+
+            SELECT aa.cod_persona, aa.fecha_alta, aa.alta_type, aa.fec_altapers, 
+                   bb.fec_soli_trn, bb.cod_serv_dv, bb.cod_geve_trn_mod, bb.cod_eve_trn_mod   
+           
+            FROM elmi.digital_onboarding_sociodemo_1 aa 
+            JOIN da_segm_comport_temp.ic_txc_multicanal_20141130 bb ON aa.cod_persona = bb.cod_persona_ic 
+           
+            WHERE CAST(cod_geve_trn_mod AS INT) in (1,2,3,4)
+          
+            GROUP BY aa.cod_persona, aa.fecha_alta, aa.alta_type, aa.fec_altapers, 
+                   bb.fec_soli_trn, bb.cod_serv_dv, bb.cod_geve_trn_mod, bb.cod_eve_trn_mod        
+             ") ;
+
+
+      do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboard_tx_basicas_2  AS 
+                   SELECT *,             
+                      CASE WHEN CAST(cod_serv_dv AS INT)  = 1 THEN 'Oficina'
+                              WHEN CAST(cod_serv_dv AS INT) = 2 THEN 'ATM'
+                              WHEN CAST(cod_serv_dv AS INT) in (17,18,19,20,21,22,23,24,25,27,28,38, 42,47,48,49,50,57,60,61,64,66, 68,69, 103) THEN 'BBVA Net'
+                              WHEN CAST(cod_serv_dv AS INT)  in (3,74) THEN 'BBVA Contigo'
+                              ELSE 'otros' END AS channel, 
+                    
+                      CASE WHEN CAST(cod_geve_trn_mod AS INT) = 1 THEN 'Query'
+                           WHEN CAST(cod_geve_trn_mod AS INT) = 2 THEN 'Operation'
+                           WHEN CAST(cod_geve_trn_mod AS INT) = 3 THEN 'Contracting'
+                           ELSE 'Sales-action' END AS event_type                       
+                    
+                      FROM   elmi.digital_onboard_tx_basicas  ");
+
+
+
+  do.hive(" CREATE TABLE elmi.digital_onboard_tx_basicas_3 AS
+          
+           SELECT cod_persona, alta_type, fecha_alta, MONTH(fecha_alta) mes_alta, MONTH(fec_soli_trn) mes_tx, channel, cod_geve_trn_mod, event_type, COUNT(*) num_tx        
+           FROM elmi.digital_onboard_tx_basicas_2           
+           WHERE fec_soli_trn > fecha_alta AND fec_soli_trn >= '2014-01-01'          
+           GROUP BY cod_persona, alta_type, fecha_alta, MONTH(fecha_alta), MONTH(fec_soli_trn), channel, cod_geve_trn_mod, event_type  ") ;
+
+
+
+
+  do.hive(" CREATE TABLE IF NOT EXISTS elmi.digit_onboard_tx_basicas_3meses AS
+          
+            SELECT cod_persona, alta_type, fecha_alta, mes_alta, channel, cod_geve_trn_mod, event_type, SUM(num_tx) suma_tx       
+            FROM elmi.digital_onboard_tx_basicas_3        
+            WHERE mes_tx >= mes_alta AND mes_tx <= mes_alta + 3
+            GROUP BY cod_persona, alta_type, fecha_alta, mes_alta,  channel, cod_geve_trn_mod, event_type      
+           ")
+
+```
+
+On the figure below we see the average number of transactions in breakdown of main BBVA channels between 2 analyzed groups.
+
+``` {r echo=FALSE, cache=TRUE}
+
+tx_basicdata <- as.data.frame(qhive(" SELECT alta_type, channel, event_type, AVG(suma_tx) avr_num_tx_3first_months
+                       FROM elmi.digit_onboard_tx_basicas_3meses
+                       GROUP BY alta_type, channel, event_type")); 
+
+tx_basicdata <- tx_basicdata[which(tx_basicdata$channel != 'otros'), ]
+
+library(ggplot2)
+
+ggplot(tx_basicdata, aes(x=alta_type, y=avr_num_tx_3first_months, fill=event_type)) + geom_bar(position="dodge", stat="identity", width= .6)  + facet_grid(. ~ channel) 
+
+```
+
+All distributions seem to follow common sense - digital registrations perform on average more transactions in BBVA.NET than in Branch and vice-a-versa, traditional registrations perform more transactions in Branch than digital ones. However, stands out the fact that there are still more investment funds related operations ("Sales-actions") made in BBVA.NET by clients registered in Branch. This can be explained by on average higher age and higher economic status of the latter group.
+
+Given this, there is a clear interest in analyzing in further report iterations the Wealth and Profitability of 2 registration types. 
+
+
+
+And, as a last step of given report, TOP 10 operations performed by client in first 3 months after the registration in breakdown of 2 analyzed groups are:
+ 
+``` {r echo=FALSE, eval=FALSE, cache=TRUE}
+
+
+  do.hive(" CREATE TABLE elmi.digital_onboard_top10_1 AS  
+           SELECT cod_persona, alta_type, fecha_alta, MONTH(fecha_alta) mes_alta, MONTH(fec_soli_trn) mes_tx, cod_eve_trn_mod, channel, event_type, COUNT(*) num_tx
+        
+           FROM elmi.digital_onboard_tx_basicas_2         
+            WHERE fec_soli_trn > fecha_alta AND fec_soli_trn >= '2014-01-01'        
+            GROUP BY cod_persona, alta_type, fecha_alta, MONTH(fecha_alta), MONTH(fec_soli_trn), cod_eve_trn_mod, channel, event_type  ") ;
+
+
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elmi.digit_onboard_top10_3meses AS         
+           SELECT cod_persona, alta_type, fecha_alta, mes_alta, channel, aa.event_type, cod_eve_trn_mod, bb.des_evento_trn,   SUM(num_tx) suma_tx           
+           from elmi.digital_onboard_top10_1 aa
+           LEFT OUTER JOIN da_catalogos.evento_trn bb ON CAST(aa.cod_eve_trn_mod AS INT) = CAST(TRIM(bb.cod_evento_trn) AS INT)         
+           WHERE mes_tx >= mes_alta AND mes_tx <= mes_alta + 3         
+           GROUP BY cod_persona, alta_type, fecha_alta, mes_alta, channel, aa.event_type, cod_eve_trn_mod, bb.des_evento_trn    
+           ");
+
+```
+
+
+[//]: (.. filters from segmentacion comportamental) 
+
+``` {r echo=FALSE, cache=TRUE}
+
+bbvaes <- qhive(" SELECT * FROM 
+       
+            ( SELECT hh.*, ROW_NUMBER() OVER (ORDER BY trans_count DESC) as indeks
+             
+              from (SELECT alta_type as reg_type, channel, cod_eve_trn_mod as event_code, des_eventos as description, SUM(suma_tx) trans_count
+             
+                     FROM elmi.digit_onboard_top10_3meses
+            
+                     WHERE alta_type = 'bbva.es' AND channel != 'otros' 
+            
+                           AND (channel = 'BBVA Net'   AND CAST(trim(cod_eve_trn_mod) AS INT) in  (1 ,3 ,5 ,6 ,8 ,10 , 11 ,12 ,13 ,14 ,19 ,21 ,23 ,24 ,25 ,26 ,27 ,29 ,30 ,31 ,32 ,34 ,35 ,36
+           ,37 ,38 ,39 ,40 ,42 ,43 ,44 ,47 ,50 ,51 ,52 ,53 ,54 ,55 ,56 ,57 ,58 ,61 ,62 ,63 ,64 ,65 ,69 ,70 ,72 ,73 ,77 ,78 ,86 ,89 ,96 ,97 ,98
+           ,99 ,100 ,101 ,102 ,104 ,105 , 106 , 111 ,112 ,114 ,115 ,118 ,125 ,130 ,131 ,132 ,139 ,140 ,142 ,143 ,144 ,145 ,146 ,147 ,148 ,149
+           ,150 ,151 ,152 ,153 ,154 ,155 ,157 ,158 ,159 ,160 ,161 ,162 ,163 ,164 ,165 ,166 ,167 ,168 ,169 ,170 ,171 ,173 ,174 ,175 ,176 ,177 ,178
+           ,179 ,180 ,181 ,182 ,183 ,184 ,185 ,186 ,188 ,189 ,190 ,191 ,192 ,193 ,194 ,195 ,196 ,197 ,198 ,199 ,200 ,201, 202, 203, 204, 205, 206,
+  	   207, 208, 209, 210, 211, 212, 214, 215, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 231, 232, 233, 234, 236, 237, 239, 
+		   244, 245, 246, 247, 248, 250, 251, 253, 254, 256, 257, 258, 259, 260, 261, 263, 264, 266, 268, 270, 271, 272, 273, 274, 275, 276, 277, 
+		   278, 280, 281, 282, 283, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 299, 300, 301, 2571, 6901, 6902, 2771)     
+            
+                          OR channel = 'Oficina'  AND CAST(trim(cod_eve_trn_mod) AS INT)  in  (1, 5, 6, 10, 11, 12, 14, 19, 21, 26, 30, 34, 36, 37, 38, 40, 50, 51, 52,
+       53, 54, 56, 57, 58, 61, 62, 63, 69, 72, 73, 78, 84, 96, 97, 98, 100, 101, 102, 104, 105, 111, 112, 114, 115, 130, 131,
+     139, 140, 142, 144, 148, 149, 150, 151, 154, 159, 160, 162, 163, 164, 166, 167, 170, 171, 175, 176, 178, 181, 182, 185, 
+	   186, 188, 189, 199, 200, 206, 207, 214, 215, 220, 224, 225, 227, 228, 229, 234, 235, 236, 239, 244, 245, 246, 247, 249, 
+	   250, 251, 253, 254, 257, 258, 259, 260, 261, 266, 268, 275, 276, 277, 278, 280, 281, 283, 290, 293, 299, 300, 301, 2571,
+	   5001, 5801, 6901, 6902, 2771)   
+       
+                         OR channel = 'ATM'  AND CAST(trim(cod_eve_trn_mod) AS INT) NOT IN (120, 121, 127, 141)   )
+            
+            
+            
+                     GROUP BY alta_type, channel, cod_eve_trn_mod, des_eventos) hh 
+       
+       ) gg
+      
+         WHERE gg.indeks < 11 
+               ") ;
+
+branch <- qhive(" SELECT * FROM 
+       
+            ( SELECT hh.*, ROW_NUMBER() OVER (ORDER BY trans_count DESC) as indeks
+             
+              from (SELECT alta_type as reg_type, channel, cod_eve_trn_mod as event_code, des_eventos as description, SUM(suma_tx) trans_count
+             
+                     FROM elmi.digit_onboard_top10_3meses
+            
+                     WHERE alta_type = 'oficina'  AND channel != 'otros' 
+            
+                           AND (channel = 'BBVA Net'   AND CAST(trim(cod_eve_trn_mod) AS INT) in  (1 ,3 ,5 ,6 ,8 ,10 , 11 ,12 ,13 ,14 ,19 ,21 ,23 ,24 ,25 ,26 ,27 ,29 ,30 ,31 ,32 ,34 ,35 ,36
+           ,37 ,38 ,39 ,40 ,42 ,43 ,44 ,47 ,50 ,51 ,52 ,53 ,54 ,55 ,56 ,57 ,58 ,61 ,62 ,63 ,64 ,65 ,69 ,70 ,72 ,73 ,77 ,78 ,86 ,89 ,96 ,97 ,98
+           ,99 ,100 ,101 ,102 ,104 ,105 , 106 , 111 ,112 ,114 ,115 ,118 ,125 ,130 ,131 ,132 ,139 ,140 ,142 ,143 ,144 ,145 ,146 ,147 ,148 ,149
+           ,150 ,151 ,152 ,153 ,154 ,155 ,157 ,158 ,159 ,160 ,161 ,162 ,163 ,164 ,165 ,166 ,167 ,168 ,169 ,170 ,171 ,173 ,174 ,175 ,176 ,177 ,178
+           ,179 ,180 ,181 ,182 ,183 ,184 ,185 ,186 ,188 ,189 ,190 ,191 ,192 ,193 ,194 ,195 ,196 ,197 ,198 ,199 ,200 ,201, 202, 203, 204, 205, 206,
+       207, 208, 209, 210, 211, 212, 214, 215, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 231, 232, 233, 234, 236, 237, 239, 
+		   244, 245, 246, 247, 248, 250, 251, 253, 254, 256, 257, 258, 259, 260, 261, 263, 264, 266, 268, 270, 271, 272, 273, 274, 275, 276, 277, 
+		   278, 280, 281, 282, 283, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 299, 300, 301, 2571, 6901, 6902, 2771)     
+            
+                          OR channel = 'Oficina'  AND CAST(trim(cod_eve_trn_mod) AS INT)  in  (1, 5, 6, 10, 11, 12, 14, 19, 21, 26, 30, 34, 36, 37, 38, 40, 50, 51, 52,
+       53, 54, 56, 57, 58, 61, 62, 63, 69, 72, 73, 78, 84, 96, 97, 98, 100, 101, 102, 104, 105, 111, 112, 114, 115, 130, 131,
+     139, 140, 142, 144, 148, 149, 150, 151, 154, 159, 160, 162, 163, 164, 166, 167, 170, 171, 175, 176, 178, 181, 182, 185, 
+	   186, 188, 189, 199, 200, 206, 207, 214, 215, 220, 224, 225, 227, 228, 229, 234, 235, 236, 239, 244, 245, 246, 247, 249, 
+	   250, 251, 253, 254, 257, 258, 259, 260, 261, 266, 268, 275, 276, 277, 278, 280, 281, 283, 290, 293, 299, 300, 301, 2571,
+	   5001, 5801, 6901, 6902, 2771)   
+       
+                         OR channel = 'ATM'  AND CAST(trim(cod_eve_trn_mod) AS INT) NOT IN (120, 121, 127, 141)   )
+            
+                     GROUP BY alta_type, channel, cod_eve_trn_mod, des_eventos) hh 
+       
+       ) gg
+      
+         WHERE gg.indeks < 11 
+               "); 
+
+branch[ , -6];
+
+bbvaes[ , -6];
+
+```

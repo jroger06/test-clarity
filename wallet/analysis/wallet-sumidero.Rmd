@@ -1,0 +1,482 @@
+
+Estudio del dato disponible de BBVA Wallet - Sumidero
+---
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- "[Wallet]: Estudio del dato disponible de BBVA Wallet en Sumidero"
+
+keywords  <- 'wallet, digital, online, bbva.es, transaccionalidad, navegacion, mailing'  
+```
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(grid))
+suppressMessages(library(hexbin))
+suppressMessages(library(lattice))
+suppressMessages(library(reshape))
+suppressMessages(library(plyr))
+suppressMessages(library(stringr))
+suppressMessages(library(digest))
+
+options(warn=-1, scipen=3, width=150)
+source('~/bda_clarity/tools/methods_connect.R') ;
+source('~/bda_clarity/tools/warehouse_basics.R') ;
+source('~/bda_clarity/tools/write.hive.R') ;
+
+```
+
+
+**Sumidero: traza de un cliente a través de la app Wallet**
+
+Accedemos al dato de Sumidero para intentar ver la traza que deja un cliente en su paso por la aplicación Wallet.
+Empezamos viendo qué dato tenemos en la tabla Hive de muestra extraída de Sumidero, ubicada en sumidero_master.weblogs.
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_sumidero_masters_web_logs as
+                  select * from sumidero_master.weblogs where upper(appname) like '%WALL%'")
+
+qhive("select appname,
+      appversion,
+      appcountry,
+      session,
+      uid,
+      user_id,
+      platform,
+      platformversion,
+      device,
+      method,
+      connection,
+      extra1,
+      extra2,
+      extra3,
+      source,
+      date
+      from da_martalamela.wallet_sumidero_masters_web_logs LIMIT 10")
+```
+
++ La variable _method_ marca la traza del cliente por lo que parece, así que hacemos un conteo de qué valores toma y con qué frecuencia:
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+method <- qhive("select method,
+                  count(distinct user_id) as count_distinct_user_id,
+                  count(*) as count_all
+                  from da_martalamela.wallet_sumidero_masters_web_logs
+                  group by method
+                  order by count_all desc")
+head(method)
+```
+
++ ¿Cuál es el identificador de usuario válido? Existen uid, userid, user_id y clientid así que hacemos algunos conteos y comprobamos cómo se relacionan entre sí:
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select count(distinct uid)
+      from da_martalamela.wallet_sumidero_masters_web_logs
+      where uid is not null")
+qhive("select count(distinct userid)
+      from da_martalamela.wallet_sumidero_masters_web_logs
+      where userid is not null")
+qhive("select count(distinct clientid)
+      from da_martalamela.wallet_sumidero_masters_web_logs
+      where clientid is not null")
+qhive("select count(distinct user_id)
+      from da_martalamela.wallet_sumidero_masters_web_logs
+       where user_id is not null")
+```
+
+Descartamos userid y clientid por no estar informados. Además uid hace referencia al hash del indentificador hardware del terminal.
+Parece que el identificador único de cliente que debemos utilizar viene dado por la variable user_id, que habrá que asociar con su código único de persona. **¿MÉTODO DE HASHEO?**
+Como sólo está informado en algunos casos, tendremos que ver en cuántos y si podemos aumentar la tasa de informados haciendo la asociación terminal-cliente (uid-user_id).
+
+
++ ¿Qué información tienen las variables extra1, extra2 y extra3?
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select extra1,
+      count(distinct user_id) as count_distinct_user_id,
+      count(*) as count_all
+      from da_martalamela.wallet_sumidero_masters_web_logs
+      where extra1 is not null and extra1 != ''
+      group by extra1
+      order by count_all desc
+      LIMIT 10")
+qhive("select extra2,
+      count(distinct user_id) as count_distinct_user_id,
+      count(*) as count_all
+      from da_martalamela.wallet_sumidero_masters_web_logs
+      where extra2 is not null and extra2 != ''
+      group by extra2
+      order by count_all desc
+      LIMIT 10")
+qhive("select extra3,
+      count(distinct user_id) as count_distinct_user_id,
+      count(*) as count_all
+      from da_martalamela.wallet_sumidero_masters_web_logs
+      where extra3 is not null and extra3 != ''
+      group by extra3
+      order by count_all desc
+      LIMIT 10")
+
+qhive("select extra1, method,
+      count(distinct user_id) as count_distinct_user_id,
+      count(*) as count_all
+      from da_martalamela.wallet_sumidero_masters_web_logs
+      where extra1 is not null and extra1 != ''
+      group by extra1, method
+      order by count_all desc
+      LIMIT 10")
+qhive("select extra2, method,
+      count(distinct user_id) as count_distinct_user_id,
+      count(*) as count_all
+      from da_martalamela.wallet_sumidero_masters_web_logs
+      where extra2 is not null and extra2 != ''
+      group by extra2, method
+      order by count_all desc
+      LIMIT 10")
+qhive("select extra3, method,
+      count(distinct user_id) as count_distinct_user_id,
+      count(*) as count_all
+      from da_martalamela.wallet_sumidero_masters_web_logs
+      where extra3 is not null and extra3 != ''
+      group by extra3, method
+      order by count_all desc
+      LIMIT 10")
+```
+
++ ¿Hay otros appname asociados a valores de method que pueden parecer de WALLET?
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select method, appname, count(*) as conteo
+      from sumidero_master.weblogs where method in ('StickerMovil-Info','WalletInvocation','cancelWalletVodafone',
+      'appStandalonePushWalletBubble','appStandaloneWalletHCEScreenDischarge',
+      'appStandaloneMenuItemGoToWallet','traceWallet','appStandaloneCloseWalletBubble',
+      'getWalletStatementByMonth','StickerMovil-Bloquear','getDniListFromWalletList',
+      'transferFromBBVAAccountToWallet','appStandaloneWalletHCEScreenContinue',
+      'transferFromWalletToWallet','get_WalletLimit','lockWallet',
+      'appStandaloneInstallWalletFromBubble','getWalletBalance','StickerMovil-CambiarPIN',
+      'appStandaloneShowWalletBubble')
+      group by appname, method")
+```
+
+Se ha realizado una petición de extracción de datos de Sumidero para todo el histórico disponible, aplicando el filtro appname='wall'. La tabla se ha almacenado en sumidero_master.weblogs_wallet. Veámos qué contiene (ya es DATO REAL de aplicación WALLET) basándonos en lo que hemos podido comprobar anteriormente:
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+qhive("select appname,
+      appversion,
+      appcountry,
+      session,
+      uid,
+      user_id,
+      platform,
+      platformversion,
+      device,
+      method,
+      connection,
+      extra1,
+      extra2,
+      extra3,
+      source,
+      date
+      from sumidero_master.weblogs_wallet LIMIT 10")
+
+qhive("select method,
+      count(distinct user_id) as count_distinct_user_id,
+      count(*) as count_all
+      from sumidero_master.weblogs_wallet
+      group by method
+      order by count_all desc
+      LIMIT 10")
+
+qhive("select method, extra3,
+      count(distinct user_id) as count_distinct_user_id,
+      count(*) as count_all
+      from sumidero_master.weblogs_wallet
+      where extra3 is not null and extra3 != ''
+      group by method, extra3
+      order by count_all desc
+      LIMIT 10")
+```
+
+Hacemos la asociación terminal-cliente (uid-user_id) para ver en cuántos casos podemos identificar al cliente que realiza la operativa en la app Wallet:
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+
+qhive("select count(distinct uid)
+      from sumidero_master.weblogs_wallet")
+qhive("select count(distinct user_id)
+      from sumidero_master.weblogs_wallet
+      where user_id != '' and user_id is not null")
+
+# Asociación 1-1
+# Buscamos si esos uid de terminal tienen algún registro más con user_id vacío y le pegamos nuestro user_id identificado
+# Si hay varios user_id asociados a un mismo uid, elegimos el que más veces se repita
+do.hive("CREATE TABLE IF NOT EXISTS da_martalamela.wallet_asociacion_uid_user_id AS 
+        SELECT
+          uid, 
+          user_id 
+        FROM 
+          (
+          SELECT 
+            uid,
+            user_id, 
+            rank() over (PARTITION BY uid ORDER BY connections DESC) as rank
+          FROM 
+            ( 
+            SELECT
+              uid, 
+              user_id, 
+              count(*) as connections
+            FROM sumidero_master.weblogs_wallet
+              where user_id != '' AND user_id is not null
+            GROUP BY 
+              uid, 
+              user_id 
+            ) V
+          ) R
+        WHERE rank=1")
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_weblogs_wallet_user_id as
+      select a.*, b.user_id as user_id_not_null
+      from sumidero_master.weblogs_wallet a
+      left join da_martalamela.wallet_asociacion_uid_user_id b
+      on a.uid=b.uid")
+
+qhive("select count(distinct user_id_not_null)
+      from da_martalamela.wallet_weblogs_wallet_user_id
+      where user_id_not_null is not null")
+```
+
+
+**Hasheado SH1 a través del DNI de cliente:**
+
+Sacamos de TxC todos los cod_pers_trs que tienen algún registro asociado a WALLET, bien por el cod_serv_dv 101/102 o bien por el cod_trnfims entre los códigos de transacción etiquetados como WALLET. Después lo cruzamos con da_pro.clientes_corp para tener su DNI y ya poder realizar el hasheo.
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_cod_pers_trs_hasheo as
+select distinct cod_pers_trs
+from da_pro.transacciones_por_canal
+where (cast(cod_serv_dv as int) in (101,102)
+or (trim(cod_trnfims) like '00001492'
+or trim(cod_trnfims) like '00001493'
+or trim(cod_trnfims) like '00001494'
+or trim(cod_trnfims) like '00001663'
+or trim(cod_trnfims) like '00001684'
+or trim(cod_trnfims) like 'ADCTT007'
+or trim(cod_trnfims) like 'TCTFTW35'
+or trim(cod_trnfims) like 'TCTFTYYJ'
+or trim(cod_trnfims) like 'TCTFTYYK'
+or trim(cod_trnfims) like 'TCTFTYYL'))
+and cast(partition_id as int) >= 20141031")
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_dni_hasheo as
+        select a.cod_pers_trs,
+        b.cod_documps1
+        from da_martalamela.wallet_cod_pers_trs_hasheo a
+        left join da_pro.clientes_corp b
+        on a.cod_pers_trs = b.cod_persctpn")
+```
+
+Usamos un script de Python para hashear esos DNI, y los user_id asociados los guardamos en una tabla Hive en da_martalamela.wallet_output_padding.
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_weblogs_wallet_all as
+      select a.*, b.cod_pers_trs, b.cod_documps1
+      from da_martalamela.wallet_weblogs_wallet_user_id a
+      left join da_martalamela.wallet_output_padding b
+      on cast(trim(a.user_id_not_null) as string)=cast(trim(b.user_id) as string)")
+
+qhive("select count(distinct cod_pers_trs)
+      from da_martalamela.wallet_weblogs_wallet_all
+      where cod_pers_trs is not null")
+```
+
+Hash
+
+```{r eval=FALSE, echo=FALSE, cache=TRUE}
+# Crear tabla con el dni de los clientes y un campo rellenando con 0s para conseguir un largo de 20
+do.hive("create table IF NOT EXISTS da_mariadrav.hash as
+          select distinct trim(cod_documps1) as cod_documps1, lpad(trim(cod_documps1), 20, '0') as cod_documps1_20 
+             from da_pro.clientes_corp
+             where cod_documps1 is not null")
+
+hash <- qhive("select cod_documps1_20 from da_mariadrav.hash")
+```
+
+```{r eval=FALSE, echo=FALSE, cache=TRUE}
+# aplicar la funcion de hasheo
+dig <- function(x) digest(x, algo="sha1", serialize=FALSE)
+
+hash$hasheo <- sapply(hash$cod_documps1_20, dig, simplify=TRUE, USE.NAMES=FALSE)
+
+```
+
+```{r eval=FALSE, echo=FALSE, cache=TRUE}
+#guardar una tabla con el resultado
+write.hive(hash, 'da_mariadrav.hasheo_clientes_corp')
+
+```
+
+```{r eval=FALSE, echo=FALSE, cache=TRUE}
+#colnames(hash) <- c("cod_documps1", "cod_documps1_20", "hasheo")
+#rownames(hash) <- NULL
+
+```
+Buscamos las siguientes funcionalidades (solicitadas por Investigación de Mercado):
+1. activación de tarjetas
+2. bloqueo de tarjetas
+3. pago móvil, diferenciando si ha sido con o sin sticker
+4. consulta de movimientos, 
+5. aplazamiento de pagos, 
+6. recepción de notificaciones 
+7. uso de promociones
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+method <- qhive("select method, count(distinct user_id_not_null) as count_dist_user_id_not_null
+      from da_martalamela.wallet_weblogs_wallet_user_id
+      group by method
+      order by count_dist_user_id_not_null desc")
+method[1:150,]
+```
+# ver el contenido de extra3 para los valores que podrian contener las funcionalidades:
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+  # 1. Activacion tarjetas
+activ_card <- qhive("select method, extra3, count(distinct user_id_not_null) as count_dist_user_id_not_null 
+                    from da_martalamela.wallet_weblogs_wallet_user_id
+                    where upper(method) like '%ACTIV%'
+                    group by method, extra3
+                    order by  count_dist_user_id_not_null desc")
+
+activ_card_method <- arrange(ddply(activ_card, .(method), summarize, sum_dist_user_id_not_null=sum(count_dist_user_id_not_null)),desc(sum_dist_user_id_not_null))
+
+ggplot(activ_card_method, aes(x = factor(method), y = sum_dist_user_id_not_null, fill = method, label=sum_dist_user_id_not_null, ymax = max(sum_dist_user_id_not_null))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# usuarios distinto") + ggtitle("# usuarios por tipo de bloqueo")  + theme(legend.position="none") + geom_text(aes(y = sum_dist_user_id_not_null), position = "stack", size = 3.5)
+
+  #Analizar "CardActivationButton" y "CardActivation" ver si todos los "CardActivation" aparecen en "CardActivationButton"
+qhive("select a.user_id_not_null, count(*) as conteo_user_noButton
+from (select distinct user_id_not_null from da_martalamela.wallet_weblogs_wallet_user_id where method='CardActivation') a 
+left join (select distinct user_id_not_null from da_martalamela.wallet_weblogs_wallet_user_id where method='CardActivationButton') b 
+on a.user_id_not_null=b.user_id_not_null
+where b.user_id_not_null is null
+group by a.user_id_not_null")
+      #Hay 126 user_id que aparecen en CardActivation pero no en CardActivationButton
+```
+
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+  # 2. Bloqueo tarjetas
+block <- qhive("select method, extra3, count(distinct user_id_not_null) as count_dist_user_id_not_null 
+               from da_martalamela.wallet_weblogs_wallet_user_id 
+               where upper(method) like '%BLOCK%'
+               group by method, extra3")
+
+block_method <- arrange(ddply(block, .(method), summarize, sum_dist_user_id_not_null=sum(count_dist_user_id_not_null)), desc(sum_dist_user_id_not_null))
+
+ggplot(block_method, aes(x = factor(method), y = sum_dist_user_id_not_null, fill = method, label=sum_dist_user_id_not_null, ymax = max(sum_dist_user_id_not_null))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# usuarios distinto") + ggtitle("# usuarios por tipo de bloqueo")  + theme(legend.position="none") + geom_text(aes(y = sum_dist_user_id_not_null), position = "stack", size = 3.5)
+
+```
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+  # 3. pago móvil, diferenciando si ha sido con o sin sticker
+mobpay <- qhive("select method, extra3, count(distinct user_id_not_null) as count_dist_user_id_not_null 
+               from da_martalamela.wallet_weblogs_wallet_user_id 
+               where upper(method) like '%PAY%'
+               group by method, extra3")
+
+arrange(ddply(mobpay, .(method), summarize, sum_dist_user_id_not_null=sum(count_dist_user_id_not_null)), desc(sum_dist_user_id_not_null))
+
+  # No hay un epigrafe pago con movil. A ver si con PushNotification podemos sacar algo
+pushnotif <- qhive("select method, extra3, count(distinct user_id_not_null) as count_dist_user_id_not_null 
+               from da_martalamela.wallet_weblogs_wallet_user_id 
+               where method = 'PushNotification'
+               group by method, extra3
+               order by count_dist_user_id_not_null desc")
+
+arrange(pushnotif, desc(count_dist_user_id_not_null))[1:20,]
+  
+  # Parece que la variable extra3 tiene toda la info que necesitamos: Accion;importe;BIN o tipo de pago;Comercio;Modeda. Vamos a separar el contenido de la variable en columnas
+pushnotif <- qhive("select  method, 
+                            split(extra3, ';')[0] as accion,
+                            split(extra3, ';')[1] as importe,
+                            split(extra3, ';')[2] as tip_pago,
+                            split(extra3, ';')[3] as comercio,
+                            split(extra3, ';')[4] as moneda,
+                            count(distinct user_id_not_null) as count_dist_user_id_not_null 
+               from da_martalamela.wallet_weblogs_wallet_user_id 
+               where method = 'PushNotification'
+               group by method, extra3
+               order by count_dist_user_id_not_null desc")
+
+head(pushnotif)
+
+    # accion
+pushnotif_accion <- ddply(pushnotif, .(accion), summarize, sum_dist_user_id_not_null=sum(count_dist_user_id_not_null))
+
+ggplot(pushnotif_accion, aes(x = factor(accion), y = sum_dist_user_id_not_null, fill = accion, label=sum_dist_user_id_not_null, ymax = max(sum_dist_user_id_not_null))) + geom_bar(stat = "identity", width = .7) + theme(axis.title.x = element_blank(), axis.text.x  = element_text(size=10)) + ylab("# usuarios distintos") + ggtitle("# usuarios por accion")  + theme(legend.position="none") + geom_text(aes(y = sum_dist_user_id_not_null), position = "stack", size = 3.5)
+
+    # tipo de pago: cuando aparece importe es compras online? sera la tarjeta virtual que probablemente no tiene BIN
+
+pushnotif_comercio <- ddply(pushnotif[pushnotif$importe==pushnotif$tip_pago,], .(comercio), summarize, sum_dist_user_id_not_null=sum(count_dist_user_id_not_null))
+
+
+
+```
+
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+  # 4. consulta de movimientos
+movim <- qhive("select method, extra3, count(distinct user_id_not_null) as count_dist_user_id_not_null 
+               from da_martalamela.wallet_weblogs_wallet_user_id 
+               where upper(method) like '%PAY%' or upper(method) like '%MOVE%' 
+               group by method, extra3")
+
+
+arrange(ddply(movim, .(method), summarize, sum_dist_user_id_not_null=sum(count_dist_user_id_not_null)), desc(sum_dist_user_id_not_null))
+
+arrange(movim[grep("MOVE",toupper(movim$method)),], desc(count_dist_user_id_not_null))[1:30,]
+iris[grep("osa", iris$Species), ]
+
+# Escoger "MobilePaymentMenuMovements" 
+```
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+  # 5. aplazamiento de pagos
+financi <- qhive("select method, extra3, count(distinct user_id_not_null) as count_dist_user_id_not_null 
+               from da_martalamela.wallet_weblogs_wallet_user_id 
+               where upper(method) like '%FINAN%' or upper(method) like '%INSTALL%' 
+               group by method, extra3")
+
+arrange(financi, desc(count_dist_user_id_not_null))[1:100,]
+
+arrange(ddply(financi, .(method), summarize, sum_dist_user_id_not_null=sum(count_dist_user_id_not_null)), desc(sum_dist_user_id_not_null))
+
+#Escoger todo "%Finance%"
+```
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+  # 6. recepción de notificaciones
+notifi <- qhive("select method, extra3, count(distinct user_id_not_null) as count_dist_user_id_not_null 
+               from da_martalamela.wallet_weblogs_wallet_user_id 
+               where upper(method) like '%NOTIFI%' and upper(method) ne 'PUSHNOTIFICATION'
+               group by method, extra3")
+
+arrange(notifi, desc(count_dist_user_id_not_null))[1:100,]
+
+arrange(ddply(notifi, .(method), summarize, sum_dist_user_id_not_null=sum(count_dist_user_id_not_null)), desc(sum_dist_user_id_not_null))
+
+```
+
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+  # 7. uso de promociones
+promo <- qhive("select method, extra3, count(distinct user_id_not_null) as count_dist_user_id_not_null 
+               from da_martalamela.wallet_weblogs_wallet_user_id 
+               where upper(method) like '%PROMO%'
+               group by method, extra3")
+
+arrange(promo, desc(count_dist_user_id_not_null))[1:100,]
+
+arrange(ddply(promo, .(method), summarize, sum_dist_user_id_not_null=sum(count_dist_user_id_not_null)), desc(sum_dist_user_id_not_null))
+```
+
+

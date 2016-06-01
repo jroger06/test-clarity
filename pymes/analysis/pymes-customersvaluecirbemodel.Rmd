@@ -1,0 +1,1180 @@
+---
+title: 'Pymes: Modelo de Valor para Clientes estimado a partir de datos de CIRBE'
+author: "BBVA D&A - Customer Intelligence - César de Pablo"
+date: "11/2/2016"
+output: html_document
+---
+========================================================
+
+  
+```{r, echo=FALSE}
+# This is the first mandatory section.
+
+title     <- '[Pymes] Modelo de Valor para Clientes estimado a partir de datos de CIRBE'
+keywords  <- 'pymes, sme, value models, valor, balances, P&L'
+
+```
+
+
+```{r load DB libraries, echo=FALSE, warning=FALSE, message=FALSE}
+
+library(DBI)
+library(rJava)
+source('../tools/methods_connect.R') ;
+source('../tools/warehouse_basics.R')
+source('../tools/multiplot.R') ;
+
+library(knitr)
+knitr::opts_chunk$set(cache=TRUE, tidy=TRUE, eval=TRUE, echo=FALSE, warning=FALSE, message=FALSE, fig.width = 8, fig.height = 6 )
+
+library(ggplot2)
+library(gridExtra)
+
+
+library(plyr)
+library(dplyr)
+library(reshape2)
+library(caret)
+library(gbm)
+
+# install.packages("/DYA/e043330/Pymes/Metrics_0.1.1.tar.gz", repos = NULL, type = "source")
+library(Metrics)
+
+source('../script_incubator/non_clarity_logic/PymesAnalytics/Pymes_TablonUtils.R')
+source('../script_incubator/non_clarity_logic/PymesAnalytics/Pymes_Clientes_Valor_modeloCIRBE.R')
+source('../script_incubator/non_clarity_logic/PymesAnalytics/Pymes_EvaluationMeasures.R')
+source('../applications/pymes_analytics/helper_functions.R')
+
+```
+
+
+## Objetivo 
+
+Construir un modelo de Valor para empresas PYMES de las que tenemos datos de CIRBE. 
+
+En este análisis se exploran y comparan varios modelos para la estimación del valor del cliente a partir de los datos de CIRBE.
+
+  - Modelos univariable basados solo en el importe dispuesto en el sistema (cirbe_sistema)
+  - Modelos univariable basados en el importe dispuesto en el sistema (cirbe_sistema) pero que se ajustan a cada uno de los segmentos: 35 y 36 
+  - Modelos de aprendizaje que usan todos los datos de CIRBE en el sistema disponibles.  
+  
+Como variable a modelar se elige el margen anual (margen_a) calculado a partir de la rentabilidad como (total_activo + margen por servicios)
+  
+  
+## Datos  
+  
+  Tablon clientes - tablon con la información de clientes construido a partir de dato de PI (Ver Pymes_TablonClientes.Rmd) 
+     - Información de cliente (da_pro.clientes_corp)
+     - Cuentas anuales (da_pymes.balances, da_pymes.cabeceras) 
+     - Rentabilidad de cliente (da_pymes.rentabilidad)
+     - Datos de CIRBE (da_pymes.cirbe)
+     
+[TODO] Ingestar de manera recurrente balances, cabeceras y CIRBE.
+
+ 
+[TODO] Ingestar de manera recurrente balances, cabeceras y CIRBE.
+ 
+
+```{r Carga de datos de tablon cliente, cache=TRUE, echo=FALSE, results='hide'}
+
+df.tablon_valor_balance <- load_tablon_clientes()
+nrow(df.tablon_valor_balance)
+
+```
+
+
+### Parámetros usados para el análisis
+
+Establecemos los parámetros generales para el análisis:
+
+  - **n.cuota**                 : Numero de tramos en la variable cuota CIRBE. 
+  - **min.cirbe.sistema**       : Se descartaran los clientes con menos de este importe en CIRBE directa para modelar 
+  - **max.cirbe.sistema**       : Se descartaran los clientes com mas de este importe en CIRBE directa para modelar. Hay varias empresas asociadas a BBVA con valores extremos
+  - **min.cuota_cirbe.modelar** : Se filtran los clientes con una cuota menor de cara a modelar el valor
+  - **max.roa.modelar**         : Se filtran los clientes donde la 'ROA' es excesivamente alta - se eliminan como no realista
+
+
+```{r Parametros del análisis, echo=TRUE}
+
+n.cuota = 10                       
+
+min.cirbe.sistema = 6000           # Importe CIRBE minima  
+max.cirbe.sistema = 10^7           # Importe CIRBE máxima 
+min.cuota_cirbe.modelar = 0.7      # Valor cuota minimo usado para modelar
+max.roa.modelar = 0.5              # Valor ROA máximo - ROA por encima es extraño
+
+# cortes 
+
+```
+
+
+### Estadísticas del conjunto de trabajo
+
+Vemos primero una muestra de los datos...
+
+```{r Dataframe de trabajo, echo=FALSE}
+
+df.cirbe_valor <- df.tablon_valor_balance %>%
+  select(c(codigo, nif, margen_a, cod_segmsubo, cirbe_sistema, cuota_cirbe))
+
+
+kable(head(df.cirbe_valor, n = 10))
+
+```
+
+Obtenemos números descriptivos sobre el conjunto de tablon clientes y el tipo de información que tienen: 
+
+  - Hay un numero bastante superior (tres veces más) de clientes del segmento 36 
+  - En segmento 35: 1 de cada 6 clientes tiene un importe en CIRBE inferior al mínimo considerado: 6000 euros  
+  - En segmento 36: mas de 1/3 de los clientes tiene un importe en CIRBE inferior a 6000 euros 
+
+
+```{r Estadísticas del dataframe}
+
+df.cirbe_valor_stats <- df.cirbe_valor %>%
+   transmute(
+     con_nif  = !is.na(nif),
+     con_codigo = !is.na(codigo),
+     segmento = cod_segmsubo, 
+     margen_sign = factor(sign(margen_a)),
+     dispuesto_sobre_min = (cirbe_sistema > min.cirbe.sistema)
+     )
+
+```
+
+```{r}
+ftable(segmento ~ dispuesto_sobre_min, data = df.cirbe_valor_stats[df.cirbe_valor_stats$margen_sign == 1,] )
+
+```
+
+
+(Estos cuentas aplican para los clientes con margen positivo)
+
+Esta tabla resume las estadísticas del signo del margen para cada segmento:  
+
+```{r}
+
+table.stats.signo <- ftable( margen_sign ~ segmento, data = df.cirbe_valor_stats)
+
+kable(as.data.frame(table.stats.signo))
+
+```
+
+
+Para modelar el valor, vamos a quedarnos con los clientes que tienen margen positivo. 
+
+
+###  ¿Qué relación existe entre el margen y la vinculación de un cliente? ¿Influye además el volumen de lo dispuesto segun CIRBE?
+
+ - Construimos el dataset con todas las variables que entrarán en los modelos
+ - Filtramos los clientes con margen positivo. [TODO] Modelar clientes con margen negativo o cero
+ - Calculamos cuota CIRBE ( dispuesto banco / dispuesto sistema ) , deciles de cuota, ROA estimado (margen/dispuesto_banco )  
+
+```{r Calculo ROA y deciles de CIRBE, fig.height=4, fig.height=4 }
+
+# Filtramos a un dataset más manejable 
+df.cirbe_valor <- df.tablon_valor_balance %>%
+  filter(!is.na(cuota_cirbe)) %>%
+  filter(margen_a > 0) %>%
+  select(c(codigo, nif, margen_a, cod_segmsubo, cirbe_sistema, ind_balance, cod_cnae_1, empleados, cuota_cirbe, matches("^imp_d.*sba$"))) %>%
+  mutate(
+    cuota_cirbe_q = round(n.cuota * cuota_cirbe),
+    roa = ifelse(cuota_cirbe*cirbe_sistema > 0 , margen_a/(cuota_cirbe*cirbe_sistema), NA )
+  )  
+
+```
+
+
+#### Distribución del margen en función de la cuota CIRBE
+
+```{r Plot: distribucion de margen en función de cuota CIRBE}
+
+df.cirbe_valor %>%
+  sample_n(10000) %>%
+  ggplot(aes(x=factor(cuota_cirbe_q), y=margen_a)) +
+  geom_boxplot(size = .75) +
+  geom_jitter(alpha = .1) +
+  scale_y_log10() +
+  xlab("Cuota CIRBE") +
+  ylab("log(margen)") 
+
+
+```
+
+  - El margen es relativamente constante para diferentes niveles de vinculación. Se aprecian anomalías en los dos extremos de nivel de vinculación (totalmente vinculados y nada vinculados)
+
+#### Distribución del "ROA" en funcion de la cuota CIRBE y el importe dispuesto en el sistema
+
+Visualizamos el "ROA" en funcion de lo dispuesto en el sistema y de la vinculacion. Solo se muestran las curvas ajustadas, entre los puntos de datos hay una gran dispersion particularmente para importes pequeños de CIRBE.
+  
+```{r Plot: ROA en funcion de cuota CIRBE y dispuesto en sistema}
+
+df.cirbe_valor %>%
+  filter(cuota_cirbe >= 0.1 & cuota_cirbe <= 0.9 ) %>%
+  filter(cirbe_sistema > min.cirbe.sistema ) %>%
+  ggplot(aes(x=cirbe_sistema, y=margen_a/(cuota_cirbe*cirbe_sistema), color = factor(cuota_cirbe_q), fill = factor(cuota_cirbe_q)) ) +  
+  geom_smooth(se = FALSE, level = 0.75) +
+  coord_cartesian(ylim = c(0,0.25)) +
+  xlim(5 * 10^4, 10^6) +
+  xlab("CIRBE dispuesto directa") +
+  ylab("Margen/dispuesto banco") +
+  ggtitle("\"ROA\" medio en funcion de cuota y dispuesto en el sistema")
+
+```
+
+ - Se aprecia que el ROA disminuye con la vinculación. 
+ - En general las curvas acaban convergiendo a una curva común que se aprecia para los valores de cuota CIRBE > 0.7 - son aquellos que se han escogido para modelar. A medida que una empresa se vincula se obtienen condiciones más favorables.  
+ - Hay una dependencia no lineal del ROA con el importe en CIRBE. A mayor importe, la rentabilidad (ROA) decrece. Se explica que las empresas que tienen mayor importe tambien obtienen condiciones más favorables.
+ 
+ 
+Vemos lo mismo pero para los más vinculados. Puesto que el numero de puntos de datoses muy grande aumentamos la transparencia para tratar de ver la curva que se ajusta. Aunque hay mucha dispersion, especialmente para los importes de menor cuantía, se aprecia claramente la dependencia del ROA con el importe. 
+
+ - Además filtraremos: 
+     - los que tienen CIRBE en sistema muy alta (> 10^7) o muy baja (< 6000)
+
+
+```{r Plot: ROA para los más vinculados, warning=FALSE}
+
+plot.roa <- function (df) {
+  df %>%
+    ggplot(aes(x=cirbe_sistema, y=roa) ) +  
+    geom_smooth(se = FALSE, level = 0.75) +
+    geom_point(alpha = 0.01) + 
+    coord_cartesian(ylim = c(0,0.25)) +
+    xlim(6*10^3, 10^6) +
+    xlab("CIRBE dispuesto directa") +
+    ylab("Margen/dispuesto banco") +
+    ggtitle("\"ROA\" medio en funcion de cuota y dispuesto en el sistema")
+}
+
+
+df.cirbe_valor %>%
+  filter(cuota_cirbe  >= min.cuota_cirbe.modelar ) %>%
+  filter(cirbe_sistema > min.cirbe.sistema ) %>%
+  filter(cirbe_sistema < max.cirbe.sistema )  %>%  
+  plot.roa()
+
+
+```
+
+
+### Modelo de Valor Clientes -  ¿Podemos ajustar un modelo sencillo que use únicamente el cirbe_sistema (importe dispuesto en el sistema según CIRBE)?
+
+Previamente hemos utilizado un ajuste sencillo para el valor: 
+  $$Valor = \frac{cirbe\_{sistema}}{cuota\_{CIRBE}$$. 
+
+El inconveniente de este ajuste es que sobreestima el valor para los clientes más vinculados. 
+
+Comprobada que la relacion entre el valor y cirbe_sistema es más compleja, buscamos ajustar la curva del ROA para estimar el valor. 
+
+  $$Valor = ROA * cirbe\_{sistema}$$ 
+
+
+```{r Funcion: Estandarización de valores CIRBE}
+
+std_cirbe <- function (df) {
+  df$cuota_cirbe_std = (df$cuota_cirbe - mean(df$cuota_cirbe))/ sd(df$cuota_cirbe)
+  df$cirbe_sistema_std = (df$cirbe_sistema - mean(df$cirbe_sistema))/ sd(df$cirbe_sistema)
+  
+  return(df)
+}
+
+```
+
+
+Para ajustar los parámetros del modelo:
+
+  - Filtramos por cuota CIRBE > 0.7 (**vinculados**)
+  - Filtramos por CIRBE dispuesta > 6000 euros
+  - Calculamos el ROA y nos quedamos con los que tienen algo razonable - filtramos los de ROA > 0.5 
+
+
+```{r Filtros para la seleccion de los datos de ajuste del modelo}
+
+# Filtramos
+df <- df.cirbe_valor %>%
+  filter(cuota_cirbe >= min.cuota_cirbe.modelar ) %>%
+  filter(cirbe_sistema > min.cirbe.sistema )  %>%
+  filter(cirbe_sistema < max.cirbe.sistema )  %>%
+  filter(roa < max.roa.modelar ) %>%
+  std_cirbe()
+  
+```
+
+
+De cara a modelar, seleccionamos el 80% de los datos para ajustar el modelo y el 20% de los datos para evaluar los diferentes enfoques. 
+
+<!-- Usaremos el mismo split en los experimentos para poder hacer los experimentos comparables. -->
+
+```{r Split de datos para modelar}
+
+ratioTrain = 0.8
+set.seed(42)
+index <- createDataPartition(df$margen_a, p=ratioTrain, list=FALSE)
+
+train <- df[index,]
+test  <- df[-index,]
+
+
+```
+
+Mostramos el ROA para los conjuntos de test y training y vemos que son comparables. 
+
+```{r Distribucion del margen en los datos de training y test, warning=FALSE}
+
+plot.train <- train %>% plot.roa()
+plot.test  <- test %>%  plot.roa()
+
+multiplot(plot.train, plot.test)
+
+#[TODO]: ¿SE pueden mostrar en la misma gráfica?
+
+```
+
+#### Ajustamos varios modelos con **cirbe_sistema**
+
+Probamos varias formulas que ajustamos a una exponencial negativa:
+  - Usando el importe en miles de euros 
+  - Usando el importe en 6000 de euros
+  - Usando el logaritmo base 10 del importe dispuesto en el sistema (cirbe_sistema)
+
+Todos los modelos tienen al menos 2 parámetros: *alpha* y *beta*. Probamos algunos con un tercer parámetro (*theta*)
+
+
+```{r Modelos con cirbe_sistema, echo=TRUE}
+
+models <- list(
+  exp.div1000.all = nls("margen_a ~ (alpha + beta * exp( - beta * (cirbe_sistema/1000))) * cirbe_sistema", 
+                        data = train, start = list(alpha = 0.02, beta = 0.01) , nls.control(maxiter = 100) ),
+  
+  exp.div6000.all = nls("margen_a ~ (alpha + beta * exp( - beta * (cirbe_sistema/6000))) * cirbe_sistema", 
+                        data = train, start = list(alpha = 0.02, beta = 0.01) , nls.control(maxiter = 100) ),
+
+  exp.log10.all   = nls("margen_a ~ (alpha + beta * exp( - beta * log10(cirbe_sistema)) ) * cirbe_sistema", 
+                        data = train, start = list(alpha = 0.02, beta = 0.01) , nls.control(maxiter = 100) ),
+  
+  exp.3.log10.all = nls("margen_a ~ (alpha + theta * exp( - beta * log(cirbe_sistema)) ) * cirbe_sistema", 
+                        data = train, start = list(alpha = 0.2, beta = 0.1, theta = 1)),
+  
+  linear.glm      = glm("margen_a ~ cuota_cirbe_std + cirbe_sistema_std" , 
+                        data = train)
+)
+
+```
+
+
+```{r Genera las predicciones}
+
+train.predictions <- sapply(models, predict)
+test.predictions <- sapply(models, predict, newdata = test)
+
+```
+
+#### Distribución de las predicciones: Conjunto de test
+
+- El margen se muestra en negro como referencia. 
+
+```{r Plot de las distribuciones de las prediciones vs margen, warning=FALSE}
+
+experiments.to.plot <- colnames(test.predictions)[!colnames(test.predictions) %in% c("linear.glm")]
+plot.predictions.density(test,test.predictions,experiments.to.plot)
+
+```
+
+ - Las curvas de densidad tienen comportamiento diferente para cada segmento. En general, segmento 35 deja un margen mayor como ya sabíamos
+
+ - Por segmento, parece que hay un modelo que ajusta mejor a uno que a otro
+    - exp.div100.all para segmento 35
+    - exp.3.log10.all para segmento 36.  
+ - Los valores entre 100 y 1000 son los que más dificil son de predecir,puesto que la cantidad es relativamente pequeña el valor estimado puede ser 2 y 3 veces mayor. 
+ 
+
+#### Coeficientes de los modelos
+
+```{r Coeficientes y formulas}
+
+get.model.equation <- function(x) {
+  x <- as.character((x$call)$formula)
+  x <- paste(x[2],x[1],x[3])
+}
+
+
+coef <- sapply(models, coef)
+formulas <- sapply(models, get.model.equation)
+
+coef
+
+```
+
+
+### Modelo de valor clientes: ¿Tiene sentido ajustar una curva con diferentes parámetros por segmento? 
+
+```{r}
+
+df.cirbe_valor %>%
+  filter(cuota_cirbe >= 0.7 ) %>%
+    ggplot(aes(x=cirbe_sistema, y=roa, color = cod_segmsubo) ) +  
+    geom_smooth(se = FALSE, level = 0.75) +
+    geom_point(alpha = 0.01) + 
+    coord_cartesian(ylim = c(0,0.25)) +
+    xlim(6*10^3, 10^6) +
+    xlab("CIRBE dispuesto directa") +
+    ylab("Margen/dispuesto banco") +
+    ggtitle("\"ROA\" medio por segmento \n en funcion de cuota y dispuesto en el sistema")
+
+```
+
+ - Hay una variacion entre los margenes que se estiman para cada uno de los segmentos
+
+
+```{r}
+
+train.segmento35 <- train %>% filter(cod_segmsubo == "35")
+train.segmento36 <- train %>% filter(cod_segmsubo == "36")
+
+```
+
+Ajustamos cada uno de los modelos a un subconjunto de los datos por segmento
+
+```{r Modelos diferenciados por segmento}
+
+set.seed(42)
+
+models.segmento35 = list (
+   exp.div1000 = nls("margen_a ~ (alpha + beta * exp( - beta * (cirbe_sistema/1000))) * cirbe_sistema", 
+                               data = train.segmento35, start = list(alpha = 0.02, beta = 0.01) , nls.control(maxiter = 100) ),
+
+   exp.3.log10 = nls("margen_a ~ (alpha + theta * exp( - beta * log(cirbe_sistema)) ) * cirbe_sistema", 
+                         data = train.segmento35, start = list(alpha = 0.2, beta = 0.02, theta = 0.9), nls.control(maxiter = 300))
+  
+  
+  )
+
+models.segmento36 = list (
+  exp.div1000 = nls("margen_a ~ (alpha + beta * exp( - beta * (cirbe_sistema/1000))) * cirbe_sistema", 
+                               data = train.segmento36, start = list(alpha = 0.02, beta = 0.01) , nls.control(maxiter = 100) ),
+  
+   exp.3.log10 = nls("margen_a ~ (alpha + theta * exp( - beta * log(cirbe_sistema)) ) * cirbe_sistema", 
+                         data = train.segmento36, start = list(alpha = 0.2, beta = 0.1, theta = 1), nls.control(maxiter = 100))
+
+  )
+
+
+```
+
+
+```{r Predicciones para los modelos diferenciados por segmento}
+
+train.predictions.segmento <- list()
+test.predictions.segmento <- list()
+
+train.predictions.segmento['35'] <- list(lapply(models.segmento35, predict, newdata = train))
+test.predictions.segmento['35']  <- list(lapply(models.segmento35, predict, newdata = test))
+
+train.predictions.segmento['36'] <- list(lapply(models.segmento36, predict, newdata = train))
+test.predictions.segmento['36']  <- list(lapply(models.segmento36, predict, newdata = test))
+
+
+experiments <- names(test.predictions.segmento[['35']])
+
+train.predictions.merged <- lapply(experiments, function(experiment) {
+      tmp.predictions <- ifelse(train$cod_segmsubo == "35", 
+                          train.predictions.segmento[['35']][[experiment]], 
+                          train.predictions.segmento[['36']][[experiment]])
+      return(tmp.predictions)  
+})
+
+test.predictions.merged <- lapply(experiments, function(experiment) {
+      tmp.predictions <- ifelse(test$cod_segmsubo == "35", 
+                          test.predictions.segmento[['35']][[experiment]], 
+                          test.predictions.segmento[['36']][[experiment]])
+      return(tmp.predictions)  
+})
+
+
+names(train.predictions.merged) <- paste(experiments,'.segments', sep = "")
+names(test.predictions.merged) <- paste(experiments,'.segments', sep = "")
+
+
+```
+
+
+
+```{r Pega las prediccciones por segmento}
+
+train.predictions <- cbind(train.predictions, as.data.frame(train.predictions.merged))
+kable(head(train.predictions))
+
+test.predictions <- cbind(test.predictions, as.data.frame(test.predictions.merged))
+kable(head(test.predictions))
+
+```
+
+
+```{r Plot de las distribuciones de las prediciones vs margen - predicciones por segmento}
+
+experiments.to.plot <- c("exp.div1000.all", "exp.div1000.segments", "exp.3.log10.all", "exp.3.log10.segments")
+plot.predictions.density(test,test.predictions,experiments.to.plot)
+
+```
+
+ - Hay una pequeña variacion al ajustar por segmento, frente a ajustar con todos lo s datos. 
+ - Cada uno de los modelos (exp.div1000) o (exp2.log10) ajusta mejor un segmento
+ - Hay más diferencia entre los modelos que entre el uso de todos o parte de los datos.
+
+
+
+```{r Plot de la diferencia entre las predicciones de cada modelo por segmento, eval=FALSE}
+
+tmp <- data.frame(
+  exp.div1000.segmento35 = train.predictions.segmento[['35']][['exp.div1000']],
+  exp.div1000.segmento36 = train.predictions.segmento[['36']][['exp.div1000']]
+  ) 
+
+data.frame(tmp) %>%
+ggplot(aes(x = exp.div1000.segmento35, y = exp.div1000.segmento36)) +
+  geom_point() +
+  geom_abline(slope = 1) +
+  scale_x_log10() +
+  scale_y_log10()
+
+
+tmp <- data.frame(
+  exp.div1000.segmento35 = train.predictions.segmento[['35']][['exp.3.log10']],
+  exp.div1000.segmento36 = train.predictions.segmento[['36']][['exp.3.log10']]
+  ) 
+
+
+data.frame(tmp) %>%
+ggplot(aes(x = exp.div1000.segmento35, y = exp.div1000.segmento36)) +
+  geom_point() +
+  geom_abline(slope = 1) +
+  scale_x_log10() +
+  scale_y_log10()
+
+
+```
+
+### Modelos de valor de clientes - ¿Obtenemos mejores resultados si modelamos usando modelos de aprendizaje y más variables? ¿Cuál es el efecto?
+
+  - Probamos varios modelos usando principalmente variables de CIRBE, empleados y CNAE
+  - Probamos a usar varias transformaciones en los datos sobre la variable a predecir (margen)     
+    - natural (m)
+    - logarirmica (l_m)
+  - Probamos a usar transformaciones en los datos sobre las variables predictoras, principalmente numéricas.  
+    - natural 
+    - logartimico 
+    - Yeo Johnson (trans. a gaussiana), centrado y escalado
+  - Por el miomento estamos usando solo Gradient Boosted Machines (GBM)  
+
+
+```{r Parametros de control para los experimentos con ML}
+
+## [PARAM] Number of folds 
+n.folds = 10 
+
+## [PARAM] Number of experiments 
+n.experiments = 1
+#n.experiments = 10 
+
+## [PARAM] Sample train
+#set.seed(42)
+#sample.train = sample(index, 1000, replace = FALSE)
+
+ctrl <- trainControl(method = "repeatedCV",
+                     number = n.folds, 
+                     repeats = n.experiments)
+
+```
+
+```{r Variables comunes a los modelos, echo=TRUE}
+
+names.tablon_clientes <- names(df.tablon_valor_balance)
+names.dispuesto_banco <- names.tablon_clientes[grep("^imp_d.*sba$", x = names.tablon_clientes)]
+
+# Eliminamos la variable imp.dirfsba que sale sin variacion
+names.dispuesto_banco <- names.dispuesto_banco[!names.dispuesto_banco %in% c("imp_drefsba")]
+
+features.dispuesto_banco <- names.dispuesto_banco
+features.base <- c("cod_segmsubo")
+
+features <- c(features.base, features.dispuesto_banco)
+
+```
+
+```{r Formulas para los modelos, echo=TRUE}
+
+f.valor.m.c     <- build.formula("margen_a", features)
+f.valor.l_m.c   <- build.formula("log10(margen_a + 1 )", features)
+f.valor.l_m.l_c <- build.log.formula("log10(margen_a + 1)", features.base, features.dispuesto_banco)
+
+```
+
+
+#### Modelo GBM - margen ~ cirbe  (gbm.m.c) 
+
+```{r GBM valores naturales, message=FALSE, warning=FALSE, results='hide', cache=TRUE}
+
+set.seed(42)
+model.gbm.m.c <- train( f.valor.m.c,
+                          data = train,
+                          method = "gbm",
+                          trControl = ctrl,
+                          verbose = TRUE) 
+```
+
+```{r}
+
+model.gbm.m.c
+plot(model.gbm.m.c)
+
+model.gbm.m.c$finalModel
+
+varImp(model.gbm.m.c)
+
+```
+
+#### Modelo GBM - log(margen) ~ cirbe  (gbm.l_m.c) 
+
+```{r GBM margen transformado a logaritmico, message=FALSE, warning=FALSE, results='hide', cache=TRUE}
+set.seed(42)
+model.gbm.l_m.c <- train( f.valor.l_m.c,
+                          data = train,
+                          method = "gbm",
+                          trControl = ctrl,
+                          verbose = TRUE) 
+```
+
+```{r}
+
+model.gbm.l_m.c
+plot(model.gbm.l_m.c)
+
+model.gbm.l_m.c$finalModel
+
+varImp(model.gbm.l_m.c)
+
+```
+
+
+#### Modelo GBM - log(margen) ~ log(cirbe) (dbm.l_m.l_c)
+
+
+```{r GBM con log transformation para margen y features, message=FALSE, warning=FALSE, results='hide', cache=TRUE}
+set.seed(42)
+model.gbm.l_m.l_c <- train( f.valor.l_m.l_c,
+                          data = train,
+                          method = "gbm",
+                          trControl = ctrl,
+                          verbose = TRUE) 
+```
+
+
+```{r}
+
+model.gbm.l_m.l_c
+plot(model.gbm.l_m.l_c)
+
+model.gbm.l_m.l_c$finalModel
+
+varImp(model.gbm.l_m.l_c)
+
+```
+
+#### Modelo GBM - margen ~  "YeoJohnson" + "center" + "scale" (cirbe)  (gbm.m.ycs_c) 
+
+```{r GBM con centrado y escalado, message=FALSE, warning=FALSE, results='hide', cache=TRUE}
+
+set.seed(42)
+model.gbm.m.ycs_c <- train( f.valor.m.c,
+                          preProc = c("YeoJohnson","center","scale"),
+                          data = train,
+                          method = "gbm",
+                          trControl = ctrl,
+                          verbose = TRUE) 
+
+```
+
+```{r}
+
+model.gbm.m.ycs_c
+
+plot(model.gbm.m.ycs_c)
+
+model.gbm.m.ycs_c$finalModel
+
+varImp(model.gbm.m.ycs_c)
+
+
+```
+
+
+#### Modelo GBM - log(margen) ~  log(cirbe) + cnae + empleados  (gbm.m.ycs_c) 
+
+```{r GBM incluyendo el segmento, cnae y empleados, message=FALSE, warning=FALSE, results='hide', cache=TRUE}
+
+f.valor.l_m.l_cce <- build.log.formula("log10(margen_a + 1)", c("cod_segmsubo", "cod_cnae_1","empleados"), features.dispuesto_banco)
+
+set.seed(42)
+model.gbm.l_m.l_cce <- train( f.valor.l_m.l_cce,
+                            data = train,
+                            method = "gbm",
+                            trControl = ctrl,
+                            verbose = TRUE) 
+```
+
+```{r}
+
+model.gbm.l_m.l_cce
+plot(model.gbm.l_m.l_cce)
+
+model.gbm.l_m.l_cce$finalModel
+
+varImp(model.gbm.l_m.l_cce)
+
+```
+
+
+
+```{r Modelo basado en arbol - rpart, eval=FALSE}
+
+
+f.valor.l_m.l_cce <- build.log.formula("log10(margen_a + 1)", c("cod_segmsubo", "cod_cnae_1","empleados"), features.dispuesto_banco)
+
+
+kk <- c(c("cod_segmsubo", "cod_cnae_1","empleados"), features.dispuesto_banco)
+
+
+head(train[,c("empleados")])
+head(train[,c("margen_a")])
+
+train(metric = )
+
+model.rpart.pruebas <- train( x = train[,c("imp_dridsba", "cod_cnae_1")] , y = train[,c("margen_a")],
+#                            preProc = c("BoxCox","center","scale"),    
+                            method = "rpart",
+                            trControl = ctrl, 
+                            metric = "RMSE") 
+
+
+
+
+model.rpart.pruebas <- train( x = train[,c("imp_dridsba", "imp_dfinsba")] , y = train[,c("margen_a")],
+                            # data = train,
+                            method = "M5",
+                            trControl = ctrl) 
+
+
+model.m5.pruebas <- train( x = train[,c("imp_dridsba", "cod_cnae_1")] , y = train[,c("margen_a")],
+                            # data = train,
+                            method = "M5",
+                            trControl = ctrl) 
+
+
+
+set.seed(42)
+model.rpart.pruebas <- train( f.valor.m.c,
+                            data = train,
+                            method = "M5",
+                            trControl = ctrl,
+                            verbose = TRUE, na.action = na.omit) 
+
+
+model.rpart.l_m.l_cce
+
+
+
+```
+
+
+```{r Lista de modelos de ml, echo=TRUE}
+
+gbm.models.natural <- list(
+     gbm.m.c = model.gbm.m.c, 
+     gbm.m.ycs_c = model.gbm.m.ycs_c
+  )
+
+gbm.models.log <- list(
+     gbm.l_m.c = model.gbm.l_m.c,
+     gbm.l_m.l_c = model.gbm.l_m.l_c,
+     gbm.l_m.l_cce = model.gbm.l_m.l_cce
+  )
+
+
+
+```
+
+```{r Predict values with models}
+
+
+train.predictions.ml.natural <- sapply(gbm.models.natural, function(model){  
+  predict(model, newdata = train , na.action = na.pass)
+})
+
+test.predictions.ml.natural <- sapply(gbm.models.natural, function(model){
+  predict(model, newdata = test , na.action = na.pass)
+})
+
+
+train.predictions.ml.log <- sapply(gbm.models.log, function(model){
+  10^predict(model, newdata = train , na.action = na.pass)
+})
+
+test.predictions.ml.log <- sapply(gbm.models.log, function(model){
+  10^predict(model, newdata = test , na.action = na.pass)
+})
+
+
+
+train.predictions <- cbind(train.predictions, 
+                           as.data.frame(train.predictions.ml.natural),
+                           as.data.frame(train.predictions.ml.log))
+
+test.predictions <-  cbind(test.predictions, 
+                           as.data.frame(test.predictions.ml.natural), 
+                           as.data.frame(test.predictions.ml.log))
+
+
+```
+
+#### Test and Train predictions 
+
+```{r}
+
+kable(head(train.predictions))
+kable(head(test.predictions))
+
+```
+
+
+### Resultados de los modelos
+
+Para comparar los modelos vamos a seleccionar solo un subconjunto de ellos, los más interesantes de cada tipo. 
+
+```{r Experiments to plot, echo = TRUE}
+experiments.to.plot <- c("exp.div1000.all", "gbm.m.c", "gbm.l_m.l_cce")
+
+```
+
+Para la evaluacion de los modelos como clasificacion ordenada, vamos a usar los siguientes cortes por el momento
+
+```{r}
+
+labels  <- c("1","2","3","4","5")
+cortes  <- c(-Inf, 25, 1500, 3500, 7000, Inf)
+
+```
+
+
+#### Distribucion de la prediccion del margen 
+
+```{r Plot de las distribuciones de las prediciones vs margen para modelos de aprendizaje}
+
+# experiments.to.plot <- c("gbm.m.c", "gbm.l_m.c", "gbm.l_m.l_c", "gbm.m.ycs_c", "gbm.l_m.l_cce")
+plot.predictions.density(test,test.predictions,experiments.to.plot)
+
+```
+
+
+#### Evaluacion de la predicción del valor
+
+ Miramos varias medidas 
+   - RMSE (Root Mean Squared Error) - valor más bajo implica una mejor prediccion 
+   - Correlacion Pearson 
+   - Correlacion Kendall 
+   - Correlacion Spearman
+   - ${R^2}$
+   
+
+```{r Evaluacion de la prediccion del precio}
+
+df.regression.results <- plot.regression.evaluation(test$margen_a, test.predictions[experiments.to.plot])
+
+kable(df.regression.results)
+
+```
+
+  - En general, los valores de RMSE son altos (> 6000 euros) lo que indica que a la hora de predecir el margen, como cantidad, podríamos estrar cometiendo un error considerable. 
+  - Por contra, los valores de correlacion, en especial los que tienen en cuenta el ranking (Kendall, Spearman) son razonablemente buenos. 
+  - Entre los modelos, la transformacion de las variables de importe a logaritmo proporciona mejores resultados. 
+  
+
+```{r Gráficos resumen de las predicciones, eval = FALSE, warning=FALSE}
+
+selected.models <- dplyr::intersect(colnames(train.predictions),colnames(test.predictions))
+
+sapply(selected.models, function(model) {
+  print.title(model)
+
+  plot.diagnostics(train$margen_a, train.predictions[,model], title = paste(model, "Train", sep = "\n" ))
+  plot.diagnostics(test$margen_a, test.predictions[,model], title = paste(model, "Test", sep = "\n" ))
+
+} )
+
+```
+
+
+#### ¿Cómo se distribuye el error dependiendo del importe? 
+
+```{r}
+
+test %>%
+  select(codigo, nif, cuota_cirbe, cuota_cirbe_q, margen_a) %>%
+  mutate(
+      margen_a_ordinal = make.ordinal(margen_a, cortes, labels )
+    ) %>%
+  dplyr::bind_cols(data.frame(test.predictions)[, experiments.to.plot]) %>%
+  filter(cuota_cirbe >= 0.1 & cuota_cirbe <= 0.9 ) %>% 
+  melt( id = c("codigo","nif","cuota_cirbe", "cuota_cirbe_q", "margen_a_ordinal")) %>%
+  ggplot(aes(x = margen_a_ordinal , y = value )) +
+  geom_boxplot() +  
+  geom_jitter(alpha = 0.1) +
+  facet_wrap(~ variable)  +
+#  scale_y_log10(limits = c(100, 10^5), breaks = c(100,200,1000,2000,10000,20000)) +
+  scale_y_log10(limits = c(10, 10^5), breaks = cortes[2:5])
+
+
+```
+
+- Distribuimos los clientes en tranchas o grupos, segun los cortes definidos arriba. El modelo que más se ajusta a la distribución de margen es el **gbm.l_m.l_cce**. 
+- El valor tan alto de RMSE posiblemente se explica porque el error es mayor en función del margen. 
+
+#### Evaluacion de la prediccion del segmento de valor (stars)
+
+
+```{r Transforma predicciones a valores ordinales}
+
+test.margen.ordinal <- make.ordinal(test$margen_a, cortes, labels)
+test.predictions.ordinal <- lapply(data.frame(test.predictions), function(predictions) {
+  make.ordinal(predictions, cortes, labels)
+}) %>% data.frame()
+
+```
+
+```{r Evaluacion como clasificación ordinal}
+
+df.evaluation.ordinal <- plot.ordinal_regression.evaluation(test.margen.ordinal, test.predictions.ordinal[experiments.to.plot]) 
+kable(df.evaluation.ordinal)
+
+```
+
+
+Para la presentación de los resultados se van a usar una serie de tranchas (estrellas de valor):
+
+ - En este caso evaluamos el MAE (Mean Average Error) de forma que se penaliza a los clientes que se penaliza por igual a los clientes que saltan de trancha hacia arriba (2 a 3 estrellas) como hacia abajo (3 a 2 estrellas). 
+
+ - Para la evaluacion del MAE, como para RMSE, es mejor cuanto más bajo. De nuevo, el mejor modelo el **gbm.l_m.l_cce**. 
+ 
+ - En este caso aunque el error en la estimación del importe pueda ser grande, no se penaliza a menos que implique  un salto en la trancha. Esto es interesante porque asumimos que el error medio aumenta con el margen. 
+ 
+
+##### Matrices de confusión
+
+Mostramos la matriz de confusion en función de la asignacion a cada una de las tranchas. De entre los modelos seleccionados, el mejor comportamiento lo vemos en el modelo GBM con transformación logarítmica. 
+
+
+```{r Plotea la matriz de confusion cada experimento, fig.width=12, fig.height=4}
+
+list.confusionMatrix <- plot.confusionMatrix.evaluation(test.margen.ordinal, test.predictions.ordinal[experiments.to.plot])
+
+list.confusionMatrix
+
+```
+
+#### Evaluacion de una función de ranking del valor
+
+```{r Evaluacion as a ranking function, fig.height=10}
+
+# experiments.to.plot <- c("gbm.m.c", "gbm.l_m.c", "gbm.l_m.l_c", "gbm.m.ycs_c", "gbm.l_m.l_cce")
+
+df.ranking <- plot.ranking.evaluation(test$margen_a, test.predictions[experiments.to.plot])
+
+```
+
+ - Por último, evaluamos el ranking de valor resultante usando la Precision@K. Ambos gráficos son equivalentes si bien en el primero se muestran número de clienes seleccionados y en el segundo porcentaje (% recall). 
+ - De nuevo el modelo que obtiene los mejores resultados es **gbm.l_m.l_cce**. 
+ 
+
+### Evaluación visual de los modelos 
+
+ - El modelo a elegir tenemos que validarlo por construccion ya que hemos evaluado que se comporta de manera adecuada para los clientes vinculados, sin embargo a
+ dia de hoy no tenemos manera de validar el margen para los clientes poco vinculados. 
+ 
+ - En cierta manera, lo que esperamos es una distribucion uniforme de los estadísticos del margen en función de la cuota CIRBE. 
+ - Sin embargo, hemos visto que el importe dispuesto es más alto para los clientes poco vinculados y es razonable pensar que esto afecte tambien al margen, y por tanto al margen estimado. 
+ 
+ - Otro de los factores a considerar, por construcción, es que las tranchas para representar el valor deberían dividir de forma uniforme a los clientes.
+ 
+#### Importe dispuesto segun vinculación
+
+```{r Plot del importe por cuota cirbe, eval=FALSE}
+
+df.cirbe_valor %>% 
+    filter(cuota_cirbe >= 0.01 & cuota_cirbe < 0.9 ) %>%  
+    ggplot(aes(x=cuota_cirbe, y=cirbe_sistema )) +
+    geom_point(alpha = 0.05) +
+    geom_smooth(method = "lm", color = "green") +
+    geom_smooth() +
+    coord_cartesian(xlim = c(0.1, 0.9), ylim = c(10^4, 10^7)) +
+    geom_hline(y=10^5, color = "red") +
+    scale_y_log10() +
+    xlab("Importe dispuesto") +
+    ylab("Valor (predicted)") 
+
+df.cirbe_valor %>% 
+    ggplot(aes(x=factor(cuota_cirbe_q), y=cirbe_sistema)) +
+    geom_boxplot(size = .75) +
+#    geom_jitter(alpha = .05) +
+    scale_y_log10() +
+    coord_cartesian(ylim = c(10^4, 10^7)) +
+    xlab("Importe dispuesto") +
+    ylab("Valor (predicted)") 
+
+
+```
+
+
+#### Resultados de los modelos de predicción sobre el conjunto de clientes
+
+```{r Define a subset to plot}
+
+df.validacion <- df.cirbe_valor %>% 
+  filter(cuota_cirbe > 0)
+  
+
+```
+
+```{r Predicciones para todos los modelos}
+
+basic.predictions <- list ( 
+  model.cuota_cirbe =  df.validacion$margen_a/df.validacion$cuota_cirbe,
+  model.cuota_cirbe_q =  df.validacion$margen_a/(df.validacion$cuota_cirbe_q/10)
+  )
+
+df.validacion <- df.validacion %>% std_cirbe()
+nls.predictions <- lapply(models, predict, newdata = df.validacion)
+
+
+ml.predictions <- lapply(gbm.models.natural, function(model){  
+  predict(model, newdata = df.validacion , na.action = na.pass)
+})
+
+
+ml_log.predictions <- lapply(gbm.models.log, function(model){  
+  10^predict(model, newdata = df.validacion , na.action = na.pass)
+})
+
+
+all.predictions <-c(basic.predictions, nls.predictions,  ml.predictions, ml_log.predictions)
+
+str(all.predictions)
+
+```
+
+
+```{r Mezcla de dataframes de clientes y valor predicho}
+
+df.validacion_melted <- df.validacion %>%
+  select(codigo, nif, cuota_cirbe, cuota_cirbe_q) %>%
+  dplyr::bind_cols(data.frame(all.predictions)[experiments.to.plot]) %>%
+  filter(cuota_cirbe >= 0.1 & cuota_cirbe <= 0.9 ) %>% 
+  melt( id = c("codigo","nif","cuota_cirbe", "cuota_cirbe_q"))
+  
+```
+
+
+```{r Valor predicho por cuota CIRBE,  fig.height=4, fig.width=12}
+
+df.validacion_melted %>%
+  ggplot(aes(x=cuota_cirbe, y=value )) +
+  geom_point(alpha = 0.01) +
+  geom_smooth(method = "lm", color = "green") +
+  geom_smooth() +
+  facet_wrap( ~ variable) +
+  coord_cartesian(xlim = c(0.1, 0.9), ylim = c(500, 10^5)) +
+  geom_hline(y=2000, color = "red") +
+  scale_y_log10() +
+  xlab("Cuota CIRBE") +
+  ylab("Valor (predicted)") 
+
+```
+
+
+
+```{r Boxplot valor predicho por cuota cirbe, fig.height=4, fig.width=12}
+
+df.validacion_melted %>%
+    ggplot(aes(x=factor(cuota_cirbe_q), y=value)) +
+    geom_boxplot(size = .75) +
+#    geom_jitter(alpha = .01) +
+    facet_wrap( ~ variable) +
+    scale_y_log10() +
+    coord_cartesian(ylim = c(500, 10^5)) +
+    labs(title="Distribución del valor por cuota CIRBE", x = "Valor (predicción)", y = "Cuota CIRBE")
+
+```
+
+
+#### Distribucion de los clientes por tranchas
+
+Por último en función del valor predicho y usando los cortes predefinidos a mano 
+
+(Ver Pymes_Valor_Clientes_EstudioCortesValor.Rmd para un estudio basado en  datos de lo que podrían ser los cortes)
+
+
+##### Usando un único conjunto de cortes
+
+```{r Distribucion de cortes, fig.height=6, fig.width=6}
+(cortes)
+
+lapply(experiments.to.plot, function(model) {
+
+  predicted.ordinal <- make.ordinal(all.predictions[[model]], cortes, labels)
+  do.call(plot.num_trancha, list(segmento = df.validacion$cod_segmsubo, predicted = predicted.ordinal, title = model))                                
+
+  })
+
+```
+
+##### Usando un conjunto de corte por segmento 
+
+```{r Distribución de cortes por segmento, fig.height=6, fig.width=6}
+
+#cuts_35 <- c(-Inf, 0, 392, 1787, 5759, Inf)
+#cuts_36 <- c(-Inf, 0, 266, 788 , 2019, Inf)
+
+#cuts_35_rounded <- c(-Inf, 25, 500, 2000, 6000, Inf)
+#cuts_36_rounded <- c(-Inf, 25, 250, 1000, 2000, Inf)
+
+(cuts_35_rounded <- c(-Inf, 100, 1000, 4000, 10000, Inf))
+(cuts_36_rounded <- c(-Inf, 100, 1000, 2000, 5000, Inf))
+
+
+lapply(experiments.to.plot, function(model) {
+
+  predicted.ordinal <- make.ordinal.by_segment(all.predictions[[model]], df.validacion$cod_segmsubo,  cuts_35_rounded, cuts_36_rounded, labels)
+  do.call(plot.num_trancha, list(segmento = df.validacion$cod_segmsubo, predicted = predicted.ordinal, title = model))                                
+
+})
+
+
+```
+
+
+No hay conclusiones significativas sobre que cortes concretos son mejor , cortes concretos y si dividir por segmento. 
+
+
+## Conclusiones 
+ 
+ - El modelo de valor construido permite rankear (Precision@k) de manera satisfactoria a los clientes.
+ - Sin embargo el error (RMSE) que comete en la predicción del margen es relativamente grande por lo que posiblemente no sea adecuado proporcionar dirctamente eset valor mientras no se pueda estimar mejor. 
+ - A pesar de esto, la division en tranchas de valor es razonable. 
+ - Las tranchas que se han usado son provisionales y no dividen a los clientes de forma uniforme. Si se desease una distribución más uniforme podrían ajustarse las tranchas a la distribución del modelo, si bien se perdería la posibilidad de interpretarlas mediante reglas sencillas( De 2 a 3 estrellas van 3000 euros de media) . 
+ 
+```{r Almacenamos los modelos seleccionados usando saveModel, eval=FALSE, echo=TRUE}
+
+saveModel(model.gbm.l_m.l_cce, "customers.value.cirbe.gbm.l_m.l_cce")
+saveModel(models["exp.div1000.all"], "customers.value.cirbe.exp.div1000.all" )
+
+```
+

@@ -1,0 +1,168 @@
+---
+output:
+  html_document:
+    self_contained: no
+---
+
+Digital On-Boarding 
+-------------------
+
+
+_**6th report iteration**_
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- "[Digital On-boarding] : What channel is used for engagement of products? Customer profile: culture, volunteering and traveling."
+
+# Keywords. Text separated by commas. E.g. keywords <- 'customer health, recibos' 
+# Keywords can classify the attribute in categories such as 'valor, vinculación, digitalidad', describe used tables such as 'recibos, 
+# transacciones tarjetas, segmento plan uno' or include other relevant info. Search keywords in the portal to find commonly used terms
+# and create new keywords only if justified.
+
+keywords  <- 'digitalidad, digitalization, contratacion tarjetas, contracting cards, contratacion cuenta corriente, contracting current account, bbva.es, nuevo cliente, new client, alta cliente, client registration, perfil cliente, customer profile, voluntariado, volunteering, cultura, culture, traveling'  
+```
+
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+source('~/bda_clarity/tools/warehouse_basics.R')
+```
+
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(grid))
+suppressMessages(library(hexbin))
+suppressMessages(library(lattice))
+suppressMessages(library(knitr))
+suppressMessages(library(googleVis))
+suppressMessages(library(data.table))
+suppressMessages(library(plyr))
+op <- options(gvis.plot.tag="chart")
+`%ni%` <- Negate(`%in%`)
+options(warn=-1, scipen=3, width=450)
+source('~/bda_clarity/tools/warehouse_basics.R')
+
+```
+
+``` {r echo=FALSE}
+
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  require(grid)
+  
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+  
+  numPlots = length(plots)
+  
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                     ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+  
+  if (numPlots==1) {
+    print(plots[[1]])
+    
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+      
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+} ; 
+
+
+
+
+chname <- function(df)
+{
+  rex <- '^[[:alnum:]_]+\\.([[:alnum:]_]+)$'
+  nam <- colnames(df)
+  ix  <- which(grepl(rex, nam))
+  
+  nam[ix] <- gsub(rex, '\\1', nam[ix])
+  
+  colnames(df) <- nam
+  
+  df
+};
+
+```
+
+### PREFERENCES OF CLIENTS 
+
+```{r echo=FALSE, cache=TRUE, eval=FALSE}
+
+do.hive(" CREATE TABLE IF NOT EXISTS elenak.digital_onboard_culture AS
+         
+           SELECT aa.cod_persona,   
+                  bb.ultimo_mes,
+                  bb.ultimos_3_meses,
+                  bb.ultimos_6_meses,
+                  bb.ultimos_12_meses
+         
+           FROM elenak.altas_digitales_2014 aa 
+         
+           JOIN clarity_elements.num_operaciones_cultura bb ON aa.cod_persona = bb.cod_persona  "); 
+
+
+do.hive(" CREATE TABLE IF NOT EXISTS elenak.digital_onboard_volunteering AS
+         
+           SELECT aa.cod_persona,   
+                  bb.ultimo_mes,
+                  bb.ultimos_3_meses,
+                  bb.ultimos_6_meses,
+                  bb.ultimos_12_meses
+         
+           FROM elenak.altas_digitales_2014 aa 
+         
+           JOIN clarity_elements.num_operaciones_volunt_recib bb ON aa.cod_persona = bb.cod_persona  "); 
+
+
+do.hive(" CREATE TABLE IF NOT EXISTS elenak.digital_onboard_traveling AS
+         
+           SELECT aa.cod_persona,   
+                  bb.ultimo_mes,
+                  bb.ultimos_3_meses,
+                  bb.ultimos_6_meses
+         
+           FROM elenak.altas_digitales_2014 aa 
+         
+           JOIN clarity_elements.num_operaciones_agencias_viajes bb ON aa.cod_persona = bb.cod_persona  "); 
+
+```
+
+Para 2011 clientes con altas digitales en 2014 hemos visto cúantos de ellos pueden referirse a tales sectores de gustos como Cultura, Voluntariado y Travalers.
+
+**Cultura**: según la actividad del cliente durante el último mes entran en la bolsa **`r qhive("select count(distinct cod_persona) from elenak.digital_onboard_culture where ultimo_mes <> 0")`** personas y según la actividad durante los últimos tres meses entran **`r qhive("select count(distinct cod_persona) from elenak.digital_onboard_culture where ultimos_3_meses <> 0")`** personas.
+
+**Voluntariado**: según la actividad del cliente durante el último mes entran en la bolsa **`r qhive("select count(distinct cod_persona) from elenak.digital_onboard_volunteering where ultimo_mes <> 0")`** personas y según la actividad durante los últimos tres meses entran **`r qhive("select count(distinct cod_persona) from elenak.digital_onboard_volunteering where ultimos_3_meses <> 0")`** personas.
+
+**Travalers**: según la actividad del cliente durante el último mes entran en la bolsa **`r qhive("select count(distinct cod_persona) from elenak.digital_onboard_traveling where ultimo_mes <> 0")`** personas y según la actividad durante los últimos tres meses entran **`r qhive("select count(distinct cod_persona) from elenak.digital_onboard_traveling where ultimos_3_meses <> 0")`** personas.
+
+De este modo al ver el plazo de un mes acoplaríamos para Cultura 3,43% de clientes, para Voluntariado sólo 0,45% y para Travelers 0,05%. 
+
+
+
+

@@ -1,0 +1,128 @@
+---
+title: "Estudio del dato disponible de BBVA Wallet - Movimientos con tarjetas"
+---
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- "[Wallet]: Estudio del dato disponible de BBVA Wallet - Movimientos con tarjetas"
+
+keywords  <- 'wallet, digital, online, bbva.es, tarjetas, movimientos, pago móvil, transaccionalidad'  
+```
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+# This avoids loading messages and warnings showing up
+suppressMessages(library(DBI))
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(lattice))
+suppressMessages(library(reshape))
+suppressMessages(library(plyr))
+
+options(warn=-1, scipen=3, width=150)
+source('~/bda_clarity/tools/warehouse_basics.R') ;
+source('~/bda_clarity/tools/write.hive.R') ;
+```
+
+```{r echo=FALSE, eval=FALSE}
+# Dependencies
+da_pro.transacciones_por_canal <- clarity.use_table(DEPENDENCY_FULL_PRO_TABLE,
+                                                               'da_pro.transacciones_por_canal',
+                                                               select = '*')
+```
+
+
+¿Cuántos cod_idcontra hay etiquetados en da_pro.productos_contratados como cod_comprod 3199 (wallet) o 8425 (pago móvil)? ¿Y en da_pro.datos_tarjetas_corp (supuestamente debería ser un subset de éste pero con más info a nivel de tarjeta)? ¿Cómo se distribuyen a lo largo del tiempo?:
+```{r eval=FALSE, echo=TRUE, cache=TRUE}
+cod_idcontra <- qhive("select cod_idcontra,
+                      fec_altacto,
+                      cod_pgccontr,
+                      cod_comprod,
+                      min(cast(partition_id as int)) as first_partition_id
+                      from da_pro.productos_contratados
+                      where cod_comprod like '%3199%'
+                      or cod_comprod like '%8425%'
+                      group by cod_idcontra,fec_altacto,cod_pgccontr,cod_comprod
+                      order by cod_idcontra")
+
+cod_idcontra$fec_altacto_date <- as.Date(cod_idcontra$fec_altacto)
+cod_idcontra$yyyymm <- ifelse(is.na(cod_idcontra$fec_altacto_date),9999,as.numeric(paste0(substr(cod_idcontra$fec_altacto_date,1,4),substr(cod_idcontra$fec_altacto_date,6,7))))
+cod_idcontra$first_partition_id_yyyymm <- as.numeric(paste0(substr(cod_idcontra$first_partition_id,1,4),substr(cod_idcontra$first_partition_id,5,6)))
+
+pru <- qhive("select cod_idcontra,
+                      fec_altacto,
+                      concat(year(fec_altacto),
+                             case
+                             when month(fec_altacto)>=10 then month(fec_altacto)
+                             else concat(0,month(fec_altacto))
+                             end) as yyyymm,
+                      cod_pgccontr,
+                      cod_comprod
+                      from da_pro.productos_contratados
+                      where (cod_comprod like '%3199%'
+                      or cod_comprod like '%8425%')
+                      and cast(partition_id as int) = 20150228
+                      and fec_altacto >= '2014-07-01'")
+
+nrow(pru)
+length(unique(pru$cod_idcontra))
+sort(unique(pru$yyyymm))
+
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_productos_contratados as 
+select cod_idcontra,
+fec_altacto,
+concat(year(fec_altacto),
+case
+when month(fec_altacto)>=10 then month(fec_altacto)
+else concat(0,month(fec_altacto))
+end) as yyyymm,
+cod_pgccontr,
+cod_comprod
+from da_pro.productos_contratados
+where (cod_comprod like '%3199%'
+or cod_comprod like '%8425%')
+and cast(partition_id as int) = 20150228
+and fec_altacto >= '2014-01-01'")
+
+newcards <- qhive("select yyyymm,
+count(distinct cod_idcontra) as distinct_idcontra
+from da_martalamela.wallet_productos_contratados 
+group by yyyymm
+order by yyyymm")
+
+newcards
+
+newcards_by_cod_comprod <- qhive("select yyyymm,
+                  cod_comprod,
+count(distinct cod_idcontra) as distinct_idcontra
+from da_martalamela.wallet_productos_contratados
+group by yyyymm,cod_comprod
+order by yyyymm,cod_comprod")
+
+cast(newcards_by_cod_comprod, cod_comprod ~ yyyymm, fun.aggregate=sum, value="distinct_idcontra")
+
+intervinientes <- qhive("select yyyymm, count(distinct a.cod_idcontra), count(distinct a.cod_persctpn)
+from
+(
+  select interv.*, prod.fec_altacto,prod.yyyymm, prod.cod_comprod
+ from da_pro.intervinientes_corp interv
+ left join
+ da_martalamela.wallet_productos_contratados prod
+ on trim(prod.cod_idcontra) = trim(interv.cod_idcontra)
+ where prod.cod_idcontra is not null
+  ) a
+group by yyyymm
+order by yyyymm")
+
+qhive("select
+partition_id,
+count(distinct cod_idcontra) as count_distinct_cod_idcontra,
+sum(imp_mvimient) as sum_imp_mvimient,
+sum(imp_mvimient)/count(distinct cod_idcontra) as avg_imp_mvimient,
+round(sum(imp_mvimient)/count(case when imp_mvimient>0 then cod_idcontra end),1) as avg_sum_imp_mvimient_positive
+from da_martalamela.wallet_movimientos_tarjetas_detalle_corp
+group by partition_id
+order by partition_id")
+```

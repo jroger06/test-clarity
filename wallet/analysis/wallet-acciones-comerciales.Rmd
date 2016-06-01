@@ -1,0 +1,163 @@
+---
+title: "Estudio preliminar del dato disponible de BBVA Wallet - Acciones comerciales"
+---
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- '[Wallet]: Estudio preliminar del dato disponible de BBVA Wallet - Acciones comerciales'
+
+keywords  <- 'wallet, digital, online, bbva.es, acciones comerciales, oportunidades comerciales, campañas, mailing, promociones'  
+```
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(grid))
+suppressMessages(library(hexbin))
+suppressMessages(library(lattice))
+suppressMessages(library(reshape))
+suppressMessages(library(plyr))
+
+options(warn=-1, scipen=3, width=180)
+source('~/bda_clarity/tools/warehouse_basics.R') ;
+source('~/bda_clarity/tools/write.hive.R') ;
+
+chname <- function(df)
+{
+  rex <- '^[[:alnum:]_]+\\.([[:alnum:]_]+)$'
+  nam <- colnames(df)
+  ix  <- which(grepl(rex, nam))
+  
+  nam[ix] <- gsub(rex, '\\1', nam[ix])
+  
+  colnames(df) <- nam
+  
+  df
+};
+
+```
+
+
+**Acciones comerciales** donde la variable des_acom_x hace referencia a Wallet. Extraemos la acción comercial y algunas variables relevantes:
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_acciones_comerciales as
+select cod_acom,
+des_acom_x,
+cod_oricamp,
+cod_canal,
+cod_agruprod,
+fap_acom,
+fvt_acom
+from sinfo_master.acciones_comerciales
+where upper(des_acom_x) like '%WALL%'
+order by fap_acom")
+
+qhive("select cod_acom,
+      des_acom_x,
+      cod_oricamp,
+      cod_canal,
+      cod_agruprod,
+      fap_acom,
+      fvt_acom
+      from da_martalamela.wallet_acciones_comerciales LIMIT 10")
+```
+
++Se ha comprobado que el resto de valores relevantes que toma la variable des_acom_x no hacen referencia a WALLET.
+
+Vemos a lo largo del tiempo cómo se han distribuido las diferentes acciones comerciales relacionadas con Wallet en 2014 (por mes de inicio de la acción):
+
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+acciones_comerciales <- qhive("select des_acom_x,
+year(fap_acom) as year_fap_acom,
+month(fap_acom) as month_fap_acom,
+count(*) as count_acciones_comerciales
+from da_martalamela.wallet_acciones_comerciales
+where year(fap_acom) = 2014
+group by des_acom_x,year(fap_acom),month(fap_acom)
+order by count_acciones_comerciales desc")
+
+acciones_comerciales$yyyymm <- paste0(acciones_comerciales$year_fap_acom,
+                                      ifelse(acciones_comerciales$month_fap_acom>=10,
+                                             acciones_comerciales$month_fap_acom,
+                                             paste0("0",acciones_comerciales$month_fap_acom)))
+
+cast(acciones_comerciales, des_acom_x ~ yyyymm, fun.aggregate=sum, value="count_acciones_comerciales")
+
+acciones_comerciales_group <- aggregate(count_acciones_comerciales ~ yyyymm, acciones_comerciales, sum)
+
+graph_acciones_comerciales <- ggplot(data=acciones_comerciales_group, aes(x=yyyymm, y=count_acciones_comerciales, ymax = max(count_acciones_comerciales), label=count_acciones_comerciales)) + geom_line(aes(group=1), colour="#66CC99") + geom_point(colour="#66CC99") + theme(axis.title.x = element_blank(), axis.text.x  = element_text(angle=90, size=10)) + ylab("# acciones comerciales") + ggtitle("# Acciones comerciales mensual") + geom_text(aes(y = count_acciones_comerciales), position = "stack", size = 3.5, colour="#66CC99")
+graph_acciones_comerciales
+```
+
+**Oportunidades comerciales** sobre clientes donde la acción comercial está entre las que acabamos de identificar como %wallet%. Extraemos las variables que consideramos relevantes:
+
+* cod_acom (código de la acción comercial). El campo key para cruzar ambas tablas (oportunidad y acciones comerciales)
+* cod_persona
+* cod_agruprod (tipo de producto: 464 hipotecario, etc)
+* cod_oricamp (S para campañas de sinfo)
+* fap_acom (fecha de inicio de la campaña)
+* fvt_acom (fecha de cierre de la campañas, teniendo en cuenta que en general se añade un mes más de margen durante el cual el cliente podría seguir contratando)
+* xsn_exito (respuesta Si o No del éxito de la campaña)
+* fec_resenv (fecha envio)
+* fec_respz (fecha de la respuesta)
+* des_acom_x (descripción sobre la campaña)
+* cod_canal (medio por el que se lanza la campaña)  
+
+```{r eval=TRUE, echo=TRUE, cache=TRUE}
+do.hive("create table IF NOT EXISTS da_martalamela.wallet_oportunidad_comercial as
+select a.cod_acom,
+a.cod_persona,
+a.cod_agruprod,
+a.cod_oricamp,
+a.fec_resenv,
+b.fap_acom,
+b.fvt_acom,
+a.xsn_exito,
+a.fec_respz,
+b.des_acom_x,
+a.cod_canal
+from sinfo_master.oportunidad_comercial a
+left join da_martalamela.wallet_acciones_comerciales b
+on a.cod_acom=b.cod_acom
+where b.cod_acom is not null")
+
+qhive("select cod_acom,
+cod_persona,
+fec_resenv,
+fvt_acom,
+xsn_exito,
+fec_respz,
+des_acom_x,
+cod_canal
+from da_martalamela.wallet_oportunidad_comercial LIMIT 10")
+```
+
+Tenemos **`r qhive("select count(distinct cod_persona) from da_martalamela.wallet_oportunidad_comercial")`** clientes distintos que han recibido cualquiera de las **`r qhive("select count(distinct cod_acom) from da_martalamela.wallet_acciones_comerciales")`** acciones comerciales etiquetadas como Wallet entre las fechas **`r qhive(" select MIN(fec_resenv) from da_martalamela.wallet_oportunidad_comercial")`** y **`r qhive("select MAX(fec_resenv) from da_martalamela.wallet_oportunidad_comercial")`**.
+
+Vemos el ratio de exito de cada campaña por mes:
+```{r eval=TRUE, echo=FALSE, cache=TRUE}
+oportunidad_comercial <- qhive("select des_acom_x,
+                                      year(fap_acom) as year_fap_acom,
+                                      month(fap_acom) as month_fap_acom,
+                                      xsn_exito,
+                                      count(*) as count_oportunidad_comercial
+                                from da_martalamela.wallet_oportunidad_comercial
+                                where year(fap_acom) = 2014
+                                group by des_acom_x,year(fap_acom),month(fap_acom), xsn_exito
+                                order by count_oportunidad_comercial desc")
+
+oportunidad_comercial$yyyymm <- paste0(oportunidad_comercial$year_fap_acom,
+                                      ifelse(oportunidad_comercial$month_fap_acom>=10,
+                                             oportunidad_comercial$month_fap_acom,
+                                             paste0("0",oportunidad_comercial$month_fap_acom)))
+                                             
+oportunidad_comercial <- ddply(oportunidad_comercial, .(des_acom_x , yyyymm), summarize, ratio = sum(count_oportunidad_comercial[xsn_exito == "S"]) / sum(count_oportunidad_comercial ))
+
+cast(oportunidad_comercial, des_acom_x ~ yyyymm, fun.aggregate=sum, value="ratio")
+```
+

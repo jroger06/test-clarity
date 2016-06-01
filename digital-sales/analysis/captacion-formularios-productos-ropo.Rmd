@@ -1,0 +1,189 @@
+---
+output:
+  html_document:
+    self_contained: no
+    theme: cerulean
+---
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- '[Digital Sales]: Formularios y productos de clientes ROPO.'
+keywords  <- 'bbva.es, adquisición cliente, ropo, productos'  
+```
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(grid))
+suppressMessages(library(hexbin))
+suppressMessages(library(lattice))
+suppressPackageStartupMessages(library('googleVis'))
+suppressPackageStartupMessages(library('ggplot2'))
+op <- options(gvis.plot.tag="chart")
+#op <- options(gvis.plot.tag=NULL)
+
+options(warn=-1, scipen=3, width=120)
+source('~/bda_clarity/tools/warehouse_basics.R') ;
+source('~/bda_clarity/tools/write.hive.R') ;
+
+
+```
+
+## Formularios y productos de clientes ROPO
+### 1. Motivación de negocio
+
+En el presente documento se realiza un análisis de los formularios que han iniciado los clientes ROPO y los productos que tienen contratados. Se pretende conocer qué relación existe entre el interés que muestra el usuario en la NET y los posteriores productos que contrata. Por ejemplo, es posible que un cliente que adquiera una hipoteca en BBVA haya rellenado un formulario de seguro de vida (o vice versa) o bien un formulario de alta, es decir, su interés es contratar una hipoteca y ha intentado hacerse cliente por medio de la NET pero ha acabado su proceso en oficina. 
+
+### 2. Objetivo
+
+Construir un dashboard de Tableau donde se compare por formulario de procedencia los productos contratados y viceversa.
+Las conclusiones se pueden extraer inspeccionando los gráficos de dicho dashboard según el producto/formulario de interés.
+
+### 3. Fuentes de datos
+
+Se ha generado la tabla **da_amandagarci.ropo_productos_formularios** en la que se muestra la relación anterior. Se compone de las siguientes columnas:
+ 
+ * partition_id: Mes en el que se dieron de alta los usuarios ROPO analizados.
+ * cod_persona: Identificador del cliente.
+ * form_type: Tipo/s de formulario/s que rellenaron, la relación con cod_persona es n -> 1. Se han agrupado los diferentes formularios en categorías, en particular:
+    + HIPOTECA: Se ha iniciado un formulario de hipoteca o subrogación.
+    + OCL: Se ha iniciado un formulario de OCL.
+    + PLAN: Se ha iniciado un formulario de planes de pensiones.
+    + PRESTAMO: Se ha iniciado un formulario de tipo préstamo, incluye financiación de recibos, coche, personal y consumo reactivo.
+    + ALTA: Se ha iniciado un formulario de alta.
+    + SEG_GENERAL: Se ha iniciado un formulario de seguro BBVA.
+    + SEG_VIVIENDA: Se ha iniciado un formulario de seguro de vivienda.
+    + SEG_VIDA: Se ha iniciado un formulario de seguro de vida.
+    + SEG_SALUD: Se ha iniciado un formulario de seguro de salud.
+    + MINISEGURO: Se ha iniciado un formulario de miniseguro, entre ellos se incluyen asistencia en viajes, accidentes, asistencia legal y repatriación.
+ * producto: Producto/s que tiene contratado cada cliente, la relación con cod_persona es n-> 1. Los productos contratados quedaron definidos en la creación de la tabla **da_amandagarci.listado_productos_clientes_filtrado** a través del epigrafiado (*consultar informe Análisis de altas de clientes y productos contratados*) y son los siguientes:
+    + HIPOTECA
+    + CONSUMO
+    + OCL
+    + PLAZO  
+    + PPI  
+    + PIAS  
+    + FONDO INVERSION
+    + SEGURO
+    + NOMINA
+    + TARJETA
+  
+Las tablas involucradas en el proceso de creación son:
+
+* da_amandagarci.listado_cookies_clientes_ropo: Tabla que contiene la información de las cookies de los clientes clasificados como ROPO.
+* da_omniture.omniture_bbvamice_master: Tabla que contiene toda la información sobre la navegación en la web BBVA.
+* da_amandagarci.listado_productos_clientes_filtrado: Tabla que contiene los productos contratados por cada tipo de cliente (online, offline y ROPO).
+
+```{r , cache=TRUE, echo=FALSE, eval = FALSE}
+drop_table("da_amandagarci.ropo_productos_formularios")
+
+do.hive("CREATE TABLE IF NOT EXISTS da_amandagarci.ropo_productos_formularios AS
+        SELECT 
+        C.partition_id as mes, 
+        C.cod_persona, 
+        C.type form_type,
+        colectivos.type_desc2 as colectivo,
+        B.producto 
+        FROM (
+          SELECT B.partition_id, A.cod_persona, B.type
+        FROM 
+          (SELECT * FROM da_amandagarci.listado_cookies_clientes_ropo 
+              WHERE cast(partition_id as int) >= 20150131
+              AND cast(partition_id as int) <= 20150630) A
+        JOIN 
+        (SELECT 
+         des_pages, 
+         cod_visitor_id, 
+         partition_id,
+        CASE 
+         WHEN regexp_replace(des_pages, ' +', ' ') in ('formulario:formulario crm hipoteca bbva','formulario:formulario crm hipoteca subrogacion') THEN 'HIPOTECA'
+         WHEN regexp_replace(des_pages, ' +', ' ') in ('particulares:contratacion:ocl:contratacionproductos:paso 0 mostrarpaso_informacionproductoocl',
+                                'particulares:contratacion:contratacionproductos:paso 0 mostrarpaso_informacionproductoocl',
+                                'particulares:contratacion:contratacion ocl coche:paso 0 contratacion',
+                                'particulares:contratacion:contratacion ocl multidestino:paso 0 contratacion') THEN 'OCL'
+         WHEN regexp_replace(des_pages, ' +', ' ') = 'particulares:contratacion:planes:intervinientes:paso 0 contratacion intervinientes-mostrar lista int' THEN 'PLAN'
+         WHEN regexp_replace(des_pages, ' +', ' ') IN ('particulares:contratacion:financia tu recibo:paso 1 entrada',
+                            'formulario:formulario crm credito coche bbva online',
+                            'formulario:formulario crm prestamo personal online',
+                            'formulario:simulador-new-prestamos consumo reactivo:2 datos personales y economicos',
+                            'formulario:simulador prestamos consumo reactivo:2 datos personales y economicos', 
+                            'formulario:coche:2 datos personales y economicos', 
+                            'formulario:simulador prestamos consumo reactivo', 
+                            'formulario:coche') THEN 'PRESTAMO'
+         WHEN regexp_replace(des_pages, ' +', ' ') = 'formulario:hacerse cliente' THEN 'ALTA'
+         WHEN regexp_replace(des_pages, ' +', ' ') = 'formulario:formulario crm seguros bbva' THEN 'SEG_GENERAL'
+         WHEN regexp_replace(des_pages, ' +', ' ') = 'formulario:formulario crm seguro vivienda' THEN 'SEG_VIVIENDA'
+         WHEN regexp_replace(des_pages, ' +', ' ') = 'formulario:formulario crm seguro vida' THEN 'SEG_VIDA'
+         WHEN regexp_replace(des_pages, ' +', ' ') = 'formulario:formulario crm seguro bbva salud' THEN 'SEG_SALUD'
+         WHEN regexp_replace(des_pages, ' +', ' ') = 'formulario:formulario crm miniseguro asistencia en viajes bbva' THEN 'MINISEGURO'
+         WHEN regexp_replace(des_pages, ' +', ' ') = 'formulario:formulario crm miniseguro accidentes bbva' THEN 'MINISEGURO'
+         WHEN regexp_replace(des_pages, ' +', ' ') = 'formulario:formulario crm miniseguro asistencia legal' THEN 'MINISEGURO'
+         WHEN regexp_replace(des_pages, ' +', ' ') = 'formulario:formulario crm miniseguro repatriacion bbva' THEN 'MINISEGURO'
+         WHEN des_pages LIKE '%general:altanif%' THEN 'ALTA'
+        END as type 
+         FROM da_omniture.omniture_bbvamice_master 
+         WHERE regexp_replace(des_pages, ' +', ' ') IN ( 
+                                'formulario:formulario crm hipoteca bbva',
+                                'formulario:formulario crm hipoteca subrogacion',
+                                'particulares:contratacion:ocl:contratacionproductos:paso 0 mostrarpaso_informacionproductoocl',
+                                'particulares:contratacion:contratacionproductos:paso 0 mostrarpaso_informacionproductoocl',
+                                'particulares:contratacion:contratacion ocl coche:paso 0 contratacion',
+                                'particulares:contratacion:contratacion ocl multidestino:paso 0 contratacion',
+                                'particulares:contratacion:planes:intervinientes:paso 0 contratacion intervinientes-mostrar lista int',
+                                'particulares:contratacion:financia tu recibo:paso 1 entrada',
+                                'formulario:formulario crm credito coche bbva online',
+                                'formulario:formulario crm prestamo personal online',
+                                'formulario:simulador-new-prestamos consumo reactivo:2 datos personales y economicos',
+                                'formulario:simulador prestamos consumo reactivo:2 datos personales y economicos',
+                                'formulario:coche:2 datos personales y economicos',
+                                'formulario:hacerse cliente',
+                                'formulario:formulario crm seguros bbva',   
+                                'formulario:formulario crm seguro vivienda',
+                                'formulario:formulario crm seguro vida',
+                                'formulario:formulario crm seguro bbva salud',
+                                'formulario:formulario crm miniseguro asistencia en viajes bbva',
+                                'formulario:formulario crm miniseguro accidentes bbva',
+                                'formulario:formulario crm miniseguro asistencia legal',
+                                'formulario:formulario crm miniseguro repatriacion bbva',
+                                'formulario:coche',
+                                'formulario:simulador prestamos consumo reactivo')
+         OR des_pages LIKE '%general:altanif%'
+         AND cast(partition_id as int) >= 20150131
+         AND cast(partition_id as int) <= 20150630
+         GROUP BY cod_visitor_id, des_pages, partition_id
+        ) B
+        ON A.cookie = B.cod_visitor_id
+        GROUP BY A.cod_persona, B.type, B.partition_id
+        ORDER BY B.partition_id
+        ) C
+        INNER JOIN 
+        ( SELECT cod_persona, producto, partition_id FROM da_amandagarci.listado_productos_clientes_filtrado
+         WHERE type_desc = 'ROPO'
+         AND cast(partition_id as int) >= 20150131
+         AND cast(partition_id as int) <= 20150630) B
+         on C.cod_persona = B.cod_persona
+         INNER JOIN 
+         (SELECT * from da_ventadigital.alta_colectivos where type_desc2 in ('3.COL_ROPO', '4.RST_ROPO')) colectivos
+         on cast(colectivos.cod_persona as int) = cast(B.cod_persona as int)");
+```
+
+### 4. Análisis
+
+
+<div id="bg">
+  <img src="main_captacion_files/figure-html/Formulariosproductos.png" alt="">
+</div>  
+
+### 5. Conclusiones
+
+* Independientemente del producto contratado los clientes ROPO entre un 50% y un 60% entraron en el formulario de Alta, siendo este el más visitado. 
+* Hay una clara correlación entre los clientes que contratan hipoteca o consumo reactivo y que hayan visitado algún formulario de este tipo de producto. 
+* En el resto de formularios hay una muestra demasiado pequeña de clientes como para poder sacar alguna conclusión relevante. 
+* En la visión por formulario: los clientes ROPO que proceden de formulario de hipoteca son los que más contratan hipotecas y también seguros. 
+
+
+

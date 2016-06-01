@@ -1,0 +1,491 @@
+---
+title: "Exploración de clientes y productos contratados"
+author: "César de Pablo"
+date: "25/05/2015"
+output: html_document
+---
+========================================================
+
+
+```{r, echo=FALSE}
+# This is the first mandatory section.
+
+title     <- '[Pymes] Exploración de clientes y productos contratados'
+
+# Keywords. Text separated by commas. E.g. keywords <- 'customer health, recibos' 
+# Keywords can classify the attribute in categories such as 'valor, vinculación, digitalidad', describe used tables such as 'recibos, 
+# transacciones tarjetas, segmento plan uno' or include other relevant info. Search keywords in the portal to find commonly used terms
+# and create new keywords only if justified.
+
+keywords  <- 'pymes, cnae, sme, segmentacion, segmentation'
+```
+
+
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))		# This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+source('~/bda_clarity/tools/warehouse_basics.R')
+```
+
+```{r import libraries, echo=FALSE}
+
+library(ggplot2)
+library(dplyr)
+library(scales)
+
+```
+
+
+## Exploración de clientes 
+
+Objetivo: Determinar si la distribucion de clientes de tipo físico o jurídico se corresponde con nuestra percepción y como se distribuyen respecto al segmento global. 
+
+### Numero de clientes en segmento global
+
+```{r, Carga de catalogos, cache=TRUE, echo=FALSE}
+
+# Catalog with segmento global descriptions
+q.catalog.segmento_global <- "
+SELECT cod_segmentacion_global, des_segmentacion_global
+FROM da_catalogos.segmentacion_global
+WHERE partition_id = '20150228'
+ORDER BY cod_segmentacion_global
+"
+
+# Catalog with contrapartida descriptions
+q.catalog.contrapartida <- "
+SELECT cod_contrapartida, des_contrapartida
+FROM da_catalogos.contrapartida
+WHERE partition_id = '20150228'
+ORDER BY cod_contrapartida
+"
+
+df.catalog.segmento.global <- qimpala(q.catalog.segmento_global)
+df.catalog.contrapartida <- qimpala(q.catalog.contrapartida)
+
+
+# Count number of clients per segmento global
+q.agg.segmento_global <- "
+SELECT s.cod_segmsubo cod_segmentacion_global, count(distinct cod_persctpn) num_clients
+FROM da_pro.segmento_global s
+WHERE s.partition_id = '20150228' 
+GROUP BY s.cod_segmsubo
+ORDER BY num_clients DESC
+"
+
+df.agg.segmento_global <- qhive(q.agg.segmento_global)
+
+```
+
+ * En segmento global tenemos `r sum(df.agg.segmento_global$num_clients)` (aprox. 40 millones), donde una gran parte no están etiquetados: NA = `r df.agg.segmento_global[(is.na(df.agg.segmento_global$cod_segmentacion_global)),c('num_clients')]` (aprox. 15 millones)
+
+
+```{r numero de clientes en segmento global, echo=FALSE}
+
+# Join catalog and aggregation for better description
+tmp.segmento_global <- merge(df.agg.segmento_global,df.catalog.segmento.global, all.x=TRUE)
+
+plot.segmento_global <- qplot(data=tmp.segmento_global,       
+      x=reorder(des_segmentacion_global,num_clients), y=num_clients, 
+      stat="identity",
+      geom="bar",
+      xlab="Segmento Global",
+      ylab="Number of clients", 
+      main="Distribution of clients by segmento global")  
+
+plot.segmento_global + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) + coord_flip()
+
+```
+
+En clientes tenemos aproximadamente 46 millones de clientes
+
+### Distribucion de los clientes en segmento global según su tipo Físico o Juridico
+
+```{r Creacion de la tabla agregada, echo=FALSE}
+
+# A R Hive no parece gustarle la consulta :( - la paso por Hue - Hive
+
+# CREATE TABLE da_cdepablo.clientes_tipo_segmento_global 
+# AS
+# SELECT cp.xti_persona, sp.cod_segmentacion_global, count(*) num_clients
+# FROM 
+# (SELECT cod_entalfa, cod_paisoalf, cod_persctpn, xti_persona
+# FROM da_pro.clientes_corp 
+# WHERE partition_id = '20150228' ) cp FULL OUTER JOIN 
+# (SELECT cod_entalfa, cod_paisoalf, cod_persctpn, cod_segmsubo cod_segmentacion_global 
+# FROM da_pro.segmento_global s
+# WHERE partition_id = '20150228' ) sp
+# ON (cp.cod_entalfa = sp.cod_entalfa AND cp.cod_paisoalf = sp.cod_paisoalf AND cp.cod_persctpn = sp.cod_persctpn) 
+# GROUP BY cp.xti_persona, sp.cod_segmentacion_global
+# ORDER BY num_clients DESC
+
+```
+
+* La conclusion principal es que el etiquetado de segmento global y tipo de persona son consistentes entre si. Excepto para uno de los códigos de segmento global, los clientes son de forma consistente o de tipo físico o de tipo jurídico. 
+
+* Sin embargo, hay muchos clientes no etiquetados según segmento global (NA) tanto de tipo físico como jurídico. 
+
+*Incluso un porcentaje de ellos no aparece en la tabla de segmento global (requiere OUTER JOIN).
+
+
+```{r Número de clientes por segmento global y tipo de persona, echo=FALSE}
+
+# Number of clients by segmento_global and person type
+q.agg.segmento_global_tipo <- "
+SELECT xti_persona, cod_segmentacion_global, num_clients
+FROM da_cdepablo.clientes_tipo_segmento_global"
+
+df.agg.segmento_global_tipo <- qhive(q.agg.segmento_global_tipo)
+ 
+qplot(data=df.agg.segmento_global_tipo,       
+      x=reorder(cod_segmentacion_global,num_clients), y=num_clients,  fill=factor(xti_persona),
+      stat="identity",
+      geom="bar",
+      position="dodge",
+      xlab="Segmento Global",
+      ylab="Number of clients", 
+      main="Distribution of clients per segmento global")
+
+# Check that the number of clients is consistent after crossing (require an outer join) with segmento global  
+# sum(df.agg.segmento_global_tipo$num_clients)
+
+```
+
+Eliminanos los clientes no etiquetados para apreciar mejor las proporciones. En principio la clasificación global es coherente con el tipo de persona jurídica o física. 
+
+* El mayor volumen de clientes segmentados de tipo jurídico se encuentran en los segmentos: 
+  * código 35 (Pequeñas empresas, 230K) 
+  * código 36 (Micropymes, 1100K)
+  
+
+* Aún asi, el número de entidades de tipo jurídico que tenemos sin etiquetar es muy grande (600K) o con el codigo 63 (Resto, 115K).
+
+* Además también está la categoría "Resto PFS con Actividad Empresarial" (código 54 y tipo persona = F) que tiene un volumen similar a pequeñas empresas (250K).
+
+
+```{r Número de clientes por segmento global y tipo de persona v2, echo=FALSE}
+
+tmp.agg.segmento_global_tipo <- df.agg.segmento_global_tipo[(!is.na(df.agg.segmento_global_tipo$cod_segmentacion_global)), ]
+qplot(data=tmp.agg.segmento_global_tipo,       
+      x=reorder(cod_segmentacion_global,num_clients), y=num_clients, 
+      stat="identity",
+      geom="bar",
+      xlab="Segmento Global",
+      ylab="Number of clients", 
+      main="Distribution of clients per segmento global  - removing not tagged") + facet_grid(xti_persona ~ .)
+
+````
+
+### Distribucion de clientes de tipo Persona Jurídica
+
+
+* Como ya se apreciaba más arriba, un porcentaje no despreciable no están informados con segmentacion global. 
+
+
+```{r Distribucion de clientes de tipo persona juridica, echo=FALSE}
+
+tmp2.agg.segmento_global_tipo = df.agg.segmento_global_tipo[df.agg.segmento_global_tipo$xti_persona == 'J',] 
+qplot(data=tmp2.agg.segmento_global_tipo,       
+      x=reorder(cod_segmentacion_global,num_clients), y=num_clients, 
+      stat="identity",
+      geom="bar", 
+      xlab="Segmento Global",
+      ylab="Number of clients", 
+      main="Distribution of clients for tipo persona Jurídica (J)")
+
+```
+
+## Exploración de clientes por fechas de alta y de actividad (operacional)
+
+Objetivo: Identificar si hay valores de fecha en los clientes que nos puedan dar una idea sobre si se trata de clientes activos.
+
+Miramos unicamente a información que está disponible a partir de la tabla de *clientes*
+
+```{r, tabla con el subconjunto de clientes de tipo pyme, echo=FALSE }
+
+# CREATE TABLE da_cdepablo.pymes
+# AS
+# SELECT s.cod_segmsubo, c.cod_persctpn, fec_altapers, fec_ultmodop
+# FROM da_pro.clientes_corp c JOIN da_pro.segmento_global s
+# ON (c.cod_entalfa = s.cod_entalfa AND c.cod_paisoalf = s.cod_paisoalf 
+# AND c.cod_persctpn = s.cod_persctpn)
+# WHERE c.partition_id = '20150228' AND s.partition_id = '20150228'
+# AND (s.cod_segmsubo = 35 OR s.cod_segmsubo = 36)
+
+```
+
+
+### Clientes por fecha de alta
+
+Encontramos varios valores anómalos - fechas del siglo anterior, NULL y fechas con el año=9999 - que filtramos.
+
+
+```{r, fecha de alta de los clientes, echo=FALSE}
+
+# Numero de altas por año
+q.actividad_clientes <- "
+SELECT EXTRACT(year FROM fec_altapers) fecha_alta, COUNT(*) num_clients
+FROM da_cdepablo.pymes
+GROUP BY fecha_alta
+ORDER BY fecha_alta ASC
+" 
+
+
+df.actividad_clientes <- qimpala(q.actividad_clientes)
+
+tmp.actividad_clientes <- df.actividad_clientes[df.actividad_clientes$fecha_alta > 1975, ]
+tmp.actividad_clientes <- tmp.actividad_clientes[tmp.actividad_clientes$fecha_alta <2016, ]
+
+qplot(fecha_alta, num_clients, data=tmp.actividad_clientes, geom="line")
+
+
+```
+
+### Fecha de ultima modificación operacional
+
+Del mismo modo en las fechas de ultima actividad operacional, hay valores anómalos correspondientes con toda posibilidad a modificaciones en bloque.
+
+```{r, fechas de ultima actividad , echo=FALSE}
+
+# Número de cuentas modificadas por mes
+q.ultima_actividad_clientes <- "
+SELECT TRUNC(fec_ultmodop, 'MM') fecha_ultmodop, COUNT(*) num_clients
+FROM da_cdepablo.pymes
+GROUP BY fecha_ultmodop
+ORDER BY fecha_ultmodop ASC
+" 
+df.ultima_actividad_clientes <- qimpala(q.ultima_actividad_clientes)
+
+df.ultima_actividad_clientes <- data.frame( fecha = as.Date(df.ultima_actividad_clientes$fecha_ultmodop),
+                   num_clients = df.ultima_actividad_clientes$num_clients ) 
+
+plot.ultima_actividad_clientes <- qplot(fecha, num_clients, data=df.ultima_actividad_clientes, geom="line")
+
+plot.ultima_actividad_clientes + theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 0.5)) + scale_x_date()
+
+```
+
+## Volumen de contratos para los sectores pymes y micropymes
+
+Objetivo 1: Identificar valores de fechas en los contratos que nos permitan asociar a actividad
+Objetivo 2: Conocer volumen y distribución temporal de los diferentes tipos de productos
+
+### Distribución de la contrapartida y volumen de contratos con pymes
+
+Primero alguna estadística, sore el tipo de contratos, en particular la distribución por tipos de contrapartida
+
+
+```{r, echo=FALSE, fig.width=10, fig.height=20}
+
+q.num_contratos <- "
+SELECT cod_pgccontr cod_contrapartida, COUNT(*) num_contracts
+FROM da_cdepablo.contratos_pymes 
+GROUP BY cod_pgccontr
+ORDER BY num_contracts DESC
+"
+
+df.num_contratos <- qimpala(q.num_contratos)
+
+# Join catalog and aggregation for better description
+tmp.num_contratos <- merge(df.num_contratos,df.catalog.contrapartida, all.x=TRUE)
+
+
+plot.num_contratos <- qplot(data=tmp.num_contratos,       
+      x=reorder(paste(des_contrapartida, cod_contrapartida, sep=" - "), num_contracts), y=num_contracts, 
+      stat="identity",
+      geom="bar",
+      xlab="Contrapartida",
+      ylab="Number of contracts", 
+      main="Distribution of contracts by contrapartida")  
+
+plot.num_contratos + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) + coord_flip()
+
+
+```
+
+
+### Análisis temporal de contratos
+
+```{r, echo=FALSE}
+
+# Número mínimo de contratos mensuales para que se muestre el dato 
+min_contracts <- 0 
+
+# Mascara para seleccionar grupos de productos por código de contrapartida
+contrapartida_mask <- "...."
+
+#Filtra por fecha de contrato desde esta fecha...
+fec_altacto_from = '2005-01-01'
+
+#...hasta esta fecha
+fec_altacto_to = '2020-01-01'
+
+```
+
+### Volumen de contratos
+
+Se muestra una distribución de los contratos dados de alta por tipo de contrapartida: 
+ 
+ * Muchos contrapartidas no tienen demasiados datos: Ej. 0001 - CUENTAS PERSONALES 
+ * Productos con un volumen elevado (>10000 en algún mes)
+    * 0412 - RECIBOS DOMICILIADOS NUEVAS APLICACIONES
+    * 0525 - SERVICIOS TELEMÁTICOS NUEVA APLICACION
+    * 0615 - TARJETAS DE CREDITO
+    * 0616 - TARJETAS DEBITO
+ * Productos con un volumen elevado (>1000 en algún mes)
+    * 0020 - CUENTAS PERSONALES
+    * 0041 - IPF
+    * 0083 - PRESTAMOS CREDICONSUMO
+    * 0312 - SEGUROS BBVA - AUTOMOVIL 
+    * 0470 - PROPUESTAS ELECTRÓNICAS 
+    * 0474 - ACUERDOS LINEAS DE PRODUCTO 
+    * 0512 - FACTORING CEDENTES
+    * 0517 - CONFIRMING CLIENTES
+    * 0618 - COMERCIOS TPV
+    * 0905 - PROCEDIMIENTOS JUDICIALES
+    * 0930 - VALORES NACIONALES (VALORES DEPOSITADOS)
+    * 0974 - PRESTAMOS EXBBV
+    
+ * Algunos productos presentan claros patrones estacionales: 
+    * 0474 - ACUERDOS LINEAS DE PRODUCTO - picos a comienzo de año
+    * 0480 - ACUERDOS DE RAPELL - picos a comienzo de año
+    * 0501 - LYRA CONTRATOS
+    * 0020 - CUENTAS PERSONALES - bajada en agosto?
+
+
+```{r Análisis temporal del volumen de contrato , echo=FALSE, fig.width=20, fig.height=20}
+
+q.fechas_contrato <- "
+SELECT cod_pgccontr, TRUNC(fec_altacto, 'MM') fec_alta,  COUNT(*) num_contracts
+FROM da_cdepablo.contratos_pymes
+GROUP BY cod_pgccontr, fec_alta
+ORDER BY cod_pgccontr, fec_alta desc
+"
+
+df.fechas_contrato <- qimpala(q.fechas_contrato)
+
+df.fechas_contrato <- df.fechas_contrato[ (!is.na(df.fechas_contrato$fec_alta)),]
+tmp.df.fechas_contrato <- data.frame( cod_pgccontr = df.fechas_contrato$cod_pgccontr,
+                                      fec_alta = as.Date(df.fechas_contrato$fec_alta),
+                                      num_contracts = df.fechas_contrato$num_contracts ) 
+
+tmp.df.fechas_contrato <- tmp.df.fechas_contrato[ tmp.df.fechas_contrato$fec_alta > fec_altacto_from,] 
+tmp.df.fechas_contrato <- tmp.df.fechas_contrato[ tmp.df.fechas_contrato$fec_alta < fec_altacto_to,] 
+
+# Cuidado esto filtra todos los puntos por debajo del límite
+tmp.df.fechas_contrato <- tmp.df.fechas_contrato[ tmp.df.fechas_contrato$num_contracts > min_contracts,] 
+tmp.df.fechas_contrato <- subset (tmp.df.fechas_contrato, grepl(contrapartida_mask, cod_pgccontr))
+
+tmp.df.fechas_contrato <- dplyr::inner_join(tmp.df.fechas_contrato, df.catalog.contrapartida, by = c("cod_pgccontr" = "cod_contrapartida"))
+tmp.df.fechas_contrato <- dplyr::mutate(tmp.df.fechas_contrato, des_contrapartida = paste(cod_pgccontr, des_contrapartida, sep = " - "))
+
+# plot.fechas_contrato <- qplot(fec_alta, num_contracts, data=tmp.df.fechas_contrato, geom="line", color=factor(cod_pgccontr)) 
+# plot.fechas_contrato + facet_wrap(   ~ des_contrapartida, ncol= 5, scales="free_y")  
+
+
+```
+
+#### Productos más contratados
+
+```{r Evolucion de los productos mas contratados , echo=FALSE, fig.width=20, fig.height=10}
+
+
+df.most_contracts <- df.num_contratos %>% dplyr::filter(num_contracts > 100000) 
+
+
+tmp.df.fechas_contrato_most_contracted <- dplyr::semi_join(tmp.df.fechas_contrato, df.most_contracts, by = c("cod_pgccontr" = "cod_contrapartida") )
+
+plot.fechas_contrato <- qplot(fec_alta, num_contracts, data=tmp.df.fechas_contrato_most_contracted, geom="line", color=factor(cod_pgccontr)) 
+plot.fechas_contrato + facet_wrap(   ~ des_contrapartida, ncol= 5, scales="free_y")  
+
+
+
+```
+
+#### Productos contratados - segundo orden
+
+```{r Evolución de los productos contratados - segundo orden , echo=FALSE, fig.width=20, fig.height=10}
+
+
+df.common_contracts <- df.num_contratos %>% dplyr::filter(num_contracts > 5000) %>% dplyr::filter(num_contracts < 100000)
+
+tmp.df.fechas_contrato_common_contracted <- dplyr::semi_join(tmp.df.fechas_contrato, df.common_contracts, by = c("cod_pgccontr" = "cod_contrapartida") )
+
+plot.fechas_contrato <- qplot(fec_alta, num_contracts, data=tmp.df.fechas_contrato_common_contracted, geom="line", color=factor(cod_pgccontr)) 
+plot.fechas_contrato + facet_wrap(   ~ des_contrapartida, ncol= 5, scales="free_y")  
+
+
+
+```
+
+### Volumen de contratos con fechas no informadas 
+
+Ciertos productos no tienen la fecha de alta informada, pero son bastante comunes:
+
+```{r Productos con fechas no informadas, echo=FALSE}
+
+
+q.contratos_no_fecha_alta <- "
+SELECT cod_pgccontr, TRUNC(fec_altacto, 'MM') fec_alta,  COUNT(*) num_contracts
+FROM da_cdepablo.contratos_pymes
+WHERE fec_altacto IS NULL
+GROUP BY cod_pgccontr, fec_alta
+ORDER BY num_contracts desc
+"
+df.contratos_no_fecha_alta <- qimpala(q.contratos_no_fecha_alta)
+
+df.contratos_no_fecha_alta <- dplyr::inner_join(df.contratos_no_fecha_alta, df.catalog.contrapartida, by = c("cod_pgccontr" = "cod_contrapartida"))
+
+dplyr::tbl_df(df.contratos_no_fecha_alta)
+
+# plot(cod_pgccontr, num_contracts, q.contratos_no_fecha_alta)
+
+```
+
+
+
+## Distribución de productos por clientes tipo pyme 
+
+¿Cuantos contratos tiene cada cliente?Obtenemos una distribucion para el número de clientes que tienen N contratos. 
+
+La distribución permite ver que hay ciertos casos anómalos que habrá que filtrar como que haya clientes con miles de contratos
+La curva tiene un codo en torno a los 10 o 12 contratos que parece que se explica porque ciertas operaciones generan varios contratos. Si esta parece la norma, habría que explorar con más detalle aquellos clientes que solo tienen un producto contratado o pocos de ellos. 
+
+
+```{r, echo=FALSE}
+
+q.dist.products = "
+SELECT num_contracts, count(*) num_clients
+FROM
+(
+SELECT cod_persctpn, count(*) num_contracts
+FROM da_cdepablo.contratos_pymes
+GROUP BY cod_persctpn
+ORDER BY num_contracts DESC
+) t
+GROUP BY num_contracts
+ORDER BY num_contracts
+"
+
+df.dist.products <- qimpala(q.dist.products)
+
+#df.dist.products <- df.dist.products[df.dist.products$num_contracts < 25000, ]
+
+plot.dist.contracts <- qplot(num_contracts, num_clients, 
+                             data=df.dist.products, 
+                             log="xy",
+                             xlab = "Número de productos contratados",
+                             ylab = "Número de clientes",
+                             main = "Distribución de clientes respecto al número de productos contratados")
+
+
+plot.dist.contracts
+
+```
+
+
+

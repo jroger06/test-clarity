@@ -1,0 +1,559 @@
+
+---
+title: 'Pymes: Estimacion de los cortes en el margen para Modelo de Valor Clientes'
+author: "BBVA D&A - Customer Solutions - César de Pablo"
+date: "13/01/2016"
+output: html_document
+---
+========================================================
+
+
+```{r, echo=FALSE}
+# This is the first mandatory section.
+
+title     <- '[Pymes] Estimacion de los cortes para Modelo de Valor Clientes'
+keywords  <- 'pymes, sme, value models, valor, balances, P&L'
+```
+
+
+```{r load libraries, echo=FALSE, warning=FALSE, message=FALSE}
+
+library(DBI)
+library(rJava)
+options(warn=-1, width = 250)
+source('~/bda_clarity/tools/warehouse_basics.R')
+source('~/bda_clarity/tools/multiplot.R') ;
+
+
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+
+library(knitr)
+knitr::opts_chunk$set(cache=FALSE, tidy=TRUE, eval=TRUE, echo=FALSE, fig.width = 12, fig.height = 8 )
+
+```
+
+## Objetivo
+
+El objetivo de este análisis es explorar diferentes parámetros relacionadas con el valor de la empresas clientes. 
+
+Valor se ha definido en el proyecto como el margen que dejaría un cliente si fuéramos su único banco. 
+
+
+   1. El valor se va a representar como una variable ordinal (1 a 5 estrellas). En primer lugar se explora cual sería el valor adecuado para cada uno de los cortes con el fin de representar o validar diferentes formas de plantear el problema (regresion vs regresion ordinal vs clasificación). Como referencia se usa el margen anual que los clientes dejan en el banco.    
+   
+    
+Para el margen se han utilizado los datos a fecha de Diciembre de 2014.
+
+
+### 1. Carga de datos
+ 
+ - Seleccionamos el tablon de datos con todas los clientes pata los que se tiene el margen
+
+```{r Carga de datos, cache=FALSE}
+
+# Cargamos todos los que tienen algun dato de balance
+table.origin = "da_pymes.tablon_clientes"
+
+q.tablon_valor_balance <- paste("SELECT * FROM ", table.origin , " WHERE margen_a IS NOT NULL")
+
+df.tablon_valor_balance <- qhive(q.tablon_valor_balance)
+# 
+dim(df.tablon_valor_balance)
+# 152257    423
+
+```
+
+
+```{r eval=FALSE, echo=FALSE}
+
+names(df.tablon_valor_balance)
+
+```
+
+
+```{r Nombres y subgrupos de variables, echo=FALSE}
+
+# Grupos de nombres de columnas
+names.base <-c("codigo", "cnae", "empleados")
+names.cuenta <- grep("^cuenta_", names(df.tablon_valor_balance)) 
+names.var <- grep("^var_", names(df.tablon_valor_balance))
+names.pct <- grep("^pct_", names(df.tablon_valor_balance))
+
+# Factores para cnae y año
+df.tablon_valor_balance$cnae_num <- df.tablon_valor_balance$cnae
+df.tablon_valor_balance$cnae <- as.factor(as.integer(df.tablon_valor_balance$cnae_num))
+df.tablon_valor_balance$ano  <- as.factor(df.tablon_valor_balance$ano)
+
+# Generacion del factor por grupo principal de CNAE
+df.tablon_valor_balance$cod_cnae_1 <- as.character(df.tablon_valor_balance$cod_cnae_1)
+df.tablon_valor_balance$cod_cnae_1[is.na(df.tablon_valor_balance$cod_cnae_1)] <- '<'
+df.tablon_valor_balance$cod_cnae_1 <- as.factor(df.tablon_valor_balance$cod_cnae_1)
+
+```
+
+
+```{r Transformar variables que en fichero tienen representacion diferente, eval=FALSE, echo=FALSE, warning=FALSE}
+
+for (i in names.cuenta) {
+  df.tablon_valor_balance[,i] <- as.numeric(df.tablon_valor_balance[,i])
+}
+
+```
+
+
+
+```{r Calculo de la CIRBE, echo=FALSE}
+
+
+df.tablon_valor_balance$cirbe_sistema <- pmax(df.tablon_valor_balance$imp_dridban, df.tablon_valor_balance$imp_dridsba, df.tablon_valor_balance$imp_dridreg)
+df.tablon_valor_balance$cuota_cirbe <- ifelse(df.tablon_valor_balance$cirbe_sistema > 0, df.tablon_valor_balance$imp_dridban / df.tablon_valor_balance$cirbe_sistema, 0)
+
+#str(df.tablon_valor_balance$cirbe_sistema)
+#str(df.tablon_valor_balance$cuota_cirbe)
+
+```
+
+
+
+```{r, echo=FALSE}
+
+num.clientes <- nrow(df.tablon_valor_balance)
+
+```
+
+
+Vemos estadísticos básicos de la variable margen:
+```{r}
+
+summary(df.tablon_valor_balance$margen_a)
+
+# Filtramos a un dataset más manejable 
+df.valor <- df.tablon_valor_balance %>%
+            dplyr::select(c(codigo, nif, margen_a, cod_segmsubo, starts_with("cuenta_") ))
+
+
+```
+
+   - Tenemos valores extremos tanto positivos y negativos
+
+  
+```{r Calculo de tramos de CIRBE, echo=FALSE, fig.height=6, fig.width=6}
+
+n.cuota = 10 # Numero de tramos en la variable cuota
+
+# Filtramos a un dataset más manejable 
+df.cirbe_valor <- df.tablon_valor_balance %>%
+                  filter(!is.na(cuota_cirbe)) %>%
+                  select(c(codigo, nif, margen_a, cod_segmsubo, cirbe_sistema, cuota_cirbe)) %>%
+                  mutate(
+                    cuota_cirbe_q = round(n.cuota * cuota_cirbe)
+                    )
+                  
+
+qplot(df.cirbe_valor$cuota_cirbe_q)
+
+num.clientes_cirbe <- nrow(df.cirbe_valor) 
+
+```
+
+
+
+## ¿Cual es la distribucion del margen en funcion del segmento ?
+
+
+### Calculamos los cuantiles de valor en funcion del margen para el segmento 35
+
+  - Restringimos a los que tienen margen positivo
+  - Usamos 4 (2 a 5 estrellas) quantiles para dividir a los clientes. 
+  - La primera estrella la reservamos para los que tienen margen negativo
+  - Tienen CIRBE > 0.7 
+
+```{r Numero de quantiles, echo=TRUE}
+
+n.tiles = 4
+
+```
+
+
+```{r Calculo de los cortes para el segmento 35}
+
+df.segmento_35 <- df.cirbe_valor %>%
+  filter(margen_a > 0) %>%
+  filter(margen_a < 100000) %>%
+  filter(cod_segmsubo == "35") %>%
+  filter(cuota_cirbe_q >= 7 ) %>%  
+#  filter(cuota_cirbe_q < 10 ) %>%
+  select(nif, margen_a, cuota_cirbe, cod_segmsubo, cuota_cirbe_q, cirbe_sistema ) %>%
+  mutate(tile_margen_a = ntile(log10(margen_a + 1), n.tiles)) 
+
+num.clientes_segmento_35 <- nrow(df.segmento_35)
+
+df.segmento_35_tiles <- df.segmento_35 %>%
+  dplyr::group_by(tile_margen_a) %>%
+  dplyr::summarise(
+    min = min(margen_a),
+    max = max(margen_a),
+    avg = mean(margen_a),
+    median = median(margen_a),
+    sd = sd(margen_a))
+
+df.segmento_35_tiles
+
+```
+
+
+
+### Calculamos los cuantiles en funcion del margen para el segmento 36
+
+  - Restringimos a los que tienen margen positivo
+  - Tienen CIRBE > 0.7 
+
+```{r Calculo de los cortes para el segmento 36 }
+
+
+df.segmento_36 <- df.cirbe_valor %>%
+  filter(margen_a > 0) %>%
+  filter(margen_a < 100000) %>%
+  filter(cod_segmsubo == "36") %>%
+  filter(cuota_cirbe_q >= 7 ) %>%  
+#  filter(cuota_cirbe_q < 10 ) %>%
+  select(nif, margen_a, cuota_cirbe, cod_segmsubo, cuota_cirbe_q, cirbe_sistema ) %>%
+  mutate(tile_margen_a = ntile(log10(margen_a + 1), n.tiles)) 
+
+num.clientes_segmento_36 <- nrow(df.segmento_36)
+
+df.segmento_36_tiles <- df.segmento_36 %>%
+  dplyr::group_by(tile_margen_a) %>%
+  dplyr::summarise(
+    min = min(margen_a),
+    max = max(margen_a),
+    avg = mean(margen_a),
+    median = median(margen_a),
+    sd = sd(margen_a))
+
+df.segmento_36_tiles
+
+
+```
+
+#### Conteo resumen
+
+Número de clientes:  `r num.clientes` 
+Número de Empresas Cliente con CIRBE informada:  `r num.clientes_cirbe` 
+Porcentaje de Clientes con CIRBE `r num.clientes_cirbe/num.clientes`
+Segmento 35 con cuota CIRBE > 0.7 : `r num.clientes_segmento_35`
+Segmento 36 con cuota CIRBE > 0.7 : `r num.clientes_segmento_36`
+Clientes cuota CIRBE > 0.7 : `r num.clientes_segmento_35 + num.clientes_segmento_36`
+% cuota CIRBE > 0.7 : `r (num.clientes_segmento_35 + num.clientes_segmento_36)/num.clientes_cirbe`
+
+#### Proporción de clientes por segmento
+
+```{r Porcentaje de clientes por segmento, fig.height=6, fig.width=6}
+
+df.valor %>%
+    ggplot(aes(x=cod_segmsubo)) + 
+    geom_bar() + 
+    geom_text(aes(y = (..count..),
+                  label = scales::percent((..count..)/sum(..count..))),
+              stat="bin",
+              colour="darkblue", vjust=-0.5) +
+    ggtitle("Numero de clientes por segmento") 
+
+```
+
+  Hay cuatro veces más clientes del Segmento 36 respecto del Segmento 35 
+
+
+```{r Funciones de ayuda, echo=FALSE}
+
+tile_valor <- function(df.valor, cortes, etiquetas) {
+
+  df.valor_segmento <- 
+    df.valor %>%
+    select(nif, margen_a, cod_segmsubo )  %>%
+#    filter(cod_segmsubo == segmento_global) %>% 
+    mutate(
+      tile = factor(cut(margen_a, breaks = cortes, labels = etiquetas ))
+      )  
+
+  return(df.valor_segmento)
+}
+
+
+
+
+stats_segmento <- function(df.valor, cortes, title) {
+  
+  df.valor_segmento <- 
+    df.valor %>%
+    select(nif, margen_a, cod_segmsubo )  %>%
+#    filter(cod_segmsubo == segmento_global) %>% 
+    mutate(
+      tile = factor(cut(margen_a, breaks = cortes ))
+      )  
+    
+  h <- df.valor_segmento %>%
+    ggplot(aes(x=tile)) + 
+    geom_bar() + 
+    geom_text(aes(y = (..count..),
+                  label = scales::percent((..count..)/sum(..count..))),
+              stat="bin",
+              colour="darkblue", vjust=-0.5) +
+    facet_grid(. ~ cod_segmsubo) +
+    ggtitle(title) 
+    
+  df.valor_segmento %>%
+    group_by(tile) %>% 
+    summarise (n = n()) %>%
+    kable()
+
+   return (h)
+  } 
+
+
+cut_title <- function(cuts) {
+  
+  paste(cuts[2:5], collapse = ",")
+}
+
+stats_segmento_cuts <- function(df,cuts,title = "") {
+
+  plot.title <- paste(title, cut_title(cuts), sep = ":    ")
+  stats_segmento(df, cuts, plot.title )
+}  
+
+
+```
+
+
+### ¿Cuál es la distribución de clientes si aplicamos cortes comunes para los dos segmentos?
+
+Aplicamos los cortes calculados sobre empresas vinculadas - sin tener en cuenta segmento
+
+```{r Cortes comunes para los dos segmentos }
+
+labels  <- c("1","2","3","4","5")
+
+cuts    <- c(-Inf, 0, 1529, 3445, 6972, Inf)
+cuts
+
+plot.all <- df.valor %>%  stats_segmento_cuts(cuts, "Cortes comunes (CIRBE > 0.7)")
+plot.all
+
+```
+
+  - Los cortes son demasiado altos para las empresas del segmento 35, acabariamos con un 55% (segmento 36 )  + 10% (segmento 35) con 2 estrellas. 
+  
+  
+### ¿Cual es la distribución de clientes si aplicamos cortes específicos por segmento?
+
+```{r Cortes diferentes para cada segmento }
+
+cuts_35 <- c(-Inf, 0, 392, 1787, 5759, Inf)
+cuts_36 <- c(-Inf, 0, 266, 788 , 2019, Inf)
+
+plot.35 <-  df.valor %>%  filter(cod_segmsubo == "35") %>% stats_segmento_cuts(cuts_35, "S.35")
+plot.36 <-  df.valor %>%  filter(cod_segmsubo == "36") %>% stats_segmento_cuts(cuts_36, "S.36")
+
+multiplot(plot.35, plot.36, cols = 2)
+
+
+```
+
+### Comparación: Cortes comunes vs Cortes por segmento
+
+```{r Plot resumen, fig.height=12}
+
+estrellas_35 <- df.valor %>% filter(cod_segmsubo == "35") %>% tile_valor(cuts_35, labels)
+estrellas_36<- df.valor %>% filter(cod_segmsubo == "36") %>% tile_valor(cuts_36, labels) 
+
+estrellas <- rbind(estrellas_35, estrellas_36)
+
+plot.estrellas.title <- paste("S35:", cut_title(cuts_35), "S36" , cut_title(cuts_35))
+
+plot.estrellas <- estrellas %>%
+    ggplot(aes(x=tile)) + 
+    geom_bar() + 
+    geom_text(aes(y = (..count..),
+                  label = scales::percent((..count..)/sum(..count..))),
+              stat="bin",
+              colour="darkblue", vjust=-0.5) +
+    facet_grid(. ~ cod_segmsubo) +
+    ggtitle(plot.estrellas.title) 
+
+multiplot(plot.all, plot.estrellas)
+
+
+```
+
+
+### ¿Cuál es el efecto de redondear los cortes?
+
+ - Ponemos los cortes en numeros redondos
+ - Subimos el corte del segmento más bajo: margen < 25 euros
+
+#### Corte comun
+
+```{r Redondeo de cortes - cortes comunes a segmento, fig.height=12}
+
+cuts_rounded  <- c(-Inf, 25, 1500, 3500, 7000, Inf)
+cuts_rounded
+
+
+plot.all.rounded <- df.valor %>%  stats_segmento_cuts(cuts_rounded, "Cortes comunes (CIRBE > 0.7) ")
+
+multiplot(plot.all, plot.all.rounded)
+
+
+```
+
+#### Cortes diferenciados por segmento
+
+
+```{r Redondeo de cortes - cortes diferentes por segmento, fig.height=12}
+
+cuts_35_rounded <- c(-Inf, 25, 500, 2000, 6000, Inf)
+cuts_36_rounded <- c(-Inf, 25, 250, 1000, 2000, Inf)
+
+plot.35.rounded <- df.valor %>%  filter(cod_segmsubo == "35") %>% stats_segmento_cuts(cuts_35_rounded, "S35")
+plot.36.rounded <-  df.valor %>%  filter(cod_segmsubo == "36") %>% stats_segmento_cuts(cuts_36_rounded, "S36")
+
+multiplot(plot.35, plot.35.rounded, plot.36, plot.36.rounded, cols = 2)
+
+```
+
+
+### ¿Qué ocurre si aplicamos los cortes del segmento 35 a todos? 
+
+```{r Cortes 35 aplicados a todos}
+
+df.valor %>%  stats_segmento_cuts(cuts_35_rounded, "Cortes de 35 aplicados a todos:")
+
+```
+
+ - Como era de esperar, el porcentaje de empresas de segmento 36 que dariamos como valor disminuye.
+
+### Aplicamos los cortes del segmento 36 a todos
+
+```{r Cortes 36 aplicados a todos}
+
+# cuts_36_rounded <- c(-Inf, 25, 250, 1000, 2000, Inf)
+
+plot.todos_36 <- df.valor %>%  stats_segmento_cuts(cuts_36_rounded, "Cortes de 36 aplicados a todos:")
+
+
+```
+
+### Comparación: Cortes comunes redondeados vs Cortes en el segmento 36
+
+```{r Comparacion comunes vs 36 a todos, fig.height=12}
+
+multiplot(plot.all.rounded, plot.todos_36)
+
+```
+
+
+### Comparación: Cortes comunes redondeados vs Cortes redondeados por segmento
+
+```{r Comparacion comunes vs por segmento  a todos, fig.height=12}
+
+estrellas_35 <- df.valor %>% filter(cod_segmsubo == "35") %>% tile_valor(cuts_35_rounded, labels)
+estrellas_36<- df.valor %>% filter(cod_segmsubo == "36") %>% tile_valor(cuts_36_rounded, labels) 
+
+estrellas <- rbind(estrellas_35, estrellas_36)
+
+plot.estrellas_rounded <- paste("S35:", cut_title(cuts_35_rounded), "S36" , cut_title(cuts_35_rounded))
+
+plot.estrellas_rounded <- estrellas %>%
+    ggplot(aes(x=tile)) + 
+    geom_bar() + 
+    geom_text(aes(y = (..count..),
+                  label = scales::percent((..count..)/sum(..count..))),
+              stat="bin",
+              colour="darkblue", vjust=-0.5) +
+    facet_grid(. ~ cod_segmsubo) +
+    ggtitle(plot.estrellas_rounded) 
+
+multiplot(plot.all.rounded, plot.estrellas_rounded)
+
+
+```
+
+
+### Experimentamos con algunos puntos de corte diferentes
+
+ - El corte entre 1 y 2 estrellas es el que mayor numero de clientes mueve. Usamos 1 estrella a los que margen < 50 euros
+
+```{r Comparacion entre cortes comunes raw vs redondeados, fig.height=14}
+
+cuts_rounded2  <- c(-Inf, 50, 1500, 3500, 7000, Inf)
+plot.all.rounded2 <- df.valor %>%  stats_segmento_cuts(cuts_rounded2, "Cortes comunes (CIRBE > 0.7) ")
+
+cuts_rounded3  <- c(-Inf, 100, 1500, 3000, 4500, Inf)
+plot.all.rounded3 <- df.valor %>%  stats_segmento_cuts(cuts_rounded3, "Cortes comunes (CIRBE > 0.7) ")
+
+
+multiplot(plot.all, plot.all.rounded2, plot.all.rounded3 )
+
+
+```
+
+
+```{r Comparacion entre cortes diferenciados, fig.height=14}
+
+cuts_35_rounded2 <- c(-Inf, 50, 500, 2000, 5000, Inf)
+cuts_36_rounded2 <- c(-Inf, 50, 250, 1000, 2500, Inf)
+
+plot.35.rounded2 <- df.valor %>%  filter(cod_segmsubo == "35") %>% stats_segmento(cuts_35_rounded2, "Cortes REDONDEADOS 35 con CIRBE > 0.7")
+plot.36.rounded2 <-  df.valor %>%  filter(cod_segmsubo == "36") %>% stats_segmento(cuts_36_rounded2, "Cortes REDONDEADOS 36 con CIRBE > 0.7")
+
+
+multiplot(plot.35, plot.35.rounded,  plot.35.rounded2)
+multiplot(plot.36, plot.36.rounded,  plot.36.rounded2)
+
+```
+
+
+### Cortes a mano globales
+
+```{r Comparación entre algunos cortes a mano, fig.height=14}
+
+
+# df.valor %>%  stats_segmento(cuts_hand_1, "Cortes a mano aplicados a TODOS")
+
+cuts_hand_1 <- c(-Inf, 0  , 1000, 2000, 5000, Inf)
+cuts_hand_2 <- c(-Inf, 50 , 1000, 2000, 5000, Inf)
+cuts_hand_3 <- c(-Inf, 100, 1000, 2000, 4000, Inf)
+
+plot.h1_35 <- df.valor %>% filter(cod_segmsubo == "35") %>% stats_segmento_cuts(cuts_hand_1)
+plot.h1_36 <- df.valor %>% filter(cod_segmsubo == "36") %>% stats_segmento_cuts(cuts_hand_1)
+
+plot.h2_35 <- df.valor %>% filter(cod_segmsubo == "35") %>% stats_segmento_cuts(cuts_hand_2)
+plot.h2_36 <- df.valor %>% filter(cod_segmsubo == "36") %>% stats_segmento_cuts(cuts_hand_2)
+
+plot.h3_35 <- df.valor %>% filter(cod_segmsubo == "35") %>% stats_segmento_cuts(cuts_hand_3)
+plot.h3_36 <- df.valor %>% filter(cod_segmsubo == "36") %>% stats_segmento_cuts(cuts_hand_3)
+
+
+multiplot(plot.h1_35, plot.h2_35, plot.h3_35, 
+          plot.h1_36, plot.h2_36, plot.h3_36,
+          cols = 2)
+
+
+
+```
+
+
+### Conclusiones 
+
+  - Opciones viables: 
+     - Definir dos escalas segun segmento  
+     - Aplicar la escala obtenida a partir de segmento 36 a todos 
+  - Respecto a cortes: 
+    - Los cortes más sensibles son los de los extremos - primero y ultimo 
+    - Posiblemente tiene sentido mover el corte a algo mayor que cero:  margen < 25 o margen < 50 
+    - Determinar el corte mayor en función de la exclusividad que queramos dar. Posiblemente sea mejor experimentar con algo inferior al cuartil.
+     
+    

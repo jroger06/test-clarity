@@ -1,0 +1,399 @@
+  ---
+output:
+  html_document:
+    self_contained: no
+---
+
+Venta Digital: Hipotecas 
+-------------------
+
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- "[Digital Sales]: First mortgage analysis"
+
+# Keywords. Text separated by commas. E.g. keywords <- 'customer health, recibos' 
+# Keywords can classify the attribute in categories such as 'valor, vinculación, digitalidad', describe used tables such as 'recibos, 
+# transacciones tarjetas, segmento plan uno' or include other relevant info. Search keywords in the portal to find commonly used terms
+# and create new keywords only if justified.
+
+keywords  <- 'hipoteca, CMC, bbva.es, sociodemo'  
+```
+
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))  	# This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+source('~/bda_clarity/tools/warehouse_basics.R')
+
+suppressPackageStartupMessages(library('ggplot2'))
+suppressPackageStartupMessages(library('plyr'))
+suppressPackageStartupMessages(library('data.table'))
+suppressPackageStartupMessages(library('googleVis'))
+op <- options(gvis.plot.tag="chart")
+
+doit = FALSE
+```
+
+
+```{r echo=FALSE}
+labels_euro <- function(x) {# no rounding
+paste0(format(x, big.mark = ",", decimal.mark = ".", trim = TRUE,
+    scientific = FALSE), " €")
+} 
+
+```
+### Clientes que solicitan hipoteca a través de formulario en la NET
+
+El objetivo de este estudio es analizar los datos de los clientes que contratan una hipoteca a través de la net. 
+Mediante la información del CMC tenemos los resultados de las propuestas de contratación de los clientes que completaron el formulario a través de la net. 
+
+Cargamos la tabla de CMC y filtramos por aquellos clientes con hipoteca en fase de puesta en vigor y fecha de inicio de propuesta anterior al 31/12/2014. 
+
+```{r echo=FALSE, eval=TRUE}
+# Dependencies
+da_rafa.clientes_hipotecas_perfil <- clarity.use_table(DEPENDENCY_OTHER_TABLES,
+                           'da_rafa.clientes_hipotecas_perfil',
+                           select = '*')
+da_rafa.omniture_hipotecario_contratados <- clarity.use_table(DEPENDENCY_OTHER_TABLES,
+                           'da_rafa.omniture_hipotecario_contratados',
+                           select = '*')
+
+da_rafa.clientes_contratacion_prestamo <-clarity.use_table(DEPENDENCY_OTHER_TABLES,
+                           'da_rafa.clientes_contratacion_prestamo',
+                           select = '*')
+  
+if (doit){
+  
+do.hive(" CREATE TABLE IF NOT EXISTS da_rafa.propuestas_formularios_CMC     
+            (cod_id_form string, 
+            cod_form string, 
+            des_form string,
+            cod_impulso string,
+            cod_persona string,
+            ind_cliente string, 
+            cod_nif string, 
+            fec_alta string,
+            fec_val string, 
+            cod_estado string,
+            fec_mifecha string, 
+            cod_idefisica string, 
+            cod_client_id string, 
+            cod_nif_cif string, 
+            cod_acontecimiento string, 
+            cod_sub_acontecimiento string, 
+            cod_agrup_comercial string, 
+            cod_comprod string, 
+            cod_banco_inver string, 
+            cod_ofi string, 
+            cod_idcontra string, 
+            cod_folio string, 
+            cod_dependiente string, 
+            cod_tarea string, 
+            cod_fase string, 
+            cod_accion string, 
+            fec_ini_tarea string, 
+            fec_fin_tarea string, 
+            fec_ini_propuesta string,
+            cod_gestor string, 
+            cod_cargo string,
+            cod_propuesta string, 
+            cod_ini_gestor string,
+            cod_cargo_proponente string, 
+            cod_index int, 
+            cod_propuesta2 string, 
+            cod_tarea2 int, 
+            mes_form int, 
+            mes_propuesta int, 
+            mes_ult_tarea int, 
+            dias_form_propuesta int, 
+            dias_form_tarea int)
+COMMENT 'Listado de propuestas asociadas a clientes y no clientes que completaron el formulario de solicitud de hipotecas por la net'
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
+STORED AS TEXTFILE 
+tblproperties ('skip.header.line.count'='2')") 
+
+
+do.hive(" LOAD DATA INPATH    '/tmp/load_hive/formularios_propuestas_cmc.csv' OVERWRITE INTO TABLE  da_rafa.propuestas_formularios_CMC "); 
+
+}
+```
+
+
+
+```{r echo=FALSE, eval=TRUE}
+propuestas_CMC <- qhive("SELECT * FROM da_rafa.propuestas_formularios_CMC")
+propuestas_CMC$fec_ini_propuesta <- as.Date(propuestas_CMC$fec_ini_propuesta, format="%d/%m/%Y")
+propuestas_CMC <- data.table( propuestas_CMC[propuestas_CMC$fec_ini_propuesta < "2014-12-31" & propuestas_CMC$cod_fase=="Puesta en Vigor",] ) 
+
+clientes_CMC <- propuestas_CMC[ , list( cod_fase = max(cod_fase),
+                        cod_sub_acontecimiento = max(cod_sub_acontecimiento),
+                        fec_ini_tarea = max(as.Date(fec_ini_tarea, format="%d/%m/%Y")), 
+                        fec_fin_tarea = max(as.Date(fec_fin_tarea, format="%d/%m/%Y")),
+                        fec_ini_propuesta = max( fec_ini_propuesta), 
+                        ind_cliente = sample(ind_cliente,1), 
+                        cod_comprod = sample(cod_comprod,1), 
+                        dias_form_propuesta = max(dias_form_propuesta), 
+                        fec_mifecha = max(as.Date(fec_mifecha, format="%d/%m/%Y")), 
+                        cod_ofi = sample(cod_ofi,1)
+                        ), by = "cod_persona"]
+```
+
+
+```{r PropuestasFase, results='asis', tidy=FALSE, echo=FALSE, fig.width=8}
+
+Vis_clientes_CMC <- gvisTable(data.frame(clientes_CMC), 
+                              options=list(
+                              width=1000,
+                              height=500,
+                              title="Propuestas CMC"), chartid="PropuestasFase")
+#plot(Vis_clientes_CMC)
+print(Vis_clientes_CMC, 'chart')
+```
+
+Tenemos un total de `r dim(clientes_CMC)[1]` usuarios que ha solicitado una hipoteca, donde hay tanto no clientes (que pasarían a ser nuevos clientes del banco) como ya clientes del banco. 
+
+* Clientes: `r table(clientes_CMC$ind_cliente)[1]`
+* No clientes: `r table(clientes_CMC$ind_cliente)[2]`
+
+Buscando en la BBDD estos clientes/ no clientes tratamos de averiguar más detalles de la contratación y el perfil de cada uno de ellos. 
+
+```{r echo=FALSE}
+filtro_clientes <- paste0("('",paste(as.numeric(as.character(clientes_CMC$cod_persona)), collapse="','"), "')")
+
+sql_clientes_hipotecas <- paste("SELECT * FROM da_rafa.clientes_hipotecas_perfil where cast(cod_persctpn as int) IN ", filtro_clientes )
+clientes_hipotecas <- qhive(sql_clientes_hipotecas)
+
+names(clientes_hipotecas) <- gsub("clientes_hipotecas_perfil.","", names(clientes_hipotecas))
+setnames(clientes_hipotecas, "cod_persctpn", "cod_persona")
+setnames(clientes_hipotecas, "fec_ininter", "fec_ini_propuesta")
+
+clientes_hipotecas$fec_ini_propuesta <- as.Date(clientes_hipotecas$fec_ini_propuesta)
+clientes_hipotecas$cod_persona <- as.numeric(clientes_hipotecas$cod_persona)
+
+
+clientes_hipotecas_cmc <- data.table(join(clientes_hipotecas, clientes_CMC, by= c("cod_persona", "fec_ini_propuesta") , type="inner"))
+
+# Que sean préstamos y quitar duplicados quedandonos con el prestamo de más saldo
+clientes_hipotecas_cmc <- clientes_hipotecas_cmc[grep( "PR�STAMOS", clientes_hipotecas_cmc$des_ctgcom), ]
+ 
+clientes_hipotecas_cmc <- clientes_hipotecas_cmc[order(clientes_hipotecas_cmc$cod_persona, -abs(clientes_hipotecas_cmc$saldo_cierre_mes) ), ] 
+clientes_hipotecas_cmc <- clientes_hipotecas_cmc[ !duplicated(clientes_hipotecas_cmc$cod_persona), ]
+```
+
+Del total de `r dim(clientes_CMC)[1]` usuarios que han solicitado una hipoteca no todos ellos solicitan la apertura de un préstamo hipotecario como tal. Hay algunos casos especiales donde se solicitan subrogaciones, refinanciación, etc. El desglose es la siguiente:  
+
+```{r PropuestasTipo, results='asis', tidy=FALSE, echo=FALSE, fig.width=8}
+Vis_tipo_propuesta_CMC <- gvisTable(data.frame(table(clientes_CMC$cod_sub_acontecimiento)), 
+                              options=list( title="Tipo de propuestas CMC"), chartid="PropuestasTipo")
+#plot(Vis_clientes_CMC)
+print(Vis_tipo_propuesta_CMC, 'chart')
+```
+
+```{r echo=FALSE}
+clientes_hipotecas_cmc <- clientes_hipotecas_cmc[, edad := as.numeric(substr(fec_ini_propuesta,1,4)) - as.numeric(substr(fec_nacimi,1,4))  ]
+clientes_hipotecas_cmc <- clientes_hipotecas_cmc[, plazo := as.numeric(substr(fec_vencto ,1,4)) - as.numeric(substr(fec_ini_propuesta,1,4))  ]
+clientes_hipotecas_cmc <- clientes_hipotecas_cmc[, edad_cat := cut(edad, c(0,29, 35, 45, 65))]
+clientes_hipoteca_apertura <- clientes_hipotecas_cmc[clientes_hipotecas_cmc$cod_sub_acontecimiento=="APERTURA" & clientes_hipotecas_cmc$plazo>0,]
+```
+
+### Plazos e importe solicitado
+
+De los clientes que han realizado una apertura del préstamo hipotecario conseguimos extrear la información de `r sum(clientes_hipotecas_cmc$cod_sub_acontecimiento=="APERTURA")`. Estos tienen identificada la fecha de vencimiento del préstamo y con ella podemos calcular el plazo del préstamo hipotecario. 
+
+El mínimo plazo solicitado es de `r min(clientes_hipoteca_apertura$plazo)` años y el máximo es `r max(clientes_hipoteca_apertura$plazo)` años. La media de las solicitudes es `r round(mean(clientes_hipoteca_apertura$plazo))` años.
+
+```{r echo=FALSE}
+# ggplot(clientes_hipoteca_apertura, aes(x=plazo)) + 
+#     geom_histogram( binwidth=5,
+#                    colour="black", fill="white") +
+#    geom_vline(aes(xintercept=mean(plazo, na.rm=T)),   # Ignore NA values for mean
+#                color="red", linetype="dashed", size=1) + xlab('Plazo de la hipoteca') + ylab('Nº de clientes')
+
+suppressWarnings( ggplot(clientes_hipoteca_apertura, aes(x=edad)) + 
+    geom_histogram( binwidth=5, colour="black") +
+   geom_vline(aes(xintercept=mean(edad, na.rm=T)),   # Ignore NA values for mean
+               color="red", linetype="dashed", size=1) + xlab('Edad de los clientes') + ylab('Nº de clientes') + theme_bw(15) )
+
+suppressWarnings( ggplot(clientes_hipoteca_apertura, aes(x=plazo, fill= edad_cat)) + 
+    geom_histogram( binwidth=5, colour="black") +
+   geom_vline(aes(xintercept=mean(plazo, na.rm=T)),   # Ignore NA values for mean
+               color="red", linetype="dashed", size=1) + xlab('Plazo de la hipoteca') + ylab('Nº de clientes') + theme_bw(15) ) 
+
+```
+
+Si segmentamos por grupos de edades vemos que los clientes más jóvenes suelen pedir hipotecas más a largo plazo y los más mayores hipotecas con plazos más cortos. Este comportamiento es totalmente lógico. 
+
+### Datos sociodemográficos
+
+El **`r paste0(round(prop.table(table(clientes_hipoteca_apertura$xti_csexof)),2)*100, '%')[2]`** de los clientes que han contratado hipoteca son **hombres**. Además de que la mayoría de los clientes que han contratado la hipoteca son hombres, estos también solicitan un importe mayor que las mujeres. 
+
+A la hora de mirar el importe por el que se solicita la hipoteca hay que comprobar la fecha de fin de tarea en la tabla de CMC. Es decir que aunque la propuesta haya sido generada el saldo de la hipoteca no aparece en tabla de saldos persona física hasta el mes siguiente a la fecha de fin de tarea (en este caso Puesta en Vigor).
+
+Por tanto para todos aquellos clientes que han finalizado el proceso a partir del 1 de diciembre de 2014 no se dispone todavía del importe del préstamo. 
+Esto afecta a `r sum(clientes_hipoteca_apertura$saldo_cierre_mes>0)` clientes. Podemos analizar por tanto el resto (`r sum(clientes_hipoteca_apertura$saldo_cierre_mes==0)` clientes).
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+dt.hipotecas_con_saldo <- clientes_hipoteca_apertura[clientes_hipoteca_apertura$saldo_cierre_mes>0,]
+
+suppressMessages( ggplot(dt.hipotecas_con_saldo, aes(x=saldo_cierre_mes)) + 
+    geom_histogram( binwidth = 10000, colour="black") +
+   geom_vline(aes(xintercept=mean(saldo_cierre_mes)),   # Ignore NA values for mean
+               color="red", linetype="dashed", size=1) + xlab('Importe del préstamo hipotecario') + ylab('Nº de clientes') +
+  theme_bw(15) + scale_x_continuous(labels = labels_euro) )
+
+suppressMessages( ggplot(dt.hipotecas_con_saldo, aes(y=saldo_cierre_mes, x = xti_csexof,  fill = xti_csexof)) + 
+   geom_boxplot() + 
+   xlab('Sexo') + ylab('Importe del préstamo hipotecario') +
+   theme_bw(15) + scale_y_continuous(labels = labels_euro) ) 
+
+suppressMessages( ggplot(dt.hipotecas_con_saldo, aes(y=saldo_cierre_mes, x = edad_cat,  fill = edad_cat)) + 
+   geom_boxplot() + 
+   xlab('Franja de edad') + ylab('Importe del préstamo hipotecario') +
+   theme_bw(15) + scale_y_continuous(labels = labels_euro) )
+
+```
+
+La hipoteca de mayor importe solicitada es `r labels_euro(max(dt.hipotecas_con_saldo$saldo_cierre_mes))`, la de menor es de  `r labels_euro(min(dt.hipotecas_con_saldo$saldo_cierre_mes))` y el importe promedio son `r labels_euro(mean(dt.hipotecas_con_saldo$saldo_cierre_mes))`.
+
+
+En el gráfico de importe del préstamo por franja de edad vemos que en el primer tramo de edad los importes que se solicitan son menores (a pesar de que son más a largo plazo), al igual que ocurre con el último tramo de edad. Entre 29 y 35 años es la franja de edad para la que se solicitan préstamos de mayor importe.
+
+Esta distribución se corresponde con lo que cabía esperar por el compromiso entre el reparto del poder adquisitivo por edades y el tiempo disponible para terminar de pagar la hipoteca. 
+
+A continuación vemos la localización de los clientes que han contratado hipoteca en el periodo de campaña donde destacan Madrid, Barcelona y Sevilla. 
+
+```{r mapaGeo, results='asis', tidy=FALSE, echo=FALSE, fig.width=8}
+
+dt.provincias <- clientes_hipoteca_apertura[ , list(clientes = .N) , by= "des_provnacm"]
+
+GeoStates <- gvisGeoChart(dt.provincias, "des_provnacm", "clientes",
+                          options=list(region="ES", 
+                                       displayMode = 'markers',
+                                       width=700, height=500))
+provincias <- gvisTable(data.frame(dt.provincias), 
+               options=list(width=220, height=300))
+
+GT <- gvisMerge(GeoStates,provincias, horizontal=TRUE) 
+plot(GT)
+```
+
+En la distribución por estado civil de los clientes vemos un alto porcentaje de clientes solteros que sería interesante comparar con la distribución de los clientes de oficina. 
+
+
+```{r estadoCivil, results='asis', tidy=FALSE, echo=FALSE, fig.width=8}
+
+estado_civil <- table(clientes_hipoteca_apertura$cod_estcivil)
+
+ 
+EstadoCivil <- gvisPieChart(data.frame(estado_civil), 
+                      options=list(
+                        width=700,
+                        height=400,
+                        title="Estado civil de los clientes que solicitan hipoteca",
+                        legend="{position: 'left', textStyle: {color: 'blue', fontSize: 12}}",
+                        pieHole=0.5), chartid="EstadoCivil")
+plot(EstadoCivil)
+
+```
+
+
+```{r echo=FALSE}
+## Intento de comprobar la retirada de una importante cantidad de dinero en cuenta (posible entrada en la compra de vivienda)
+
+#clientes_cuentas_pers <- clientes_hipotecas[c(grep("CUENTAS PERSONALES",clientes_hipotecas$des_ctgcom),  grep("PENSIONES",clientes_hipotecas$des_ctgcom)) , ]
+# clientes_cuentas_pers <- clientes_hipotecas[ grep("CUENTAS PERSONALES",clientes_hipotecas$des_ctgcom) , ]
+# clientes_cuentas_pers <- data.table( clientes_cuentas_pers[ clientes_cuentas_pers$cod_persona %in% clientes_hipoteca_apertura$cod_persona, ] ) 
+# 
+# # Variacion del saldo en cuenta y planes de pensiones de los clientes
+# saldos_cuenta <-  clientes_cuentas_pers[ , list( saldo_medio_ult_3_mes = sum(saldo_medio_ult_3_mes) , 
+#                                         saldo_cierre_mes = sum(saldo_cierre_mes), 
+#                                         variacion_saldo = sum(saldo_cierre_mes) - sum(saldo_medio_ult_3_mes) ), by="cod_persona"] 
+# 
+
+```
+
+### Navegación por contenido relacionado con hipotecas en la web
+
+Cruzando la información de los clientes que han contratado hipoteca con la navegación que realizaron en la web de BBVA identificamos 4 aspectos importantes:
+
+* Las páginas con información sobre hipotecas (**INFO**). En este caso es la página etiquetada como **particulares:hipotecas y prestamos:index**
+* El **simulador**. **formulario:formulario calculadora hipotecas:**
+* La **calculadora**. **formulario:simulador hipoteca**
+* El **formulario**. **formulario:formulario crm    hipoteca bbva**
+
+A continuación podemos ver una representación de los **"journeys"** de navegación que han hecho los clientes. 
+Hay que tener en cuenta que en esta representación no se están teniendo en cuenta caminos repetidos ni realmientaciones. Es decir, si un cliente Simula-Calcula-Simula de nuevo- Rellena el formulario estaría contando como Simula-Calcula-Formulario. De esta manera evitamos que los caminos sean excesivamente largos y prácticamente irrepresentables. 
+
+
+```{r echo=FALSE, eval=FALSE}
+sql_omniture_hipotecario <- paste0(" SELECT a.*,
+                                      if(a.client_id='' or a.client_id is null ,b.client_id,   a.client_id ) as  global_id 
+                                      FROM omniture.contenido_hipotecario_t4_2014 a
+                                      LEFT OUTER JOIN 
+                                      omniture.omniture_cookie_persona b
+                                      ON (a.visitor_id = b.visitor_id) 
+                                      WHERE cast(trim(b.client_id) as int) in ", filtro_clientes , "or cast(trim(a.client_id) as int) in ", filtro_clientes )
+# 
+nav_hipotecas <- do.hive(paste("CREATE TABLE da_rafa.omniture_hipotecario_contratados AS ",sql_omniture_hipotecario))
+```
+
+
+```{r omnitureHipotecario, results='asis', tidy=FALSE, echo=FALSE, fig.align='center'}
+# Loading table with client omniture information
+nav_hipotecas <- qhive("SELECT * FROM da_rafa.omniture_hipotecario_contratados")
+
+names(nav_hipotecas) <- gsub("^a.","",names(nav_hipotecas )) 
+nav_hipotecas$str_date <- as.Date( nav_hipotecas$str_date , "%B %e %Y") 
+nav_hipotecas <- data.table(nav_hipotecas)
+# new variable with pages content info
+nav_hipotecas <- nav_hipotecas[ , contenido := ifelse(pages == "particulares:hipotecas y prestamos:index", "INFO",
+                                                       ifelse(pages == "formulario:formulario calculadora hipotecas:1 datos hipoteca" 
+                                                        | pages == "formulario:formulario calculadora hipotecas:2 resultado", "SIMULA",
+                                                       ifelse(pages == "formulario:simulador hipoteca", "CALCULA", 
+                                                       ifelse(pages == "formulario:formulario crm hipoteca bbva", "INICIO", 
+                                                       ifelse(pages == "formulario:formulario crm    hipoteca bbva:5 confirmacion"
+                                                        | pages ==  "formulario:formulario crm    hipoteca bbva:4 confirmacion", "CONFIRMA",        
+                                                       "other")))))]
+# reorder nav_hipotecas table to get unique values sorted by date and hour
+nav_hipotecas <- nav_hipotecas[order(global_id, str_date, str_hour, decreasing=FALSE)]
+# create client journeys by concatenating 'contenido' information. 
+journeys <- nav_hipotecas[ contenido!='CONFIRMA'  & contenido!='other' , list(nav = paste0(unique(contenido), collapse=" - ")) , by = global_id]
+paths <- journeys[, list( clientes=.N ) , by=nav]
+
+# Creating data.frame with content information path
+df.paths <- data.frame(data.frame(row.names=1:dim(paths)[1]))
+for (k in 1:(length(unique(nav_hipotecas$contenido))-2)) {
+  df.paths <- cbind(df.paths, data.frame( sapply( strsplit(paths$nav,split=" - ") , function (x) ifelse( is.na(x[k]), "FORMULARIO", paste(k, x[k]) ))))
+}
+df.paths <- cbind(df.paths, "FORMULARIO")
+df.paths <- cbind(df.paths , data.frame(paths$clientes))
+
+names(df.paths) <- c("paso", "paso", "paso", "paso","num_clientes")
+
+edgelist <- data.table( rbind( df.paths[ , c(1,2,5)] , df.paths[ , c(2,3,5)] , df.paths[ , c(3,4,5)] )  ) 
+
+edgelist <- edgelist[, list( num_clientes = sum(num_clientes)), by = c("paso", "paso.1")]
+edgelist <- edgelist[ edgelist$paso != "FORMULARIO",  ]
+
+Sankey <- gvisSankey(edgelist, from="paso", to="paso.1", weight="num_clientes",
+                     options=list(
+                           width= 500,
+                           height= 500, 
+                           sankey="{link: { color: {stroke: 'black', strokeWidth: 1 } },
+                                    node: { color: { fill: '#871b47'},
+                                            nodePadding: 80 ,
+                                            label: { fontName: 'Times-Roman',
+                                                     fontSize: 12,
+                                                     bold: true,
+                                                     italic: false } } }"))
+
+plot(Sankey)
+
+```
+
+Este diagrama representa el `r paste0( round(sum(df.paths$num_clientes)/length(clientes_CMC$cod_persona) ,2) * 100, "%")` de los clientes que han contratado la hipoteca a través del formulario web. El resto acceden directamente al formulario sin pasar por estos apartados de la web o es posible que haya utilizado otra cookie diferente para simular o informarse. 

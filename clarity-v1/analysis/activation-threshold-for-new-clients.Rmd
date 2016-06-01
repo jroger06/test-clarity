@@ -1,0 +1,350 @@
+---
+title: "Activation threshold for new clients"
+output: html_document
+author: "Jose A. Rodriguez"
+date: 21/07/2015
+---
+
+```{r titlekeys, echo=FALSE}
+# This is the first mandatory section.
+
+title     <- 'What is the transaction threshold for active clients? (aka Steve Surgnier\'s experiment)'
+
+# Keywords. Text separated by commas. E.g. keywords <- 'customer health, recibos' 
+# Keywords can classify the attribute in categories such as 'valor, vinculación, digitalidad', describe used tables such as 'recibos, 
+# transacciones tarjetas, segmento plan uno' or include other relevant info. Search keywords in the portal to find commonly used terms
+# and create new keywords only if justified.
+
+keywords  <- c("nuevos clientes")
+```
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))  	# This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+source('~/bda_clarity/tools/warehouse_basics.R')
+```
+
+```{r dependencies, cache=TRUE, echo=FALSE}
+
+ps <- clarity.use_table(DEPENDENCY_OTHER_TABLES,
+                                'da_elmi.6m_inactivos_altas_habit_2',
+                                select = c('cod_persona'),
+                                sqname = 'ps')
+
+txc_full <- clarity.use_table(DEPENDENCY_FULL_PRO_TABLE,
+                         'transacciones_por_canal',
+                         select = '*', sqname='txc_full')
+
+eve_cat <- clarity.use_table(DEPENDENCY_OTHER_TABLES,
+                                'da_catalogos.evento_trn',
+                                select = c('cod_eve_trn', 'des_eve_trn'),
+                                sqname = 'eve_cat')
+
+```
+
+
+
+## Context
+
+This analysis reproduces the experiment shown by Steve Surgnier (Simple Bank): what is the minimum set of transactions done in the first month by new clients who keep active after the second month?
+
+We can call this the "transaction threshold". Steve mentioned a Facebook analogy: Facebook discovered that users who got at least 10 contacts in the first month after signup were more likely to keep active. How would this translate to a bank? 
+
+Similarly to what Steve described: 
+
+* We define clients as inactive if they have not done any transaction of value > 0€ between days 31 and 60 (since date of first activity).   
+
+* We will compute *features* of clients in their first 30 days (e.g. number of transactions of type X) and use a classification tree, in order to automatically elicit rules which separate active from inactive clients. 
+
+(A summary of this analysis is available at https://drive.google.com/open?id=0B77J1SVFU86uNmhIZ0E4ZUNMTGM. Continue reading for all the details)
+
+``` {r init, echo=FALSE,eval=TRUE}
+source("/us/u527703/bda_clarity/tools/methods_connect.R")
+library("ggplot2")
+library("rpart")
+beautify <- function(x, k) format(round(x, k), nsmall=k)
+```
+
+
+## Data selection
+
+We select a random sample of clients with date of first transaction in Oct 2014. 
+
+* We reuse the table da_elmi.6m_inactivos_altas_habit_2 as it was constructed with the aim of filtering new clients (in fact there is no direct way to obtain a list of new clients, see Digital_On-Boarding_Vol1.Rmd). 
+
+* These are clients which signed up in a branch (we could repeat the same study with online signups) 
+
+* The following query selects a random sample of clients during Oct 2014 and retrieving transactions until Dec 2014. This ensures that we have at least 60 days of transactions for each client. 
+
+```{r query, echo=TRUE,cache=TRUE,}
+q <-"SELECT * from da_pro.transacciones_por_canal AS t LEFT SEMI JOIN  (SELECT DISTINCT cod_persona FROM elmi.6m_inactivos_altas_habit_2  WHERE fecha_contrat >= '2014-10-01' and fecha_contrat < '2014-11-01'  AND ABS(CAST(HASH(cod_persona)*rand(1) AS INT) % 100) == 0 LIMIT 2000) AS sub ON t.cod_persctpn = sub.cod_persona WHERE partition_id='20141031' OR partition_id='20141130' OR partition_id='20141231'"
+
+f <- qhive(q)
+```
+
+Some stats below: 
+
+```{r somestats, echo=FALSE, cache=TRUE}
+fc  <- factor(f$t.cod_persctpn)
+#fac <- factor(as.numeric(f$t.cod_persctpn))
+ct <- tapply(fc, fc, function(x) length(x))
+hist(ct, 50, xlab="Número de transacciones", ylab="Número de clientes", main="")
+npers <- length(levels(fc))
+```
+
+* Real number of clients: `r npers` 
+
+* Number of transactions: `r length(fc)`
+
+* Average of transactions per client: `r length(fc) / npers`
+
+Now we take only N clients in order to make the test more agile (once done, it can be repeated with a larger sample)
+
+```{r subset, echo=FALSE}
+N  <- 1000
+f <- subset(f, f$t.cod_persctpn %in% levels(fc)[1:N])
+fc  <- factor(f$t.cod_persctpn)
+```
+N=`r N`
+
+```{r buildfeats, echo=FALSE, cache=TRUE}
+# Convert dates to "days since customer" 
+
+dates <- as.POSIXct(f$t.hms_soli_trn, "%Y-%m-%d %H:%M")
+
+# Get first date per person (tapply does not seem to work)
+
+days <- array(dim=length(dates))
+class(days) <- "numeric"
+num_first  <- array(dim=N)
+num_second <- array(dim=N)
+importe_first <- array(dim=N)
+importe_second <- array(dim=N)
+num_transf  <- array(dim=N)
+num_constransf <- array(dim=N)
+num_recibos <- array(dim=N)
+num_login <- array(dim=N)
+
+j <- 0
+
+for (i in levels(fc)) {
+  j <- j+1
+  mindate <- min(dates[fc == i])
+  days[fc==i] <- difftime(dates[fc==i], mindate, units="days")
+  num_first[j] <- length(which(days[fc==i]<30))
+  num_second[j] <- length(which(days[fc==i]>30 & days[fc==i]<60))
+  importe_first[j] <- sum(f$t.imp_trans[fc==i & days < 30])
+  importe_second[j] <- sum(f$t.imp_trans[fc==i & days >= 30 & days < 60])
+  num_transf[j]    <- sum(fc==i & (f$t.cod_eve_trn == '0069' | f$t.cod_eve_trn == '0073' | f$t.cod_eve_trn == '0072') & days<30)
+  num_constransf[j] <- sum(fc==i & f$t.cod_eve_trn == '0012' & days<30)
+  num_recibos[j]  <-  sum(fc==i & f$t.cod_eve_trn == '0057' & days<30)
+  num_login[j]  <-  sum(fc==i & f$t.cod_eve_trn == '0127' & days<30 & f$t.cod_trnfims == '00000001')
+}
+
+f$days <- days
+rm(days)
+```
+
+Below is a sample sequence of transactions (**cod_eve_trn**) of a client (`r levels(fc)[1]`). 
+
+```{r, cache=TRUE, echo=FALSE}
+print(f$t.cod_eve_trn[f$t.cod_persctpn == levels(fc)[1]])
+```
+
+We visualize the transactions (**cod_eve_trn**) vs day for some clients. It can be appreciated that some clients perform some transactions during the first days and then stop transacting, whereas other clients show transactions regularly during the whole 60-day period. 
+ 
+```{r plottrans, cache=TRUE, echo=FALSE, warning=FALSE}
+f_plot <- subset(f, f$t.cod_persctpn %in% levels(fc)[1:20])
+toplot <- data.frame(f_plot$days, f_plot$t.cod_persctpn, f_plot$t.cod_eve_trn)
+names(toplot) <- c("day", "cliente", "trans")
+library("ggplot2")
+ggplot(toplot, aes(x=day, y=cliente)) + geom_point(aes(col=trans)) + theme(axis.ticks = element_blank()) + xlim(0,60)
+rm(f_plot)
+```
+
+Number of transactions during the first 30 days vs number of transactions during the next 30 days: 
+
+```{r first-vs-second, cache=TRUE, echo=FALSE}
+plot(num_first, jitter(num_second), col="blue", xlab="#Transacciones días 1-30", ylab="#Transacciones días 31 a 60")
+lines(c(0,2000), c(0,2000))
+```
+
+Using the line x=y as a guide, it appears that for the majority of clients the second month contains fewer transactions than the first one. Other stas are shown as reference: 
+
+* Number of clients with 0 transactions during the first month `r length(which(num_first==0))`
+
+* Number of clients with 0 transactions during the second month `r length(which(num_second==0))`
+
+* Number of clients with 0 transactions or amount moved = 0 in the second month: `r length(which(num_second==0 | importe_second == 0))`
+
+* Average number of transactions in the first month, for all clients: `r beautify(mean(num_first), 2)`
+
+* Average number of transactions in the fisrt month, for clients that have 0 transactions in the second month:  `r beautify(mean(num_first[num_second==0]), 2)`
+
+* Number of transactions with amount moved = 0: `r length(which(f$t.imp_trans==0))`
+
+In order to have an idea of which categories of transactions are relevant, we retrieve the names of the categories of transactions which have non-zero amount involved: 
+
+```{r no_nulas, cache=TRUE, echo=FALSE}
+trans_no_nulas  <- f$t.cod_eve_trn[f$t.imp_trans>0]
+f_trans_no_nulas  <- factor(trans_no_nulas)
+ct_trans_no_nulas  <- tapply(f_trans_no_nulas, f_trans_no_nulas, function(x) length(x))
+
+q1  <- "SELECT cod_eve_trn, des_eve_trn FROM da_catalogos.evento_trn WHERE partition_id='20150531'"
+f_all  <- qimpala(q1)
+f1  <- subset(f_all, f_all$cod_eve_trn %in% levels(f_trans_no_nulas))
+
+n_no_nulas  <- length(levels(f_trans_no_nulas))
+
+descripciones_no_nulas  <- array(dim=n_no_nulas)
+
+for (i in 1:n_no_nulas) {
+  index  <- which(f1$cod_eve_trn == levels(f_trans_no_nulas)[i])
+  if (length(index) == 1) {
+    descripciones_no_nulas[i]  <- f1$des_eve_trn[index]
+  } else {
+    descripciones_no_nulas[i]  <- "OTRAS"
+  }
+}
+
+tabla_no_nulas  <- data.frame(levels(f_trans_no_nulas), as.numeric(ct_trans_no_nulas), descripciones_no_nulas)
+names(tabla_no_nulas) <-c("code", "count", "desc")
+
+tabla_no_nulas  <- tabla_no_nulas[with(tabla_no_nulas, order(count, decreasing = TRUE)),]
+print(tabla_no_nulas)
+
+```
+
+Same for the most frequent transactions:
+
+```{r frecuentes, cache=TRUE, echo=FALSE}
+
+top_n_trans  <-  20
+
+f_trans  <- factor(f$t.cod_eve_trn)
+ct_trans <- tapply(f_trans, f_trans, function(x) length(x))
+
+ct_trans  <-  sort(ct_trans, decreasing = TRUE, index.return = TRUE)
+
+top_trans <- data.frame(as.array(levels(f_trans)[ct_trans$ix[1:top_n_trans]]), ct_trans$x[1:top_n_trans])
+names(top_trans) <- c("code", "count")
+
+top_trans$descriptions <- ""
+
+for (i in 1:nrow(top_trans)) {
+  index  <- which(f_all$cod_eve_trn == top_trans$code[[i]])
+  if (length(index) == 1) {
+    top_trans$descriptions[[i]]  <- f_all$des_eve_trn[index]
+  } else {
+    top_trans$descriptions[[i]]  <- "OTRAS"
+  }
+}
+
+print(top_trans)
+
+```
+
+## Classification tree
+
+Below is a list of the features that have been constructed for the analysis. All features have been computed over the first 30 days:
+
+* Sum of amounts of all transactions
+
+* Number of bank tranfers (this includes "transferencias", "traspasos", and "transferencias periódicas", with codes *cod_eve_trn*  69, 73 and 72, respectively). We have integrated these three types to make this feature more informative (otherwise the three separate features would be too sparse). 
+
+* Number of bills (these are transactions with *cod_eve_trn*=57, with description "gestión de recibo domiciliado")
+
+* Number of remote channel logins (code *cod_eve_trn*=127, description "ACCESO", and in addition *cod_trnfims*=00000001)
+
+* Number of operations: Number of transactions of the type mentioned in the previous bullet points. 
+
+We investigated other features, which were discarded as input to  the classification tree
+
+* Number of transactions: Discarded since the meaning of many transactions is still unknown and many transactions are automatic or redundant, such as "DESCONEXION". So this feature is not really "actionable". Instead we use "Number of operations" as describe above since its meaning is clear.  
+
+* Number of queries (*cod_eve_trn*=12, description "CONSULTA DE TRANSFERENCIA"). Although this is a very frequent transaction, its meaning and how it happens is unknown. 
+
+Results of the classification tree: 
+
+```{r, cache=TRUE, echo=FALSE}
+
+# Cuenta transacciones en el primer mes
+
+feats.ntran           <- as.vector(num_first)
+feats.importe         <- as.vector(importe_first)
+feats.num_transf      <- as.vector(num_transf)
+feats.num_constransf  <- as.vector(num_constransf)
+feats.num_recibos     <- as.vector(num_recibos)
+feats.num_login       <- as.vector(num_login)
+
+class_label       <- vector(length = N)
+idx  <- num_second == 0 | importe_second == 0
+class_label[idx]  = "inactive"
+class_label[!idx] = "active"
+
+feats.num_operaciones  <- feats.num_transf + feats.num_recibos + feats.num_login
+
+tree  <- rpart(class_label ~ feats.num_operaciones  + feats.importe + feats.num_transf + num_recibos + num_login, method="class")
+
+print(tree)
+#plotcp(tree)
+plot(tree, uniform=TRUE)
+text(tree, use.n=TRUE, all=TRUE, cex=.8)
+tree$cp
+printcp(tree)
+
+#plot   (num_first[idx],  importe_first[idx],  col="blue")
+#points (num_first[!idx], importe_first[!idx], col="red")
+
+```
+
+##Conclusions
+
+In this client sample, the tree inferes the following rule: 
+
+* IF number of transfers >= 1
+* AND (number of logins >= 3 OR amount > 308 euros ) 
+
+then the client tends to be more active at day 60 than a client who does not meet the rule. In quantitative terms: 
+
+
+```{r prediction, echo=FALSE}
+# Predicción
+idx  <- num_transf >= 1 & (num_login >=3 | importe_first >= 308.4)
+
+dentro_activos    <- sum(importe_second[idx] > 0)
+dentro_inactivos  <- sum(importe_second[idx] == 0)
+percent_dentro    <- dentro_activos / (dentro_activos + dentro_inactivos)
+
+fuera_activos     <- sum(importe_second[!idx] >0)
+fuera_inactivos   <- sum(importe_second[!idx] ==0)
+percent_fuera     <- fuera_activos / (fuera_activos + fuera_inactivos) 
+
+```
+
+* Percent of active clients in the whole sample:  `r beautify(mean(class_label=="active")*100, 1)`%
+
+* Among the clients who meet the previous condition, `r beautify(percent_dentro*100, 1)`% are really active. 
+
+* Among the clients who do not meet the previous condition,  `r beautify(percent_fuera*100, 1)`% are really active. 
+
+Note that these results are on the same sample used to learn the tree, so it is an "optimistic" estimator. So we recompute these figures on a disjoint sample of 1000 clients, and the numbers are:  
+
+* Percent of active clients in the whole sample: 24.2%
+
+* Among the clients who meet the previous condition, 65.4% are really active
+
+* Among the clients who do not meet the previous condition, 16.4% are really active. 
+
+This is not a perfect separation, but note this is a rule that segments clientes into 2 groups, one with a majority of active ones, and one with a majority of non-active ones. 
+
+Things that could be tested: 
+
+* Repeat with online signups
+
+* Revisit the definition of active / inactive customer
+
+* Add card transactions(data in a different table **da_pro.transacciones_por_canal**)

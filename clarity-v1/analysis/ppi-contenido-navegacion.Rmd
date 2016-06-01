@@ -1,0 +1,1206 @@
+---
+output:
+  html_document:
+    self_contained: no
+  pdf_document: default
+---
+[Digital Sales] Pension Plan - ROPO (Online To Store): content consumption related to PPIs
+
+```{r, echo=FALSE}
+# This is the first mandatory section.
+
+title     <- '[Digital Sales] Pension Plan - ROPO (Online To Store): content consumption related to PPIs '
+
+# Keywords. Text separated by commas. E.g. keywords <- 'customer health, recibos' 
+# Keywords can classify the attribute in categories such as 'valor, vinculación, digitalidad', describe used tables such as 'recibos, 
+# transacciones tarjetas, segmento plan uno' or include other relevant info. Search keywords in the portal to find commonly used terms
+# and create new keywords only if justified.
+
+keywords  <- 'planes de pensiones, PPI, pp, plan de pesiones, aportacion extaordinaria, alta'
+```
+
+
+
+```{r, echo=FALSE, cache=FALSE, warning=FALSE, message=FALSE}
+fec_inicial <- "2014-10-01"
+fec_final   <- "2014-12-31"
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+source('~/bda_clarity/tools/warehouse_basics.R')
+source('~/bda_clarity/tools/write.hive.R')
+suppressPackageStartupMessages(library('data.table'))
+suppressPackageStartupMessages(library('ggplot2'))
+suppressPackageStartupMessages(library('plyr'))
+suppressPackageStartupMessages(library('data.table'))
+suppressPackageStartupMessages(library('googleVis'))
+suppressPackageStartupMessages(library('reshape2'))
+suppressPackageStartupMessages(library('reshape'))
+suppressPackageStartupMessages(library('scales'))
+
+op <- options(gvis.plot.tag=NULL)
+op <- options(gvis.plot.tag="chart")
+
+doit = FALSE
+
+
+labels_euro <- function(x) {# no rounding
+paste0(format(x, big.mark = ",", decimal.mark = ".", trim = TRUE,
+    scientific = FALSE), " €")
+} 
+
+
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  require(grid)
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+
+```
+
+
+
+```{r dependencias, echo=FALSE , results='hide'}
+
+### DEPENDENCIAS DE TABLAS
+
+omniture.contenido_ppis          <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'omniture.contenido_ppis', '*', sqname = 'omniture.contenido_ppis')
+#omniture.omniture_cookie_persona <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'omniture.omniture_cookie_persona', '*', sqname = 'omniture.omniture_cookie_persona')
+
+```
+
+
+```{r datosinput, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE , results='hide'}
+
+####DATOS INPUT : ALTAS Y APORTACIONES OCT-DIC14 (NET Y OFI)
+
+#### Tanto las altas como las aportaciones extra NET representan aprox un 10% de las de OFI
+
+#altas_octdic14_ALL = read.xls("../DATA/Altas_y_aport_ext_PPIoct-dic2014.xlsx", header = TRUE, sheet="Altas PPIs")
+altas_octdic14_ALL <- read.csv("/us/e042614//DATA/Altas_ppi_octdic14.csv", header = TRUE, sep="\t", as.is=T, dec=",",quote = "\"'")
+#34.145 registros ALTAS TOTALES Oct-Dic 14
+
+# preprocesing and formatting data
+altas_octdic14_ALL$Fecha.del.Evento <- as.Date(altas_octdic14_ALL$Fecha.del.Evento, format="%e/%m/%y")
+col_importes                        <- grep("^Importe", names(altas_octdic14_ALL))
+altas_octdic14_ALL[ , col_importes] <- apply(altas_octdic14_ALL[ ,col_importes] , 2, function(x) as.numeric( gsub(",",".", gsub("\\.","", x))) )
+altas_octdic14_ALL$cclient          <- as.numeric(altas_octdic14_ALL$cclient)
+col_factors                         <- c("Concepto.de.Gestion","Epigrafe","descrip.territorial","descrip.área.operativa", "descrip.segmento.global", "Segmento.Global" )
+altas_octdic14_ALL[ , col_factors]  <- lapply(altas_octdic14_ALL[,col_factors] , factor)
+altas_octdic14_ALL                  <- data.table(altas_octdic14_ALL)
+altas_octdic14_ALL[ , tipo_cliente  := ifelse( Epigrafe == ".    INDIVIDUALES PARTICIPES" & descrip.área.operativa == "BANCA COMERCIAL", 
+                                              ifelse( Número.Homogéneo.resto == 1 & !is.na( Número.Homogéneo.resto ), "oficina", 
+                                              ifelse( Número.Homogéneo.web == 1                                     , "bbva.es", NA)), 
+                                              NA ) ]
+altas_octdic14_ALL[ , evento := factor("alta")]
+altas_octdic14_ALL                  <- altas_octdic14_ALL[with=FALSE , , grep("X$|X.1", names(altas_octdic14_ALL), invert = T) ]
+
+#257 registros altas NET Oct-Dic 14
+#27.990 registros altas OFI Oct-Dic 14
+
+#aport_extra_octdic14_ALL = read.xls("../DATA/Altas y aport ext PPI oct-dic 2014.xlsx", header = TRUE, sheet="Aportaciones PPIs")
+aport_extra_octdic14_ALL = read.csv("/us/e042614/DATA/Aportextra_octdic14.csv", header = TRUE, sep="\t")
+##62.207 registros APORT EXTRA TOTALES Oct-Dic 14
+
+# preprocesing and formatting data
+aport_extra_octdic14_ALL$Fecha.del.Evento <- as.Date(aport_extra_octdic14_ALL$Fecha.del.Evento, format="%e/%m/%y")
+col_importes                        <- grep("^Importe", names(aport_extra_octdic14_ALL))
+aport_extra_octdic14_ALL[ , col_importes] <- apply(aport_extra_octdic14_ALL[ ,col_importes] , 2, function(x) as.numeric( gsub(",",".", gsub("\\.","", x))) )
+aport_extra_octdic14_ALL$cclient          <- as.numeric(aport_extra_octdic14_ALL$cclient)
+col_factors                         <- c("Concepto.de.Gestion","Epigrafe","descrip.territorial","descrip.área.operativa", "descrip.segmento.global", "Segmento.Global" )
+aport_extra_octdic14_ALL[ , col_factors]  <- lapply(aport_extra_octdic14_ALL[,col_factors] , factor)
+aport_extra_octdic14_ALL                  <- data.table(aport_extra_octdic14_ALL)
+aport_extra_octdic14_ALL[ , tipo_cliente  := ifelse( Epigrafe == ".    INDIVIDUALES PARTICIPES" & descrip.área.operativa == "BANCA COMERCIAL", 
+                                              ifelse( Número.Homogéneo.resto == 1 & !is.na( Número.Homogéneo.resto ), "oficina", 
+                                              ifelse( Número.Homogéneo.web == 1                                     , "bbva.es", NA)), 
+                                              NA ) ]
+aport_extra_octdic14_ALL[ , evento := factor("aportacion extra")]
+##508 registros NET aport extra Oct-Dic 14
+#51.690 registros OFI aport extra Oct-Dic 14
+names(altas_octdic14_ALL) <- tolower(names(altas_octdic14_ALL))
+names(aport_extra_octdic14_ALL) <- tolower(names(aport_extra_octdic14_ALL))
+
+aportaciones_ppi <- rbind( altas_octdic14_ALL, aport_extra_octdic14_ALL, fill=TRUE )
+aportaciones_ppi <- aportaciones_ppi[ !is.na(aportaciones_ppi$tipo_cliente) , ]
+
+# cleaning names
+names(aportaciones_ppi) <- gsub("\\.","_", iconv( names(aportaciones_ppi), to='ASCII//TRANSLIT'))
+
+```
+
+
+```{r datosClientes, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE,results='hide'}
+
+for (col in grep("^importe", names(aportaciones_ppi), value=T) ) aportaciones_ppi[is.na(get(col)), (col) := 0]
+
+clientes_ppi <- aportaciones_ppi[ , list( dias_aportando         = length(unique(fecha_del_evento)),
+                      importe_medio          = mean(importe_homogeneo_resto + importe_homogeneo_web + importe_homogeneo_movil + importe_homogeneo_atm + 
+                                                    importe_homogeneo_linea + importe_homogeneo_contigo, na.rm=T),
+                      importe_maximo         = max(importe_homogeneo_resto + importe_homogeneo_web + importe_homogeneo_movil + importe_homogeneo_atm + 
+                                                    importe_homogeneo_linea + importe_homogeneo_contigo, na.rm=T),
+                      importe_minimo         = min(importe_homogeneo_resto + importe_homogeneo_web + importe_homogeneo_movil + importe_homogeneo_atm + 
+                                                    importe_homogeneo_linea + importe_homogeneo_contigo, na.rm=T),
+                      importe_medio_resto    = mean(importe_homogeneo_resto , na.rm=T),
+                      importe_maximo_resto   = max(importe_homogeneo_resto, na.rm=T),
+                      importe_minimo_resto   = min(importe_homogeneo_resto, na.rm=T),
+                      importe_medio_web      = mean(importe_homogeneo_web, na.rm=T),
+                      importe_maximo_web     = max(importe_homogeneo_web, na.rm=T),
+                      importe_minimo_web     = min(importe_homogeneo_web, na.rm=T),
+                      importe_medio_movil    = mean(importe_homogeneo_movil, na.rm=T),
+                      importe_maximo_movil   = max(importe_homogeneo_movil, na.rm=T), 
+                      importe_minimo_movil   = min(importe_homogeneo_movil, na.rm=T),
+                      importe_medio_atm      = mean(importe_homogeneo_atm, na.rm=T),
+                      importe_maximo_atm     = max(importe_homogeneo_atm, na.rm=T),  
+                      importe_minimo_atm     = min(importe_homogeneo_atm, na.rm=T), 
+                      importe_medio_linea    = mean(importe_homogeneo_linea, na.rm=T), 
+                      importe_maximo_linea   = max(importe_homogeneo_linea, na.rm=T), 
+                      importe_minimo_linea   = min(importe_homogeneo_linea, na.rm=T), 
+                      importe_medio_contigo  = max(importe_homogeneo_contigo, na.rm=T),
+                      importe_maximo_contigo = max(importe_homogeneo_contigo, na.rm=T), 
+                      importe_minimo_contigo = max(importe_homogeneo_contigo, na.rm=T), 
+                      num_productos          = length(unique(subproducto_comercial)),
+                      segmento_global        = sample(segmento_global,1), 
+                      descrip_segmento_global= sample(descrip_segmento_global, 1)
+                      ), by = c("cclient","evento", "tipo_cliente")]
+
+```
+
+```{r cargandoNavegacionOmniture, echo=FALSE, eval=TRUE, cache=TRUE, results='hide'}
+drop_table('omniture.omniture_cookie_persona_ppis')
+do.hive(" CREATE TABLE omniture.omniture_cookie_persona_ppis AS 
+          SELECT
+            visitor_id, 
+            client_id 
+          FROM 
+          (
+            SELECT 
+              visitor_id,
+              client_id, 
+              rank() over (PARTITION BY visitor_id ORDER BY num_page_view DESC) as rank
+            FROM 
+            ( SELECT
+                visitor_id, 
+                client_id, 
+                sum(num_page_views) as num_page_view
+              FROM omniture.contenido_ppis
+              where client_id!='' AND client_id is not null
+              GROUP BY 
+              visitor_id, 
+              client_id 
+            ) V
+          ) R
+          WHERE rank=1" )
+
+sql_omniture_ppis <- paste0("SELECT a.*,
+                             if(a.client_id='' or a.client_id is null , b.client_id,   a.client_id ) as  global_id
+                             FROM (
+                                  SELECT * 
+                                  FROM omniture.contenido_ppis
+                                  WHERE partition_id between '", gsub("-","",as.Date(fec_inicial)) ,"'"," AND '", gsub("-","",fec_final) ,"'"," 
+                                  ) a
+                             LEFT OUTER JOIN 
+                             omniture.omniture_cookie_persona_ppis b
+                             ON (a.visitor_id = b.visitor_id)" )
+
+drop_table("da_rafa.omniture_contenido_ppis")
+nav_ppi <- do.hive(paste("CREATE TABLE da_rafa.omniture_contenido_ppis AS ",sql_omniture_ppis))
+
+
+write.hive(clientes_ppi , "da_rafa.clientes_ppi_t4_2014")
+
+nav_ppi <- qhive( "SELECT a.* 
+                    FROM da_rafa.omniture_contenido_ppis a 
+                    INNER JOIN da_rafa.clientes_ppi_t4_2014 b 
+                    ON ( b.cclient = cast(trim(a.global_id) as int) )
+                    WHERE a.pages RLIKE 'particulares:ahorro e inversion:' ") 
+#do.impala("invalidate metadata da_rafa.clientes_ppi_t4_2014")
+edad_clientes <-  qhive("SELECT b.cclient,
+                          a.fec_nacimi
+                          FROM 
+                          (
+                           SELECT cast(trim(cod_persctpn) as int) AS cclient,  
+                            min(fec_nacimi) as fec_nacimi 
+                           FROM da_pro.clientes_corp 
+                           WHERE partition_id='20150228' AND CAST(cod_entalfa AS INT) = 182 AND cod_paisoalf='ES' 
+                           GROUP BY cod_persctpn 
+                           ) a
+                           INNER JOIN da_rafa.clientes_ppi_t4_2014 b
+                           ON ( b.cclient = a.cclient ) ")
+names(edad_clientes) <- gsub("^a.|^b.","", names(edad_clientes))
+edad_clientes <- data.table(edad_clientes)
+edad_clientes[ , edad :=  as.numeric( round((as.Date(fec_final) - as.Date(fec_nacimi))/365))  ]
+edad_clientes <- edad_clientes[ , list(edad = max(edad) ), by = cclient]
+
+clientes_ppi <- suppressMessages( join(clientes_ppi, edad_clientes))
+
+# segmentacion comportamental perfil digital
+
+digitalidad_clientes <- qhive( "select a.* 
+                                  FROM 
+                                  (
+                                  select cod_cliente as cclient,  
+                                  segmento_comportamental, perfil_digital,  
+                                  frecuencia, mix_actividad 
+                                  from da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20140930 
+                                  where pais='ES' and cast(trim(entidad) as int) = 182
+                                  ) a
+                                   INNER JOIN da_rafa.clientes_ppi_t4_2014 b
+                                   ON ( b.cclient = a.cclient )")
+names(digitalidad_clientes) <- gsub("^a.|^b.","", names(digitalidad_clientes))
+digitalidad_clientes <- unique(digitalidad_clientes)
+clientes_ppi <- suppressMessages( join(clientes_ppi, digitalidad_clientes))
+
+```
+
+```{r omnitureData , echo=FALSE, cache=TRUE, results='hide'}
+names(nav_ppi) <- gsub("^a.","", names(nav_ppi))
+nav_ppi <- data.table(nav_ppi)
+setnames(nav_ppi , "global_id", "cclient")
+nav_ppi$cclient <- as.numeric(nav_ppi$cclient)
+nav_ppi[ , planificador := ifelse( grepl("particulares:ahorro e inversion:planifica tu jubilacion",pages), 
+                                   gsub(" ","_",gsub(":.*$","",gsub("^.*particulares:ahorro e inversion:planifica tu jubilacion:","",pages))), NA) ]
+
+nav_ppi$planificador <- gsub("tengo_","",nav_ppi$planificador)
+nav_ppi$planificador <- gsub("iframe_","",nav_ppi$planificador)
+
+clientes_planficiador <- cast(data = nav_ppi[ !is.na(nav_ppi$planificador), list( num_page_views = sum(num_page_views) ) , by = c("cclient","planificador")] , 
+     cclient ~ planificador, sum , value="num_page_views" )
+names(clientes_planficiador)[-1] <- paste0("planifica:", names(clientes_planficiador)[-1])
+
+clientes_ppi_plan <- suppressMessages( join( clientes_ppi , clientes_planficiador) )
+
+top_pages <- rbind( 
+  apply( clientes_ppi_plan[ with = F , clientes_ppi_plan$tipo_cliente=='bbva.es' & clientes_ppi_plan$evento=='alta', 
+                          eval( grep("^planifica", names(clientes_ppi_plan), value=T) )  ]  , 2 , sum, na.rm=T) , 
+  apply( clientes_ppi_plan[ with = F , clientes_ppi_plan$tipo_cliente=='bbva.es' & clientes_ppi_plan$evento=='alta', 
+                          eval( grep("^planifica", names(clientes_ppi_plan), value=T) )  ]  , 2 , function(x) sum(x>0, na.rm=T) ), 
+  apply( clientes_ppi_plan[ with = F , clientes_ppi_plan$tipo_cliente=='oficina' & clientes_ppi_plan$evento=='alta', 
+                          eval( grep("^planifica", names(clientes_ppi_plan), value=T) )  ]  , 2 , sum, na.rm=T) , 
+  apply( clientes_ppi_plan[ with = F , clientes_ppi_plan$tipo_cliente=='oficina' & clientes_ppi_plan$evento=='alta', 
+                          eval( grep("^planifica", names(clientes_ppi_plan), value=T) )  ]  , 2 , function(x) sum(x>0, na.rm=T) )
+  )
+rownames <- colnames(top_pages)
+top_pages <- data.table(t(top_pages))
+names(top_pages) <- c("NET_page_views", "NET_unique_visitors","Oficina_page_views", "Oficina_unique_visitors" )
+rownames(top_pages) <- rownames
+top_pages[ , pages := rownames]
+top_pages[ , NET_pct_visitors    :=round(NET_unique_visitors/sum(clientes_ppi_plan$tipo_cliente=='bbva.es' & clientes_ppi_plan$evento=='alta'), 3)]
+top_pages[ , oficina_pct_visitors:=round(Oficina_unique_visitors/sum(clientes_ppi_plan$tipo_cliente=='oficina' & clientes_ppi_plan$evento=='alta'), 3)]
+```
+### Planes de pensiones ROPO
+
+#### Analsis de la navegacion por páginas con contenido relacionado con planes de pensiones
+
+Para el conjunto de páginas en la web donde se informa sobre planes de pensiones analizamos tanto páginas vistas com porcentaje de usuarios que finalmente han contratado (tanto oficina como por la NET). El objetivo es ver si estas páginas pueden estar siendo de utilidad para los clientes en la contratación.
+
+Aquí solo estamos teniendo en cuenta los clientes que han dado de **alta un plan de pensiones** y no las aportaciones extraordinarias. Si también añadiésemos al estudio las aportaciones los porcentajes serían significativamente inferiores. Consideramos que los clientes más susceptibles de navegar por páginas con información de planes de pensiones son los que se dan de alta, puesto que para hacer una aportación ya tienen el plan de pensiones abierto y no tendrían tanta necesidad de informarse como los nuevos. 
+
+```{r plots, results='asis', tidy=FALSE, echo=FALSE, cache=TRUE, fig.align='left'}
+
+combo <-  gvisComboChart(top_pages, xvar="pages", yvar=c("NET_pct_visitors", "NET_page_views", "oficina_pct_visitors", "Oficina_page_views"),
+                options=list(title="Visitas a contenido relacionado con PPI de clientes que contratan planes de pensiones",
+                             titleTextStyle="{color:'black',
+                                              fontSize:12}",
+                             pointSize=6,
+                             seriesType="bars",
+                             series="[{type:'bars', 
+                                       targetAxisIndex:0,
+                                       color:'blue'}, 
+                                      {type:'line', 
+                                       targetAxisIndex:1,
+                                       color:'deepskyblue'}, 
+                                      {type:'bars', 
+                                       targetAxisIndex:0,
+                                       color:'forestgreen'},
+                                      {type:'line', 
+                                       targetAxisIndex:1,
+                                       color:'green'}, ]",
+                             vAxes="[{title:'% de clientes',
+                                      format:'#,###%',
+                                      titleTextStyle: {color: 'black'},
+                                      textStyle:{color: 'black'},
+                                      textPosition: 'out'}, 
+                                     {title:'Page Views',
+                                      format:'#,###',
+                                      titleTextStyle: {color: 'black'},
+                                      textStyle:{color: 'black'},
+                                      textPosition: 'out',
+                                      minValue:0}]",
+                             chartArea ="{top:55, width:'80%',height:'75%'}",
+                             width=1000, height=800 ), 
+                 chartid="twoaxiscombochart" )
+
+plot(combo)
+```
+<br>
+Según la gráfica anterior, como cabía esperar el porcentaje sobre el total de clientes en la NET es superior en todos los casos al de oficina. 
+Las páginas vistas es superior en el caso de los clientes de oficina pero esto solo es debido a que son muchos más en valor absoluto que los clientes que contratan por la net. 
+
+Cabe destacar que las páginas con información para **menos de 50 años** y **de 50 a  60 años** son las que más visitan los clientes, así como las **fichas de planes concretos** o el **simulador de aportaciones**. 
+
+La página que más visitan los clientes que hacen **ROPO es la de de 50 a 60 años** mientras que en los **clientes de la NET es la de menos de 50 años**
+
+<br>
+
+#### Distribución de páginas distintas que han visitado los clientes
+
+
+
+```{r piechart , results='asis', tidy=FALSE,  echo=FALSE, cache=TRUE, fig.align='left', fig.width=15}
+clientes_ppi_plan <- clientes_ppi_plan[ , navega_ppi           := apply(clientes_ppi_plan[ with=F,  , grepl("planifica",names(clientes_ppi_plan))], 1, sum, na.rm=T)>0 ]
+clientes_ppi_plan <- clientes_ppi_plan[ , navega_page_distinct := apply(clientes_ppi_plan[ with=F,  , grepl("planifica",names(clientes_ppi_plan))], 1, 
+                                                                        function(x) sum(x>0, na.rm=T)) ]
+clientes_ppi_plan <- clientes_ppi_plan[ , navega_num_pages     := apply(clientes_ppi_plan[ with=F,  , grepl("planifica",names(clientes_ppi_plan))], 1, sum, na.rm=T) ]
+clientes_ppi_plan <- clientes_ppi_plan[ , navega_max_page      := apply(clientes_ppi_plan[ with=F,  , grepl("planifica",names(clientes_ppi_plan))], 1,
+                                                                        function(x) max(0,x,na.rm=T)) ]
+
+page_distincts <- clientes_ppi_plan[  clientes_ppi_plan$evento=='alta', list(clientes=.N ), by= c("tipo_cliente","navega_page_distinct")][order(navega_page_distinct)]
+page_distincts$navega_page_distinct <- as.character( ifelse(page_distincts$navega_page_distinct>5 , '>5' , page_distincts$navega_page_distinct )) 
+page_distincts <- page_distincts[ ,  list(clientes=sum(clientes) ), by= c("tipo_cliente","navega_page_distinct")]
+page_distincts$navega_page_distinct <- as.character(  page_distincts$navega_page_distinct ) 
+
+pagesClientesNet <- gvisPieChart( page_distincts[with= FALSE, page_distincts$tipo_cliente=='bbva.es', c(2,3) ], 
+                      options=list(
+                        width=600,
+                        height=400,
+                        title='Páginas distintas que visitan los clientes que contratan plan de pensiones en bbva.es',
+                        legend="{position: 'left', textStyle: {color: 'blue', fontSize: 12}}",
+                        colors="['#08306B' , '#08519C' , '#2171B5' , '#4292C6'  ,  '#6BAED6' , '#9ECAE1', '#C6DBEF']",
+                        pieHole=0.5), chartid="pagesClientesNet")
+pagesClientesOfi <- gvisPieChart( page_distincts[with= FALSE, page_distincts$tipo_cliente=='oficina', c(2,3) ], 
+                      options=list(
+                        width=600,
+                        height=400,
+                        title='contrataciones en oficina',
+                        colors="['#00441B' , '#006D2C' , '#238B45' , '#41AB5D' , '#74C476'  , '#A1D99B' , '#C7E9C0' ]",
+                        legend="{position: 'left', textStyle: {color: 'blue', fontSize: 12}}",
+                        pieHole=0.5), chartid="pagesClientesOfi")
+
+GT <- gvisMerge(pagesClientesNet,pagesClientesOfi, horizontal=TRUE) 
+plot(GT)
+```
+
+* Aproximadamente un **`r paste0( round(1 - page_distincts[page_distincts$tipo_cliente=='oficina' & page_distincts$navega_page_distinct==0, ]$clientes/sum(page_distincts[page_distincts$tipo_cliente=='oficina', ]$clientes), 1)*100 , '%')`** de clientes que contratan en oficina habían navegador por algúna de las páginas con contenido PPIs. Este porcentaje es del `r  paste0( round(1 - page_distincts[page_distincts$tipo_cliente=='bbva.es' & page_distincts$navega_page_distinct==0, ]$clientes/sum(page_distincts[page_distincts$tipo_cliente=='bbva.es', ]$clientes), 1)*100 , '%')` si miramos los clientes que contratan por la NET. 
+
+<br>
+
+#### Paginas de "auto-perfilado"
+
+Hemos analizado que las visitas a páginas donde el cliente se informa sobre planes de pensiones acorde al perfilado que se muestra en la web está correlado con la edad de los clientes. 
+
+
+```{r verificaEdad, echo=FALSE, cache=TRUE, eval=T, fig.width=12, fig.height=8}
+
+histo_edades <- data.table( rbind( cbind("estoy_muy_lejos_de_la_jubilacion",
+                             clientes_ppi_plan[ clientes_ppi_plan$evento=='alta' & clientes_ppi_plan$"planifica:estoy_muy_lejos_de_la_jubilacion">0, ]$edad) ,
+                      cbind("menos_de_50_anos",clientes_ppi_plan[ clientes_ppi_plan$evento=='alta' & clientes_ppi_plan$"planifica:menos_de_50_anos">0, ]$edad),
+                      cbind("de_50_a_60_anos",clientes_ppi_plan[ clientes_ppi_plan$evento=='alta' & clientes_ppi_plan$"planifica:de_50_a_60_anos">0, ]$edad),
+                      cbind("mas_de_60_anos",clientes_ppi_plan[ clientes_ppi_plan$evento=='alta' & clientes_ppi_plan$"planifica:mas_de_60_anos">0, ]$edad),
+                      cbind("estoy_jubilado",clientes_ppi_plan[ clientes_ppi_plan$evento=='alta' & clientes_ppi_plan$"planifica:estoy_jubilado">0, ]$edad)) )
+
+names(histo_edades) <- c("page","edad")
+histo_edades$edad <- as.numeric(histo_edades$edad)
+histo_edades$page <- factor(histo_edades$page , levels = c("estoy_muy_lejos_de_la_jubilacion", "menos_de_50_anos", "de_50_a_60_anos", "mas_de_60_anos", "estoy_jubilado"))
+
+suppressMessages( ggplot(histo_edades, aes(y=edad, x = page,  fill = page)) + 
+                   geom_boxplot() +  ylab('Edad') +
+                   ggtitle('Visitas a a contenido PPIs por franja de edad') + 
+                   theme_bw(15) + theme(axis.text.x = element_text(angle = 45, hjust = 1))  )
+```
+
+#### Pefil digital de los clientes
+
+Utilizando la segmentación del perfil digital de los clientes en el mes previo al estudio, vemos que hay un porcentaje superior al **80%** en el caso de clientes de la NET son de los más digitales (Compra por la NET y/o Transaccional Avanzado). 
+
+Lógicamente los clientes que se dan de alta en oficina son menos digitales pero hay un pequeño grupo del **5%** que pertenece al grupo de **Compra** pero sin embargo no se han dado de alta por la Net para el plan de pensiones.
+
+```{r perfilDigital, echo=FALSE,cache=T, results='asis', tidy=FALSE }
+page_distincts_digital <- clientes_ppi_plan[  clientes_ppi_plan$evento=='alta' & clientes_ppi_plan$mix_actividad=="Compra", 
+                                      list(clientes=.N ), by= c("tipo_cliente","navega_page_distinct")][order(navega_page_distinct)]
+
+page_distincts_digital$navega_page_distinct <- as.character( ifelse(page_distincts_digital$navega_page_distinct>5 , '>5' , page_distincts_digital$navega_page_distinct )) 
+page_distincts_digital <- page_distincts_digital[ ,  list(clientes=sum(clientes) ), by= c("tipo_cliente","navega_page_distinct")]
+page_distincts_digital$navega_page_distinct <- as.character(  page_distincts_digital$navega_page_distinct ) 
+
+
+perfil_digital_ofi <- data.frame(table(clientes_ppi_plan[clientes_ppi_plan$evento=='alta' & clientes_ppi_plan$tipo_cliente=='oficina',  ]$mix_actividad)/
+                                   sum(clientes_ppi_plan$evento=='alta' & clientes_ppi_plan$tipo_cliente=='oficina' & !is.na(clientes_ppi_plan$mix_actividad)))
+perfil_digital_net <- data.frame(table(clientes_ppi_plan[clientes_ppi_plan$evento=='alta' & clientes_ppi_plan$tipo_cliente=='bbva.es',  ]$mix_actividad)/
+                                   sum(clientes_ppi_plan$evento=='alta' & clientes_ppi_plan$tipo_cliente=='bbva.es' & !is.na(clientes_ppi_plan$mix_actividad)))
+                                 
+perfil_digital <- cbind(perfil_digital_ofi, perfil_digital_net[,2])
+names(perfil_digital) <- c("Perfil Digital", "Clientes Oficina","Clientes NET")
+perfil_digital <- data.frame( t(perfil_digital)) 
+perfil_digital <- perfil_digital[-1, ]
+
+classes <- as.character(sapply(perfil_digital, class))
+colClasses <- which(classes=="factor")
+perfil_digital[, colClasses] <- sapply(perfil_digital[, colClasses], function(x) round(as.numeric(as.character(x)),3))
+
+
+names(perfil_digital) <- perfil_digital_ofi[,1]
+perfil_digital <- cbind(rownames(perfil_digital), perfil_digital)
+names(perfil_digital)[1] <- "Tipo Cliente"
+
+perfilDigital <- gvisColumnChart( perfil_digital , 
+                                 xvar=names(perfil_digital)[1], yvar=c("Other","Consultivo","Transaccional basico","Transaccional avanzado", "Compra"), 
+                       options=list(isStacked=TRUE,
+                                    title="Perfil Digital por tipo de cliente",
+                                    vAxes="[{viewWindowMode:'explicit',
+  	                                      	viewWindow:{min:0, max:1.05}}]",
+                                    hAxis="{format:'###,#%'}",
+                                    tooltip = "{text:'percentage'}",
+                                    width=1000,
+                                    height=500))
+plot(perfilDigital)
+
+```` 
+
+Si analizamos la navegación de estos clientes comprobamos que un **`r paste0( round(1 - page_distincts_digital[page_distincts_digital$tipo_cliente=='oficina' & page_distincts_digital$navega_page_distinct==0, ]$clientes/sum(page_distincts_digital[page_distincts_digital$tipo_cliente=='oficina', ]$clientes), 1)*100 , '%')`** sí ha navegado por la web (este porcentaje es superior a los clientes de oficina en general pero bastante inferior a los que se dieron de alta por la NET).
+
+
+```{r ropoOfiDigital, echo=FALSE,cache=T, results='asis', tidy=FALSE }
+
+pagesClientesOfiDigital <- gvisPieChart( page_distincts_digital[with= FALSE, page_distincts_digital$tipo_cliente=='oficina', c(2,3) ], 
+                      options=list(
+                        width=600,
+                        height=400,
+                        title='Visitas a contenido PPIs de los clientes más digitales que a pesar de ello contrataron en oficina',
+                        colors="['#3F007D' , '#54278F' , '#6A51A3' , '#807DBA' , '#9E9AC8' , '#BCBDDC' , '#DADAEB' ]",
+                        legend="{position: 'left', textStyle: {color: 'blue', fontSize: 12}}",
+                        pieHole=0.5), chartid="pagesClientesOfiDigital")
+plot(pagesClientesOfiDigital)
+```
+
+Si nos centramos en el conjunto de **clientes que contratan en oficina pero que han comprado de manera digital en el pasado** buscamos en la aportación inicial al plan uno de los posibles motivos por los que se deciden a acudir a una oficina en lugar de hacerlo por la NET. 
+
+Como podemos comprobar en el siguiente gráfico los clientes de este conjunto **hacen aportaciones iniciales al plan de pensiones significativamente superiores** a los clientes que lo hacen por la NET como a los clientes de oficina que no pertencen a este grupo. 
+
+```{r importeTipoCliente, echo=FALSE ,  fig.width=8, fig.height=6, fig.align='center'}
+
+importe_clientes <- data.table( rbind( cbind("Clientes oficina (NO Segmento Compra)", 
+                                             clientes_ppi_plan[clientes_ppi_plan$evento=='alta' & clientes_ppi_plan$mix_actividad!="Compra" &
+                                                  clientes_ppi_plan$tipo_cliente=='oficina' , ]$importe_medio) , 
+                                       cbind("Clientes bbva.es", 
+                                             clientes_ppi_plan[clientes_ppi_plan$mix_actividad=="Compra" & clientes_ppi_plan$evento=='alta' & 
+                                                  clientes_ppi_plan$tipo_cliente=='bbva.es', ]$importe_medio), 
+                                       cbind("Clientes oficina (Segmento Compra)", 
+                                             clientes_ppi_plan[clientes_ppi_plan$mix_actividad=="Compra" & clientes_ppi_plan$evento=='alta' & 
+                                                  clientes_ppi_plan$tipo_cliente=='oficina' , ]$importe_medio) ) )
+
+names(importe_clientes) <- c("tipo_cliente", "importe")
+importe_clientes$tipo_cliente <- factor(importe_clientes$tipo_cliente, c("Clientes bbva.es", "Clientes oficina (NO Segmento Compra)", "Clientes oficina (Segmento Compra)"))
+importe_clientes$importe <- as.numeric(as.character( importe_clientes$importe) )
+
+
+suppressMessages( ggplot(importe_clientes[importe_clientes$importe<15000, ], aes(y = importe, x = tipo_cliente,  fill = tipo_cliente)) + 
+                   geom_boxplot() +  ylab('Importe aportación a plan de pensiones') +
+                   ggtitle('Aportaciones a planes de pensiones en la alta por tipo de cliente') +
+                   scale_y_continuous(labels = labels_euro) + 
+                   theme_bw(10) + theme(axis.text.x = element_blank())  )
+
+```
+
+
+```{r dependencias2, echo=FALSE}
+
+### DEPENDENCIAS DE TABLAS
+
+campaigns.navegacion_ppi_octenero <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'campaigns.navegacion_ppi_octenero', '*', sqname = 'campaigns.navegacion_ppi_octenero')
+clarity_elements.saldos_pasivo_particular <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'clarity_elements.saldos_pasivo_particular', '*', sqname = 'clarity_elements.saldos_pasivo_particular')
+clarity_elements.saldos_activo_particular <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'clarity_elements.saldos_activo_particular', '*', sqname = 'clarity_elements.saldos_activo_particular')
+clarity_elements.metricas_segm_comport <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'clarity_elements.metricas_segm_comport', '*', sqname = 'clarity_elements.metricas_segm_comport')
+campaigns.edad <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'campaigns.edad', '*', sqname = 'campaigns.edad')
+da_pro.clientes_domicilios <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'da_pro.clientes_domicilios', '*', sqname = 'da_pro.clientes_domicilios')
+
+segmcomport_sep14 <- clarity.use_table(DEPENDENCY_OTHER_TABLES, 'da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20140930', '*', sqname = 'da_segm_comport.segm_comport_perfil_digit_metricas_num_dias_20140930')
+
+
+
+```
+
+
+
+```{r datosinput2, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+
+####DATOS INPUT : ALTAS Y APORTACIONES OCT-DIC14 (NET Y OFI)
+
+#### Tanto las altas como las aportaciones extra NET representan aprox un 10% de las de OFI
+
+#altas_octdic14_ALL = read.xls("../DATA/Altas_y_aport_ext_PPIoct-dic2014.xlsx", header = TRUE, sheet="Altas PPIs")
+#LIMPIO
+#altas_octdic14_ALL = read.csv("/us/e042614//DATA/Altas_ppi_octdic14_2.csv", header = TRUE, sep="\t")
+altas_octdic14_ALL = read.csv("/us/e042614/DATA/Altas_ppi_octdic14.csv", header = TRUE, sep="\t")
+
+#Replace importes 7.353,34 por 7353.34 interpretable por R and transform character to numeric
+altas_octdic14_ALL$Importe.Homogéneo.resto <- gsub("[.]","", altas_octdic14_ALL$Importe.Homogéneo.resto)
+altas_octdic14_ALL$Importe.Homogéneo.resto <- gsub(",",".", altas_octdic14_ALL$Importe.Homogéneo.resto)
+altas_octdic14_ALL$Importe.Homogéneo.web <- gsub("[.]","", altas_octdic14_ALL$Importe.Homogéneo.web)
+altas_octdic14_ALL$Importe.Homogéneo.web <- gsub(",",".", altas_octdic14_ALL$Importe.Homogéneo.web)
+
+altas_octdic14_ALL2 <- transform(altas_octdic14_ALL, Importe.Homogéneo.web = as.numeric(Importe.Homogéneo.web), Importe.Homogéneo.resto = as.numeric(Importe.Homogéneo.resto))
+altas_octdic14_ALL <- altas_octdic14_ALL2
+
+#34.145 registros ALTAS TOTALES Oct-Dic 14
+altas_octdic14_ALL$Fecha.del.Evento <- as.Date(altas_octdic14_ALL$Fecha.del.Evento, format="%e/%m/%y")
+col_importes <- grep("^Importe", names(altas_octdic14_ALL))
+altas_octdic14_ALL[ , col_importes] <- as.numeric( gsub(",",".", gsub("\\.","", altas_octdic14_ALL[ ,col_importes])) ) 
+
+
+Altas_OctDic14_NET <- subset(altas_octdic14_ALL, altas_octdic14_ALL$Epigrafe == ".    INDIVIDUALES PARTICIPES" &  altas_octdic14_ALL$descrip.área.operativa == "BANCA COMERCIAL" & altas_octdic14_ALL$Número.Homogéneo.web == 1)
+#257 registros altas NET Oct-Dic 14
+Altas_OctDic14_OFI <- subset(altas_octdic14_ALL, altas_octdic14_ALL$Epigrafe == ".    INDIVIDUALES PARTICIPES" &  altas_octdic14_ALL$descrip.área.operativa == "BANCA COMERCIAL" & altas_octdic14_ALL$Número.Homogéneo.resto == 1)
+#27.990 registros altas OFI Oct-Dic 14
+
+#aport_extra_octdic14_ALL = read.xls("../DATA/Altas y aport ext PPI oct-dic 2014.xlsx", header = TRUE, sheet="Aportaciones PPIs")
+##LIMPIO
+#aport_extra_octdic14_ALL = read.csv("/us/e042614/DATA/Aportextra_octdic14_2.csv", header = TRUE, sep="\t")
+aport_extra_octdic14_ALL = read.csv("/us/e042614/DATA/Aportextra_octdic14.csv", header = TRUE, sep="\t")
+
+#Replace importes 7.353,34 por 7353.34 interpretable por R and transform character to numeric
+aport_extra_octdic14_ALL$Importe.Homogéneo.resto <- gsub("[.]","", aport_extra_octdic14_ALL$Importe.Homogéneo.resto)
+aport_extra_octdic14_ALL$Importe.Homogéneo.resto <- gsub(",",".", aport_extra_octdic14_ALL$Importe.Homogéneo.resto)
+aport_extra_octdic14_ALL$Importe.Homogéneo.web <- gsub("[.]","", aport_extra_octdic14_ALL$Importe.Homogéneo.web)
+aport_extra_octdic14_ALL$Importe.Homogéneo.web <- gsub(",",".", aport_extra_octdic14_ALL$Importe.Homogéneo.web)
+
+aport_extra_octdic14_ALL2 <- transform(aport_extra_octdic14_ALL, Importe.Homogéneo.web = as.numeric(Importe.Homogéneo.web), Importe.Homogéneo.resto = as.numeric(Importe.Homogéneo.resto))
+aport_extra_octdic14_ALL <- aport_extra_octdic14_ALL2
+
+
+##62.207 registros APORT EXTRA TOTALES Oct-Dic 14
+
+Aport_extra_OctDic14_NET <- subset(aport_extra_octdic14_ALL, aport_extra_octdic14_ALL$Epigrafe == ".    INDIVIDUALES PARTICIPES" &  aport_extra_octdic14_ALL$descrip.área.operativa == "BANCA COMERCIAL" & aport_extra_octdic14_ALL$Número.Homogéneo.web == 1)
+##5263 registros NET aport extra Oct-Dic 14
+Aport_extra_OctDic14_OFI <- subset(aport_extra_octdic14_ALL, aport_extra_octdic14_ALL$Epigrafe == ".    INDIVIDUALES PARTICIPES" &  aport_extra_octdic14_ALL$descrip.área.operativa == "BANCA COMERCIAL" & aport_extra_octdic14_ALL$Número.Homogéneo.resto == 1)
+#40.608 registros OFI aport extra Oct-Dic 14
+
+``````
+
+
+
+```{r navegacionomniture, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+
+
+#### DATOS DE NAVEGACION OMNITURE
+
+#navegacionALL_Enero15 <- qimpala("select * from campaigns.navegacion_ppi_octenero where fecha LIKE '%January%'")
+#2.956.625 registros en Enero 2015
+navegacionALL_OctDic14 <- qhive("select * from campaigns.navegacion_ppi_octenero where fecha NOT LIKE '%January%'")
+#10.469.335 registros de Octubre a Diciembre 2014
+
+#navegacion <- navegacionALL_Enero15
+navegacion <- navegacionALL_OctDic14
+
+navegacion <- transform(navegacion, idclient= as.numeric(idclient))
+`````
+
+
+
+
+```{r altasnavegacion, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+
+
+######## NAVEGACION EN CONTENIDO Y PPI  + TIEMPO MEDIO ENTRE LA ULTIMA CONEXION WEB Y LA CONTRATACION EN OFICINA
+
+###### ALTAS OCT-DIC 14 OFICINA 
+
+
+
+
+##INPUT DATA (only cod_cliente: MEJOR USAR LOS DATOS DEL EXCELL ABOVE)
+
+#altaEnero15 <- read.csv("../DATA/alta_ppi_enero2015.csv")
+#5192 altas PPI Enero 2015
+#aportextraEnero15 <- read.csv("../DATA/aport_extra_ppi_enero2015.csv")
+## 22.184 aportaciones extra en Enero 2015
+
+
+#altaOctDic14 <- read.csv("../DATA/alta_ppi_octdic2014.csv")
+## 27.281 altas de Octubre a Diciembre 2014
+#aportextraOctDic14 <- read.csv("../DATA/aport_extra_ppi_octdic2014.csv")
+## 40.610 aportaciones extra de Octubre a Diciembre 2014
+
+
+### !!!!! CHANGE data and navegacion  DEPENDING ON THE DATASET
+
+#data <- altaEnero15
+#names(data) <- "idclient"
+# 
+data <- Altas_OctDic14_OFI
+names(data)[15] <- "idclient"
+
+
+data <- transform(data, idclient= as.numeric(idclient))
+
+naveg_data <- merge(data, navegacion, by="idclient")
+
+#length(unique(naveg_data$idclient))
+##269 clientes unicos con altas PPI Enero 2015 con navegacion web
+##821 clientes unicos con aport extra PPI Enero 2015 con navegacion web
+
+#4742 clientes unicos con aport extra PPI Oct-Dic 2014 con navegacion web
+#187 clientes unicos con alta  PPI Oct-Dic 2014 con navegacion web
+
+#length(unique(naveg_data$idclient))/dim(data) *100 
+#Solo un 5,2% navega antes (contenido sin distinguir) altas PPI Enero 2015
+#Solo un 3,7% navega antes (contenido sin distinguir) aport extra PPI Enero 2015
+
+#Un 17% navega antes (contenido sin distinguir) aport extra PPI OctDic 2014
+#Un 13% navega antes (contenido sin distinguir) altas PPI Enero 2015
+
+
+####MIRAR CLIENTES NO LOGEADOS SIN COD_CLIENTE   - visitor_id always = NULL
+
+
+
+
+
+######################
+
+
+
+
+###% DE CLIENTES CON CONTENIDO PLAN DE PENSIONES
+contenido <- grep(".*(ahorro e inversion).*", naveg_data$pages , value=TRUE) 
+navegac_clientes_contenido <- naveg_data[naveg_data$pages %in% contenido,]
+
+
+navegac_clientes_contenido$fecha <- as.Date(navegac_clientes_contenido$fecha, format="%B %d %Y")
+#unique(as.Date(navegacion$fecha, format="%B %d %Y"))
+
+navegac_clientes_contenido$fecha <- format(as.Date(navegac_clientes_contenido$fecha, format="%B %d %Y"), format="%d/%m/%y")
+#unique(format(as.Date(navegacion$fecha, format="%B %d %Y"), format="%d/%m/%y"))
+
+
+
+NOnavegac_clientes_contenido <- naveg_data[!naveg_data$pages %in% contenido,]
+
+#length(unique(navegac_clientes_contenido$idclient))
+##190 altas Enero15 navega antes por contenido PPI
+##591 apor extra Enero15 navega antes por contenido PPI
+
+##2999 apor extra OctDic 2014 navega antes por contenido PPI
+
+
+#length(unique(navegac_clientes_contenido$idclient))/dim(data) *100 
+## Un 3,6% del total de altas ofi PP en ENERO 2015 ha navegado antes por contenido PPI
+## Un 2,6% del total de aport extra ofi PP en ENERO 2015 ha navegado antes por contenido PPI
+
+
+## Un 10% del total de aport extra ofi PP en OctDic 2015 ha navegado antes por contenido PPI
+## Un 9% del total de altas ofi PP en OctDic 2015 ha navegado antes por contenido PPI
+
+
+
+
+
+
+
+
+
+
+#############
+
+
+
+# ### TIEMPO MEDIO DESDE LA ULTIMA VISITA WEB HASTA LA CONTRATACION
+
+
+navegac_clientes_contenido_maxmin <- ddply(navegac_clientes_contenido, c("idclient", "Fecha.del.Evento"), summarise,
+               maxfec    = max(fecha),
+           minfec = min(fecha))
+
+# head(navegac_clientes_contenido_maxmin)
+#   idclient Fecha.del.Evento   maxfec   minfec
+# 1       11         30/12/14 06/12/14 06/12/14
+# 2       35         19/12/14 02/11/14 02/11/14
+# 3      234          9/12/14 26/10/14 26/10/14
+# 4      597          3/11/14 21/11/14 21/11/14
+# 5      733         16/10/14 31/10/14 28/10/14
+# 6      733          4/12/14 31/10/14 28/10/14
+
+## RESTA  FECHA DEL ALTA - FECHA DE ULTIMA NAVEGACION
+navegac_clientes_contenido_maxmin$diferencia <- as.integer(as.Date(navegac_clientes_contenido_maxmin$Fecha.del.Evento, "%d/%m/%y") - as.Date(navegac_clientes_contenido_maxmin$maxfec, "%d/%m/%y"))
+
+# 
+# idclient Fecha.del.Evento   maxfec   minfec diferencia
+# 1       11         30/12/14 06/12/14 06/12/14         24
+# 2       35         19/12/14 02/11/14 02/11/14         47
+# 3      234          9/12/14 26/10/14 26/10/14         44
+# 4      597          3/11/14 21/11/14 21/11/14        -18
+# 5      733         16/10/14 31/10/14 28/10/14        -15
+# 6      733          4/12/14 31/10/14 28/10/14         34
+
+
+#mean(navegac_clientes_contenido_maxmin$diferencia)
+#15 aport periodica octdic14 (positivos y negativos)
+# 8 alta octdic14 (positivos y negativos)
+
+navegac_clientes_contenido_maxmin_pos <- subset(navegac_clientes_contenido_maxmin, diferencia > 0)
+# 120 positivos APORTACION EXTRA OCT-DIC14
+#mean(navegac_clientes_contenido_maxmin_pos$diferencia)
+# 38 días APORTACION EXTRA OCT-DIC14
+# 34 días ALTA
+
+
+#ggplot(navegac_clientes_contenido_maxmin_pos, aes(diferencia)) +
+#  geom_density()
+
+navegac_clientes_contenido_maxmin_neg <- subset(navegac_clientes_contenido_maxmin, diferencia < 0)
+#67 negativos (días después del alta navegan por contenido PPI) APORTACION EXTRA OCT-DIC14
+#mean(navegac_clientes_contenido_maxmin_neg$diferencia)
+# - 24 días APORTACION EXTRA OCT-DIC14
+# - 30 dias ALTA
+
+
+
+altas_octdic14_dif <- navegac_clientes_contenido_maxmin_pos
+altas_octdic14_dif <- cbind( tipo="Altas", altas_octdic14_dif)
+
+
+```
+
+
+
+
+
+```{r aportacionesnavegacion, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+
+
+######## NAVEGACION EN CONTENIDO Y PPI  + TIEMPO MEDIO ENTRE LA ULTIMA CONEXION WEB Y LA CONTRATACION EN OFICINA
+
+###### APORTACIONES EXTRA OCT-DIC 14 OFICINA 
+
+
+
+
+##INPUT DATA (only cod_cliente: MEJOR USAR LOS DATOS DEL EXCELL ABOVE)
+
+#altaEnero15 <- read.csv("../DATA/alta_ppi_enero2015.csv")
+#5192 altas PPI Enero 2015
+#aportextraEnero15 <- read.csv("../DATA/aport_extra_ppi_enero2015.csv")
+## 22.184 aportaciones extra en Enero 2015
+
+
+#altaOctDic14 <- read.csv("../DATA/alta_ppi_octdic2014.csv")
+## 27.281 altas de Octubre a Diciembre 2014
+#aportextraOctDic14 <- read.csv("../DATA/aport_extra_ppi_octdic2014.csv")
+## 40.610 aportaciones extra de Octubre a Diciembre 2014
+
+
+### !!!!! CHANGE data and navegacion  DEPENDING ON THE DATASET
+
+#data <- altaEnero15
+#names(data) <- "idclient"
+# 
+data <- Aport_extra_OctDic14_OFI
+names(data)[15] <- "idclient"
+
+
+data <- transform(data, idclient= as.numeric(idclient))
+
+naveg_data <- merge(data, navegacion, by="idclient")
+
+#length(unique(naveg_data$idclient))
+##269 clientes unicos con altas PPI Enero 2015 con navegacion web
+##821 clientes unicos con aport extra PPI Enero 2015 con navegacion web
+
+#4742 clientes unicos con aport extra PPI Oct-Dic 2014 con navegacion web
+#187 clientes unicos con alta  PPI Oct-Dic 2014 con navegacion web
+
+#length(unique(naveg_data$idclient))/dim(data) *100 
+#Solo un 5,2% navega antes (contenido sin distinguir) altas PPI Enero 2015
+#Solo un 3,7% navega antes (contenido sin distinguir) aport extra PPI Enero 2015
+
+#Un 17% navega antes (contenido sin distinguir) aport extra PPI OctDic 2014
+#Un 13% navega antes (contenido sin distinguir) altas PPI Enero 2015
+
+
+####MIRAR CLIENTES NO LOGEADOS SIN COD_CLIENTE   - visitor_id always = NULL
+
+
+
+
+
+######################
+
+
+
+
+###% DE CLIENTES CON CONTENIDO PLAN DE PENSIONES
+contenido <- grep(".*(ahorro e inversion).*", naveg_data$pages , value=TRUE) 
+navegac_clientes_contenido <- naveg_data[naveg_data$pages %in% contenido,]
+
+
+navegac_clientes_contenido$fecha <- as.Date(navegac_clientes_contenido$fecha, format="%B %d %Y")
+#unique(as.Date(navegacion$fecha, format="%B %d %Y"))
+
+navegac_clientes_contenido$fecha <- format(as.Date(navegac_clientes_contenido$fecha, format="%B %d %Y"), format="%d/%m/%y")
+#unique(format(as.Date(navegacion$fecha, format="%B %d %Y"), format="%d/%m/%y"))
+
+
+
+NOnavegac_clientes_contenido <- naveg_data[!naveg_data$pages %in% contenido,]
+
+#length(unique(navegac_clientes_contenido$idclient))
+##190 altas Enero15 navega antes por contenido PPI
+##591 apor extra Enero15 navega antes por contenido PPI
+
+##2999 apor extra OctDic 2014 navega antes por contenido PPI
+
+
+#length(unique(navegac_clientes_contenido$idclient))/dim(data) *100 
+## Un 3,6% del total de altas ofi PP en ENERO 2015 ha navegado antes por contenido PPI
+## Un 2,6% del total de aport extra ofi PP en ENERO 2015 ha navegado antes por contenido PPI
+
+
+## Un 10% del total de aport extra ofi PP en OctDic 2015 ha navegado antes por contenido PPI
+## Un 9% del total de altas ofi PP en OctDic 2015 ha navegado antes por contenido PPI
+
+
+
+
+
+
+
+
+
+
+#############
+
+
+
+# ### TIEMPO MEDIO DESDE LA ULTIMA VISITA WEB HASTA LA CONTRATACION
+
+
+navegac_clientes_contenido_maxmin <- ddply(navegac_clientes_contenido, c("idclient", "Fecha.del.Evento"), summarise,
+               maxfec    = max(fecha),
+           minfec = min(fecha))
+
+# head(navegac_clientes_contenido_maxmin)
+#   idclient Fecha.del.Evento   maxfec   minfec
+# 1       11         30/12/14 06/12/14 06/12/14
+# 2       35         19/12/14 02/11/14 02/11/14
+# 3      234          9/12/14 26/10/14 26/10/14
+# 4      597          3/11/14 21/11/14 21/11/14
+# 5      733         16/10/14 31/10/14 28/10/14
+# 6      733          4/12/14 31/10/14 28/10/14
+
+## RESTA  FECHA DEL ALTA - FECHA DE ULTIMA NAVEGACION
+navegac_clientes_contenido_maxmin$diferencia <- as.integer(difftime(strptime(navegac_clientes_contenido_maxmin$Fecha.del.Evento, "%d/%m/%y"), strptime(navegac_clientes_contenido_maxmin$maxfec, "%d/%m/%y"), units="days"))
+
+# 
+# idclient Fecha.del.Evento   maxfec   minfec diferencia
+# 1       11         30/12/14 06/12/14 06/12/14         24
+# 2       35         19/12/14 02/11/14 02/11/14         47
+# 3      234          9/12/14 26/10/14 26/10/14         44
+# 4      597          3/11/14 21/11/14 21/11/14        -18
+# 5      733         16/10/14 31/10/14 28/10/14        -15
+# 6      733          4/12/14 31/10/14 28/10/14         34
+
+
+#mean(navegac_clientes_contenido_maxmin$diferencia)
+#15 aport periodica octdic14 (positivos y negativos)
+# 8 alta octdic14 (positivos y negativos)
+
+navegac_clientes_contenido_maxmin_pos <- subset(navegac_clientes_contenido_maxmin, diferencia > 0)
+# 120 positivos APORTACION EXTRA OCT-DIC14
+#mean(navegac_clientes_contenido_maxmin_pos$diferencia)
+# 38 días APORTACION EXTRA OCT-DIC14
+# 34 días ALTA
+
+
+#ggplot(navegac_clientes_contenido_maxmin_pos, aes(diferencia)) +
+#  geom_density()
+
+navegac_clientes_contenido_maxmin_neg <- subset(navegac_clientes_contenido_maxmin, diferencia < 0)
+#67 negativos (días después del alta navegan por contenido PPI) APORTACION EXTRA OCT-DIC14
+#mean(navegac_clientes_contenido_maxmin_neg$diferencia)
+# - 24 días APORTACION EXTRA OCT-DIC14
+# - 30 dias ALTA
+
+
+
+aportextra_octdic14_dif <- navegac_clientes_contenido_maxmin_pos
+aportextra_octdic14_dif$tipo <- "Aport extra"
+
+
+
+```
+
+#### TIEMPO QUE TRANSCURRE ENTRE LA ÚLTIMA CONEXIÓN A INTERNET Y EL ALTA/APORTACIÓN EN OFICINA
+
+
+El tiempo medio transcurrido desde la última navegación por contenido relacionado con ahorro e inversión hasta la contratación es:
+
+  - Media de días en aportaciones extraordinarias PPI:  `r round(mean(aportextra_octdic14_dif$diferencia),0)` días 
+  - Media de días en altas PPI: `r round(mean(altas_octdic14_dif$diferencia),0)` días
+
+```{r, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE, fig.width=15, fig.height=8}
+
+##### PLOT DENSITY DE APORT EXTRA Y ALTAS A LA VEZ
+t <- rbind(aportextra_octdic14_dif, altas_octdic14_dif)
+
+media_dias_density <- ggplot(t, aes(diferencia, colour = tipo)) +
+  geom_density() + ggtitle("Media de días desde la última navegación hasta la contratación") 
+
+
+#ggplot(vegLengths, aes(x=canal, y=as.numeric(Importe), fill=canal)) + geom_boxplot()
+
+#ggplot(t, aes(x=as.factor(tipo), y=as.numeric(diferencia))) + geom_boxplot()
+
+### PLOTTING DIAS MEDIOS DE NAVEGACIÓN DE ALTAS Y APORTACIONES EXTRA OCTDIC 14
+
+
+cifras <- c("38", "34")
+names <- c("Aport_extra", "Alta")
+
+df <- data.frame(names, cifras)
+
+library(reshape2)
+#melt(df)
+
+
+#ggplot(df, aes(x=names, y=cifras, group=1)) +
+#    geom_line() + geom_point(shape=21, size=3, fill="white") + ggtitle("Media de días desde la última navegación hasta la contratación")
+
+
+
+p <- ggplot(t, aes(x=as.factor(tipo), y=as.numeric(diferencia), fill=tipo))
+media_dias_boxplot <- p + geom_boxplot() + ggtitle("Media de días desde la última navegación hasta la contratación") 
+
+
+multiplot(media_dias_density, media_dias_boxplot, cols=2)
+
+
+
+````
+
+
+####CARACTERÍSTICAS SOCIO-DEMOGRÁFICAS: 
+
+#####GEOGRAFÍA
+
+
+¿Cuál es la penetración de internet en España?
+
+Según la Comisión Nacional delos Mercados y la Competencia en el sector de las comunicaciones, los siguientes representan los resultados de la penetración de las líneas de banda ancha fija en España:
+
+
+Las comunidades autónomas más conectadas son la de Madrid, País Vasco, Illes Balears, Catalunya, Aragón, Cantabria, Navarra y Castilla y León.
+
+
+```{r mapaGeo_penetracion_internet, results='asis', tidy=FALSE, echo=FALSE,  cache=TRUE}
+
+penetracion_adsl_comunidad <- read.csv("/us/e042614/DATA/penetracion_adsl_comunidades_cmt.csv", sep=";")
+
+
+
+mapa_comunidad <- gvisGeoMap(penetracion_adsl_comunidad, locationvar='iso_code', numvar='penetracion',
+                  options=list(region="ES", resolution="provinces",
+                               width=600, height=400))
+plot(mapa_comunidad,tag="chart")
+`````
+
+
+¿Hay diferencia geógrafica entre los clientes que realizan el alta/aportación extra a través de la web?
+
+Del total de altas en la net y en la oficina, el siguiente gráfico representa el ratio de altas realizadas en la net por provincia.
+Como podemos observar las tasas de penetración de internet en España coinciden con la digitalidad más elevada de los clientes del banco (Madrid, Barcelona y País Vasco).
+
+
+
+```{r mapaGeo, results='asis', tidy=FALSE, echo=FALSE,  cache=TRUE, warning=FALSE}
+
+#ciudad <- qimpala("select cod_persctpn, cod_postal, des_ciudadg,  cod_geografi,  cod_paisodom , des_provoest FROM da_pro.clientes_domicilios where des_ciudadg is not null and  des_provoest is not null limit 10000000")
+#ciudad <- write.csv(ciudad, "/us/e042614/ciudad.csv")
+
+ciudad_csv <- read.csv("/us/e042614/ciudad.csv")
+
+
+#Altas_OctDic14_OFI_t <- transform(Altas_OctDic14_OFI, cclient = as.integer(cclient))
+#Altas_OctDic14_NET_t <- transform(Altas_OctDic14_NET, cclient = as.integer(cclient))
+
+ciudad_csv_t <- transform(ciudad_csv, cod_persctpn = as.integer(cod_persctpn))
+
+#names(ciudad_csv_t)[2] <- "cod_persctpn"
+Altas_OctDic14_NET$cod_persctpn <- as.numeric( Altas_OctDic14_NET$cclient ) 
+Altas_OctDic14_OFI$cod_persctpn <- as.numeric( Altas_OctDic14_OFI$cclient )
+Altas_OctDic14_NET_ciudad <- merge(Altas_OctDic14_NET, ciudad_csv_t, by="cod_persctpn")
+#Altas_OctDic14_NET_ciudad <- merge(Altas_OctDic14_NET, ciudad_csv_t)
+Altas_OctDic14_OFI_ciudad <- merge(Altas_OctDic14_OFI, ciudad_csv_t, by="cod_persctpn")
+#Altas_OctDic14_OFI_ciudad <- merge(Altas_OctDic14_OFI, ciudad_csv_t)
+
+
+#DT <- data.table(mydf)
+#DT[, sum(B), by = A]
+
+dt.Altas_OctDic14_NET_ciudad <- data.table(Altas_OctDic14_NET_ciudad)
+dt.Altas_OctDic14_OFI_ciudad <- data.table(Altas_OctDic14_OFI_ciudad)
+
+dt.Altas_OctDic14_NET_ciudad_group <- dt.Altas_OctDic14_NET_ciudad[, (cclient = .N), by=des_provoest]
+dt.Altas_OctDic14_OFI_ciudad_group <- dt.Altas_OctDic14_OFI_ciudad[, (cclient = .N), by=des_provoest]
+
+dt.Altas_OctDic14_NET_ciudad_group$canal <- "NET"
+names(dt.Altas_OctDic14_NET_ciudad_group)[2] <- "net"
+dt.Altas_OctDic14_OFI_ciudad_group$canal <- "OFICINA"
+names(dt.Altas_OctDic14_OFI_ciudad_group)[2] <- "oficina"
+
+dt.Altas_OctDic14_ALL_ciudad_group <- merge(dt.Altas_OctDic14_OFI_ciudad_group, dt.Altas_OctDic14_NET_ciudad_group , by="des_provoest")
+dt.Altas_OctDic14_ALL_ciudad_group$total <- dt.Altas_OctDic14_ALL_ciudad_group$oficina + dt.Altas_OctDic14_ALL_ciudad_group$net
+
+## TASA DE PENETRACION DE ALTAS NET POR PROVINCIA
+#  des_provoest         V1
+#  1:      A CORUÑA  1.1173184
+#  2:      ALICANTE  0.7987220
+#  3:         AVILA  2.3255814
+#  4:     BARCELONA  1.2201886
+#  5:       BIZKAIA  0.6042296
+dt.Altas_OctDic14_ALL_ciudad_group_penetrac_net <- dt.Altas_OctDic14_ALL_ciudad_group[, (penetrac_net = round((net/total)*100,2)), by= des_provoest]
+
+```
+
+
+
+
+```{r mapaGeo_net ,results='asis', tidy=FALSE, echo=FALSE,  cache=FALSE, warning=FALSE}
+
+## PROVINCIAS
+#head(dt.Altas_OctDic14_ALL_ciudad_group_penetrac_net)
+names(dt.Altas_OctDic14_ALL_ciudad_group_penetrac_net)[1] <- "provincia"
+
+mapaNET_provinc <- gvisGeoChart(dt.Altas_OctDic14_ALL_ciudad_group_penetrac_net, "provincia", "V1",
+                           options=list(title="Ciudad con altas NET entre Octubre y Diciembre 2014",
+                                        region="ES", 
+                                        displayMode = 'markers',
+                                        width=700, height=500))
+ plot(mapaNET_provinc, tag="chart")
+
+#write.csv(dt.Altas_OctDic14_NET_ciudad_group, "/us/e042614/ciudad_agroup.csv")
+dt.Altas_OctDic14_NET_ciudad_group <- read.csv("/us/e042614/ciudad_agroup.csv", sep=",")
+
+
+
+##### FICHERO CON DATOS EN CODIGO ISO de las PROVINCIAS Y REGIONES DE SPAIN (no imprime las provincias en dataMode="provinces" solo como dataMode="markers")
+
+iso <- read.csv("/us/e042614/provincias_codigoISO.csv", sep=";")
+
+iso_t <- transform(iso, provincia = toupper(provincia))
+
+join <- merge(iso_t, dt.Altas_OctDic14_ALL_ciudad_group_penetrac_net, by="provincia")
+
+
+joinDT <- data.table(join)
+joinDT_comunid <-as.data.frame(joinDT[, media:=mean(V1), by=list(comunidad)])
+
+pp <- joinDT_comunid
+## REGIONES
+
+# mapaNET_comunid <- gvisGeoMap(pp, locationvar='comunidad', numvar='media',
+#                   options=list(region="ES", resolution="provinces",
+#                                width=600, height=400))
+# plot(mapaNET_comunid,tag="chart")
+# 
+
+
+
+
+
+
+`````
+
+Si dotamos mayor o menor peso al número de altas net por comunidad teniendo en cuenta la estadística de la tasa de penetración de internet proporcionada la Comisión de Mercado de Telecomunicaciones (CMT), observamos como Madrid, Barcelona y País Vasco siguen a la cabeza.
+
+
+
+```{r mapaGeo_pesos, results='asis', tidy=FALSE, echo=FALSE,  cache=FALSE}
+
+dt.Altas_OctDic14_NET_ciudad_group <- read.csv("/us/e042614/ciudad_agroup.csv", sep=",")
+
+pesos <- merge(penetracion_adsl_comunidad, dt.Altas_OctDic14_NET_ciudad_group, by="comunidad")
+pesos$peso <- round(pesos$net/(pesos$penetracion/100),2)
+
+
+pesos_i <- data.table(pesos)
+pesos_ii <-as.data.frame(pesos_i[, media:=round(mean(peso),2), by=list(comunidad)])
+
+p <- unique(subset(pesos_ii, select=c("comunidad", "media", "iso_code")))
+
+
+
+
+mapa_comunidad_peso <- gvisGeoMap(p, locationvar='iso_code', numvar='media',
+                  options=list(region="ES", resolution="provinces",
+                               width=600, height=400))
+plot(mapa_comunidad_peso,tag="chart")
+
+````
+
+
+```{r mapaGeoOFI, results='asis', tidy=FALSE, echo=FALSE,  cache=TRUE}
+# 
+# mapaOFI <- gvisGeoChart(dt.Altas_OctDic14_OFI_ciudad_group, "des_ciudadg", "V1",
+#                         options=list(title="Ciudad con altas OFI entre Octubre y Diciembre 2014",
+#                                      region="ES", 
+#                                      displayMode = 'markers',
+#                                      width=700, height=500))
+# plot(mapaOFI,tag="chart")
+# 
+
+
+`````
+
+
+```{r, echo=FALSE}
+
+
+
+# setwd("/us/e042614/bda_clarity/analytics_in_Rmd/")
+
+# Load packages
+# require(knitr)
+# require(markdown)
+# 
+# # Create .md, .html, and .pdf files
+# knit("/us/e042614/bda_clarity/analytics_in_Rmd/PPI_OnlineToStore.Rmd")
+# markdownToHTML('PPI_OnlineToStore.md', 'PPI_OnlineToStore.html', options=c("use_xhml"))
+# system("pandoc -s My_Analysis.html -o My_Analysis.pdf")
+
+
+
+# This is the last mandatory section
+
+clarity.save_analysis_metadata()
+```
+

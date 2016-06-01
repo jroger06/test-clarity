@@ -1,0 +1,629 @@
+---
+title: "[PYMES] ComEx exploration"
+author: "Maria Hernandez"
+date: "8/5/2015"
+output: 
+  html_document:
+    self_contained: no
+---
+
+```{r, echo=FALSE}
+# This is the first mandatory section.
+
+title     <- '[Pymes]: Exploration of ComEx activity'
+keywords  <- 'pymes,comex,comercio,exterior'
+```
+
+```{r mandatory, echo=FALSE}
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+
+source('~/bda_clarity/tools/warehouse_basics.R')
+source('~/bda_clarity/tools/methods_connect.R')
+source('~/bda_clarity/tools/write.hive.R')
+```
+
+```{r libraries, echo=FALSE}
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(plyr))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(reshape))
+suppressPackageStartupMessages(library(reshape2))
+suppressPackageStartupMessages(library(googleVis))
+suppressPackageStartupMessages(library(scales))
+suppressPackageStartupMessages(library(reshape))
+```
+
+```{r environment}
+month <- '20151130'
+```
+
+```{r dependencies, echo=FALSE}
+contrapartida <- clarity.use_table(DEPENDENCY_LASTPART_CATALOGO, 'contrapartida')
+
+global <- clarity.use_table(DEPENDENCY_LASTPART_CATALOGO, 'segmentacion_global', 
+                            select='cod_sgmento, des_sgmento')
+
+segmento <- clarity.use_table(DEPENDENCY_LASTPART_PRO_TABLE, 'segmento_global')
+
+intervinientes <- clarity.use_table(DEPENDENCY_LASTPART_PRO_TABLE, 'intervinientes_corp')
+
+clientes <- clarity.use_table(DEPENDENCY_LASTPART_PRO_TABLE, 'clientes_corp')
+
+movimientos <- clarity.use_table(DEPENDENCY_FULL_PRO_TABLE, 'movimientos_cuentas_corp')
+```
+
+
+*Objective:* In this report we are building the HasComEx indicator inside BBVA. 
+
+### How can we see ComEx *inside* the bank?
+
+There are several FX products and different ways they are found in the data:
+
+* Avales y garnatías internacionales.
+    + Epígrafe de gestión 3315321
+* Créditos Documentarios. 
+    + Contrapartida 0239: CREDITOS DOCUMENTARIOS DE EXPORTACION o epígrafe de gestión 3355012
+    + Contrapartida 0243: CREDITOS DOCUMENTARIOS DE IMPORTACION o epígrafe de gestión 3355017
+    + Contrapartida 0244: LINEAS DE CREDITOS DOCUMENTARIOS
+* ECA - Financiación Comercio Exterior (FCI): 
+    + Contrapartida 0247: FCI  (REFIS) (NO) VENCIDOS, unidad 2130. 
+* Medios de pagos internacionales
+    + Cheques Internacionales Emitidos: epígrafe de gestión 3356001
+    + Cheques Internacionales Recibidos: epígrafe de gestión 3356002 
+    + Órdenes de pago Emitidas: epígrafe de gestión 3356101 
+    + Órdenes de pago Recibidas: epígrafe de gestión 3356130 
+* Remesas
+    + Remesas de Importación: epígrafe de gestión 3355010, 3355011
+    + Remesas de Importación: epígrafe de gestión 3355015, 3355016
+    + Contrapartida 0242: OPERACIONES DOCUMENTARIAS COMEX (remesas, aplicativos prisma comex)
+    + Otras Remesas y Créditos documentarios: epígrafe de gestión 3355698
+* Trade Loan
+    + Anticipo import/export: 
+        - ¿? epígrafe de gestión 3305410
+        - Import: 3305811
+        - Export: 3305816 
+    + Forfaiting. Contrapartida 0248: FORFAITING CONTRATOS VENCIDO O NO
+    + Financiación divisa. Contrapartidas  
+        - 0250: FINANCIACION EN DIVISA - PROPUESTA O L?M
+        - 0251: FINANCIACION EN DIVISA - OPERACIONES
+        - 0252: FINANCIACION EN DIVISA - OPERACIONES
+        - Exportación: epígrafe de gestión 3306731
+        - Importación: epígrafe de gestión 3306726
+
+
+```{r createContrapartidaComex, eval=FALSE}
+do.hive("drop table da_pymes.contrapartida_comex")
+
+q <- paste0("create table da_pymes.contrapartida_comex as 
+  select cod_pgccontr as cod_contrapartida, max(des_ctrpartd) as des_contrapartida
+  from da_catalogos.contrapartida 
+  where cod_pgccontr in 
+    ('0239', '0243', '0244', '0247', '0242', '0250', '0251', '0252', '0248')
+      and partition_id = '", month, "'
+  group by cod_pgccontr
+")
+do.hive(q)
+do.impala("invalidate metadata da_pymes.contrapartida_comex")
+
+```
+
+```{r getContrapartidaComex}
+q <- "select * from da_pymes.contrapartida_comex"
+dd <- qimpala(q)
+```
+
+
+```{r createProdGestComex, eval=FALSE}
+
+partida <- c(15321, 
+             56001, 56030, 
+             56101, 56130, 
+             55010, 55011, 55015, 55016, 
+             55012, 55017, 55698,
+             05410, 05811, 05816)
+estado <- rep(33, length(partida))
+descripcion <- c("Avales y Garantías Internacionales",
+                 "Cheques Internacionales Emitidos",
+                 "Cheques Internacionales Recibidos", 
+                 "Órdenes de pago Emitidas", 
+                 "Órdenes de pago Recibidas",
+                 "Remesas de Importación",
+                 "Remesas de Importación", 
+                 "Remesas de Exportación", 
+                 "Remesas de Exportación",
+                 "Créditos documentarios de Importación",
+                 "Créditos documentarios de Exportación",
+                 "Otras remesas y créditos documentarios",
+                 "Anticipos Import/Export", 
+                 "Anticipos Import", 
+                 "Anticipos Export"
+                 )
+
+epigrafe_comex <- data.frame(estado, partida, descripcion)
+do.hive("drop table da_pymes.epigrafe_comex")
+
+write.hive(epigrafe_comex, "da_pymes.epigrafe_comex")
+do.impala("invalidate metadata da_pymes.epigrafe_comex")
+
+do.hive("drop table da_pymes.prod_gest_comex")
+
+q <- paste0("create table da_pymes.prod_gest_comex as 
+  select cast(cod_prodct as int) as cod_prodct, estado as cod_std, partida as cod_prtda, descripcion
+  from da_pro.catalogo_productos_gestion_epigrafes_relacion 
+    join da_pymes.epigrafe_comex ep on ep.estado = cast(trim(cod_std) as int) and ep.partida = cast(trim(cod_prtda) as int) 
+    and partition_id = '", month, "'
+")
+do.hive(q)
+do.impala("invalidate metadata da_pymes.prod_gest_comex")
+
+```
+
+```{r getProdGestComex}
+
+q <- "select * from da_pymes.prod_gest_comex"
+dd <- qimpala(q)
+```
+
+
+## Quick Exploration
+
+```{r segmentoGlobalCatalogo, cache=TRUE, echo=FALSE}
+seg <- qimpala("select cast(trim(cod_sgmento) as int) cod_global,
+               max(des_sgmento) as des_global
+from da_catalogos.segmentacion_global 
+where partition_id = '", month, "'
+group by cast(trim(cod_sgmento) as int)
+")
+```
+
+### Contrapartidas
+
+Let's see the volumen of this type of contracts.
+
+```{r comexClients, eval=FALSE}
+do.hive("drop table da_pymes.clientes_comex_contrapartidas")
+q <- paste0("create table da_pymes.clientes_comex_contrapartidas as
+select cod_entalfa, cod_persctpn, cod_idcontra, cod_pgccontr, des_contrapartida
+from da_pymes.contrapartida_comex as contr 
+  join da_pro.intervinientes_corp ic on trim(cod_pgccontr)= cod_contrapartida
+where partition_id= '", month, "' and trim(cod_ctippe)='TIT'
+")
+do.hive(q)
+do.impala("invalidate metadata da_pymes.clientes_comex_contrapartidas")
+
+```
+
+We obtain how many clients and contracts there are for each contrapartida, depending on the customer being Legal or Natural and their Global Segment.
+
+```{r numeros, echo=FALSE, eval=FALSE}
+# 84.274 - 84.274
+qimpala(paste0("select cod_contrapartida, count(*), count(distinct ic.cod_idcontra)
+from da_pymes.contrapartida_comex cc
+   join da_pro.productos_contratados ic on trim(cc.cod_contrapartida) = trim(ic.cod_pgccontr) and ic.partition_id = '", month, "'  and ic.cod_entalfa = '0182'
+group by cod_contrapartida order by cod_contrapartida
+  "))
+
+# 38 -26
+qimpala("select count(*), count(distinct ic.cod_idcontra)
+ from da_pymes.contrapartida_comex cc
+   join da_pro.productos_contratados_detalle ic on trim(cc.cod_contrapartida) = trim(ic.cod_pgccontr) and ic.partition_id = '20150630' and ic.cod_entalfa = '0182'
+  ")
+
+#1    48989                           38976
+qimpala("select count(*), count(distinct ic.cod_idcontra)
+from da_pymes.contrapartida_comex cc
+   join da_pro.intervinientes_corp ic on trim(cc.cod_contrapartida) = trim(ic.cod_pgccontr) and ic.partition_id = '20150630' and ic.cod_entalfa = '0182'
+  join da_pro.productos_contratados pc on trim(ic.cod_idcontra) = trim(pc.cod_idcontra) and pc.partition_id = '20150630' and pc.cod_entalfa = '0182'
+  ")
+
+#1     8067                            4066
+qimpala("select count(*), count(distinct ic.cod_idcontra)
+from da_pymes.contrapartida_comex cc
+   join da_pro.intervinientes_corp ic on trim(cc.cod_contrapartida) = trim(ic.cod_pgccontr) and ic.partition_id = '20150630' and ic.cod_entalfa = '0182'
+  join da_pro.productos_contratados_detalle pc on trim(ic.cod_idcontra) = trim(pc.cod_idcontra) and pc.partition_id = '20150630' and pc.cod_entalfa = '0182'
+  ")
+
+# Cruce al revés: filtro por contrapartida en pc y join con intervinientes
+#1    48989                           38976
+# lo mismo que antes
+qimpala("select count(*), count(distinct ic.cod_idcontra)
+from da_pymes.contrapartida_comex cc
+   join da_pro.productos_contratados ic on trim(cc.cod_contrapartida) = trim(ic.cod_pgccontr) and ic.partition_id = '20150630' and ic.cod_entalfa = '0182'
+  join da_pro.intervinientes_corp pc on trim(ic.cod_idcontra) = trim(pc.cod_idcontra) and pc.partition_id = '20150630' and pc.cod_entalfa = '0182'
+  ")
+
+# Cruce al revés: filtro por contrapartida en pcd y join con intervinientes
+# 0 - 0
+qimpala("select count(*), count(distinct ic.cod_idcontra)
+from da_pymes.contrapartida_comex cc
+   join da_pro.productos_contratados_detalle ic on trim(cc.cod_contrapartida) = trim(ic.cod_pgccontr) and ic.partition_id = '20150630' and ic.cod_entalfa = '0182'
+  join da_pro.intervinientes_corp pc on trim(ic.cod_idcontra) = trim(pc.cod_idcontra) and pc.partition_id = '20150630' and pc.cod_entalfa = '0182'
+  ")
+
+# contrapartidas de pc de los contratos de intervinientes: 
+#   cod_pgccontr count(*) count(distinct ic.cod_idcontra)
+# 1         0248     4240                            4157
+# 2         0239     3788                            3788
+# 3         0247    14460                            4530
+# 4         0242     7970                            7970
+# 5         0252     5262                            5262
+# 6         0250      819                             819
+# 7         0251      805                             805
+# 8         0243    11645                           11645
+qimpala("select pc.cod_pgccontr, count(*), count(distinct ic.cod_idcontra)
+from da_pymes.contrapartida_comex cc
+   join da_pro.intervinientes_corp ic on trim(cc.cod_contrapartida) = trim(ic.cod_pgccontr) and ic.partition_id = '20150630' and ic.cod_entalfa = '0182'
+  join da_pro.productos_contratados pc on trim(ic.cod_idcontra) = trim(pc.cod_idcontra) and pc.partition_id = '20150630' and pc.cod_entalfa = '0182'
+group by pc.cod_pgccontr
+  ")
+
+# contrapartidas de pcd de los contratos de intervinientes: todas NULL
+qimpala("select pc.cod_pgccontr, count(*), count(distinct ic.cod_idcontra)
+from da_pymes.contrapartida_comex cc
+   join da_pro.intervinientes_corp ic on trim(cc.cod_contrapartida) = trim(ic.cod_pgccontr) and ic.partition_id = '20150630' and ic.cod_entalfa = '0182'
+  join da_pro.productos_contratados_detalle pc on trim(ic.cod_idcontra) = trim(pc.cod_idcontra) and pc.partition_id = '20150630' and pc.cod_entalfa = '0182'
+group by pc.cod_pgccontr
+  ")
+
+# contrapartidas de ic de los contratos de pc: 
+#   cod_pgccontr count(*) count(distinct ic.cod_idcontra)
+# 1         0248     4240                            4157
+# 2         0239     3788                            3788
+# 3         0247    14460                            4530
+# 4         0242     7970                            7970
+# 5         0252     5262                            5262
+# 6         0250      819                             819
+# 7         0251      805                             805
+# 8         0243    11645                           11645
+qimpala("select pc.cod_pgccontr, count(*), count(distinct ic.cod_idcontra)
+from da_pymes.contrapartida_comex cc
+   join da_pro.productos_contratados ic on trim(cc.cod_contrapartida) = trim(ic.cod_pgccontr) and ic.partition_id = '20150630' and ic.cod_entalfa = '0182'
+  join da_pro.intervinientes_corp pc on trim(ic.cod_idcontra) = trim(pc.cod_idcontra) and pc.partition_id = '20150630' and pc.cod_entalfa = '0182'
+group by pc.cod_pgccontr
+  ")
+
+
+# contrapartidas de ic de los contratos de pcd: 
+qimpala("select ic.cod_pgccontr, count(*), count(distinct ic.cod_idcontra)
+from da_pymes.contrapartida_comex cc
+   join da_pro.productos_contratados_detalle pc on trim(cc.cod_contrapartida) = trim(pc.cod_pgccontr) and pc.partition_id = '20150630' and pc.cod_entalfa = '0182'
+  join da_pro.intervinientes_corp ic on trim(ic.cod_idcontra) = trim(pc.cod_idcontra) and ic.partition_id = '20150630' and ic.cod_entalfa = '0182'
+group by ic.cod_pgccontr
+  ")
+
+# cómo son los contratos que se pierden al cruzar prod.contratados con intervinientes por cod_idcontra
+qimpala("select substring(cod_idcontra, 1, 6) inicio, idcontra2 is null as idcontra_null, count(*), count(distinct cod_idcontra)
+        from (
+   select pc.*, ic.cod_idcontra as idcontra2
+ from da_pymes.contrapartida_comex cc
+    join da_pro.productos_contratados pc on trim(cc.cod_contrapartida) = trim(pc.cod_pgccontr) and pc.partition_id = '20150630' and pc.cod_entalfa = '0182'
+    left join da_pro.intervinientes_corp ic on trim(pc.cod_idcontra) = trim(ic.cod_idcontra) and ic.partition_id = '20150630' and ic.cod_entalfa = '0182'
+   ) x 
+ group by substring(cod_idcontra, 1, 6) , idcontra2 is null
+")
+
+
+# cómo son los contratos que se pierden al cruzar prod.contratados con intervinientes por cod_idcontra
+#    cod_pgccontr idcontra2_is_null     n     s          p
+#  1:         0239                 0  3788  4852 0.78070899
+#  2:         0239                 1  1064  4852 0.21929101
+#  3:         0242                 0  7970 24105 0.33063680
+#  4:         0242                 1 16135 24105 0.66936320
+#  5:         0243                 0 11645 29850 0.39011725
+#  6:         0243                 1 18205 29850 0.60988275
+#  7:         0244                 1 17495 17495 1.00000000
+#  8:         0247                 0 14460 36409 0.39715455
+#  9:         0247                 1 21949 36409 0.60284545
+# 10:         0248                 0  4240 34772 0.12193719
+# 11:         0248                 1 30532 34772 0.87806281
+# 12:         0250                 0   819  9259 0.08845448
+# 13:         0250                 1  8440  9259 0.91154552
+# 14:         0251                 0   805 75500 0.01066225
+# 15:         0251                 1 74695 75500 0.98933775
+# 16:         0252                 0  5262 46279 0.11370168
+# 17:         0252                 1 41017 46279 0.88629832
+
+dd <- qimpala("select cod_pgccontr, idcontra2 is null, count(*)
+        from (
+   select ic.*, pc.cod_idcontra as idcontra2
+ from da_pymes.contrapartida_comex cc
+    join da_pro.intervinientes_corp ic on trim(cc.cod_contrapartida) = trim(ic.cod_pgccontr) and ic.partition_id = '20150630' and ic.cod_entalfa = '0182'
+    left join da_pro.productos_contratados pc on trim(pc.cod_idcontra) = trim(ic.cod_idcontra) and pc.partition_id = '20150630' and ic.cod_entalfa = '0182'
+   ) x 
+group by cod_pgccontr, idcontra2 is null
+")
+dd2 <- data.table(dd)[,s:=sum(n),by=c("cod_pgccontr")]
+dd2$p <- dd2$n/dd2$s
+
+dd <- qimpala("select cod_pgccontr, idcontra2 is null, count(*)
+        from (
+   select ic.*, pc.cod_idcontra as idcontra2
+ from da_pymes.contrapartida_comex cc
+    join da_pro.intervinientes_corp ic on trim(cc.cod_contrapartida) = trim(ic.cod_pgccontr) and ic.partition_id = '20150630' and ic.cod_entalfa = '0182'
+    left join da_pro.productos_contratados_detalle pc on trim(pc.cod_idcontra) = trim(ic.cod_idcontra) and pc.partition_id = '20150630' and ic.cod_entalfa = '0182'
+   ) x 
+group by cod_pgccontr, idcontra2 is null
+")
+
+
+```
+
+```{r getContrapartidas}
+query <- paste0("select cod_segmsubo, xti_persona, cod_pgccontr, cc.des_contrapartida, 
+  count(*) ncontr, count(distinct cli.cod_persctpn) ncli
+from da_pymes.clientes_comex_contrapartidas cli 
+  join da_pymes.contrapartida_comex cc on cc.cod_contrapartida = cli.cod_pgccontr
+  join da_pro.segmento_global sg on sg.cod_persctpn = cli.cod_persctpn and sg.partition_id = '", month, "' and sg.cod_entalfa = '0182'
+  join da_pro.clientes_corp corp on corp.cod_persctpn = cli.cod_persctpn and corp.partition_id = '", month, "' and corp.cod_entalfa = '0182'
+group by cod_segmsubo, xti_persona, 
+  cod_pgccontr, cc.des_contrapartida
+")
+contr <- qimpala(query)
+names(contr) <- c("global", "tipo_persona", "cod", "contrapartida", "ncontr", "ncli")
+
+query <- paste0("select cod_segmsubo, xti_persona,
+  count(*) ncontr, count(distinct cli.cod_persctpn) ncli
+from da_pymes.clientes_comex_contrapartidas cli 
+  join da_pymes.contrapartida_comex cc on cc.cod_contrapartida = cli.cod_pgccontr
+  join da_pro.segmento_global sg on sg.cod_persctpn = cli.cod_persctpn and sg.partition_id = '", month, "' and sg.cod_entalfa = '0182'
+  join da_pro.clientes_corp corp on corp.cod_persctpn = cli.cod_persctpn and corp.partition_id = '", month, "' and corp.cod_entalfa = '0182'
+group by cod_segmsubo, xti_persona
+")
+contr.cli <- qimpala(query)
+names(contr.cli) <- c("global", "tipo_persona", "ncontr", "ncli")
+
+```
+
+```{r}
+contr <- merge(contr, seg, by.x="global", by.y="cod_global")
+contr$des_global <- factor(contr$des_global,
+                           levels = contr$des_global[order(contr$global)], ordered=TRUE)
+
+contr.cli <- merge(contr.cli, seg, by.x="global", by.y="cod_global")
+contr.cli$des_global <- factor(contr.cli$des_global,
+                           levels = contr.cli$des_global[order(contr.cli$global)], ordered=TRUE)
+
+```
+
+In total, there are **`r sum(contr.cli$ncli)` customers** that have **`r sum(contr.cli$ncontr)` contracts**. From them, **`r sum(subset(contr.cli, global %in% c(35, 36))$ncli)`** are SMEs with `r sum(subset(contr.cli, global %in% c(35, 36))$ncontr)` contracts.
+
+```{r totalContr}
+# by contrapartida
+data.table(contr)[,list(ncontr=sum(ncontr), ncli=sum(ncli)), by=c("cod", "contrapartida")][order(cod)]
+# pymes by contrapartida
+data.table(contr)[global%in%c(35,36),list(ncontr=sum(ncontr), ncli=sum(ncli)), by=c("cod", "contrapartida")][order(cod)]
+# by global segment
+data.table(contr.cli)[,list(ncontr=sum(ncontr), ncli=sum(ncli)), by=c("global", "des_global")][order(global)]
+# by person type
+data.table(contr.cli)[,list(ncontr=sum(ncontr), ncli=sum(ncli)), by=c("tipo_persona")]
+```
+
+We split the total contracts by Type of Person (natural or legal) and the Global Segment inside the bank.
+
+```{r, fig.height=8, fig.width=10}
+
+contr.tipo <- data.table(contr)[,list(ncontr=sum(ncontr), ncli=sum(ncli)), by=c("tipo_persona", "cod", "contrapartida")]
+
+ggplot(melt(contr.tipo, id=c("tipo_persona", "cod", "contrapartida")), 
+       aes(x=contrapartida, y=value, fill=tipo_persona, order=tipo_persona)) + 
+  geom_bar(stat="identity", position="dodge") + 
+#  scale_y_log10()+
+  facet_wrap(~variable) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+#escala logaritmica
+ggplot(melt(contr.tipo, id=c("tipo_persona", "cod", "contrapartida")), 
+       aes(x=contrapartida, y=value, fill=tipo_persona, order=tipo_persona)) + 
+  geom_bar(stat="identity", position="dodge") + 
+  scale_y_log10()+
+  facet_wrap(~variable) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+# porcentaje
+ggplot(melt(contr.tipo, id=c("tipo_persona", "cod", "contrapartida")), 
+       aes(x=contrapartida, y=value, fill=tipo_persona, order=tipo_persona)) + 
+  geom_bar(stat="identity", position="fill") + 
+  facet_wrap(~variable) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+# por segmento global
+ggplot(contr, aes(x=contrapartida, y=ncontr, fill=des_global, order=desc(global))) + 
+  geom_bar(stat="identity", position="stack") + 
+  scale_y_log10()+
+  facet_wrap(~tipo_persona, scales="free_y", ncol=1) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+```
+
+We can see that most of those contracts are held mostly by legal customers. The exception is a 25% of pyshical people owning a Operaciones Documentarias contract. 
+
+Now we plot the number of contracts and people only for the SMEs global segments: 35 and 36. 
+
+```{r, fig.height=8, fig.width=12, echo=FALSE}
+
+ggplot(melt(data.table(contr)[global%in%c("35","36"),list(ncontr=sum(ncontr), ncli=sum(ncli)),by=c("des_global", "contrapartida")], 
+            id=c("des_global", "contrapartida")), 
+       aes(x=contrapartida, y=value, fill=des_global)) + 
+  geom_bar(stat="identity") + 
+  #scale_y_log10()+
+  facet_wrap(~variable, scales="free_y") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+```
+
+### Products
+
+```{r comexClientsProdGest, eval=FALSE}
+do.hive("drop table da_pymes.clientes_comex_prod_gest")
+
+q <- paste0("create table da_pymes.clientes_comex_prod_gest as
+select cod_entalcli, cod_persctpn, cod_prodgest, cod_std, cod_prtda, descripcion, qnu_contrato
+from da_pymes.prod_gest_comex as prod 
+  join da_pro.agregacion_comercial_vinculacion agg on trim(cod_prodgest)= cod_prodct
+where partition_id= '", month, "' and trim(cod_tipotit)='T' and trim(cod_situdw) in ('A', '')
+")
+do.hive(q)
+do.impala("invalidate metadata da_pymes.clientes_comex_prod_gest")
+
+```
+
+
+
+```{r getSegmentosGestion}
+query <- paste0("select cod_segmsubo, xti_persona, descripcion, 
+  sum(qnu_contrato) ncontr, count(distinct cli.cod_persctpn) ncli
+from da_pymes.clientes_comex_prod_gest cli 
+  join da_pro.segmento_global sg on sg.cod_persctpn = cli.cod_persctpn and sg.partition_id = '", month, "' and sg.cod_entalfa = '0182'
+  join da_pro.clientes_corp corp on corp.cod_persctpn = cli.cod_persctpn and corp.partition_id = '", month, "' and corp.cod_entalfa = '0182'
+group by cod_segmsubo, xti_persona, descripcion
+")
+prod <- qimpala(query)
+names(prod) <- c("global", "tipo_persona", "prod_gestion", "ncontr", "ncli")
+
+
+query <- paste0("select cod_segmsubo, xti_persona,
+  count(*) ncontr, count(distinct cli.cod_persctpn) ncli
+from da_pymes.clientes_comex_prod_gest cli 
+  join da_pro.segmento_global sg on sg.cod_persctpn = cli.cod_persctpn and sg.partition_id = '", month, "' and sg.cod_entalfa = '0182'
+  join da_pro.clientes_corp corp on corp.cod_persctpn = cli.cod_persctpn and corp.partition_id = '", month, "' and corp.cod_entalfa = '0182'
+group by cod_segmsubo, xti_persona
+")
+prod.cli <- qimpala(query)
+names(prod.cli) <- c("global", "tipo_persona", "ncontr", "ncli")
+
+
+```
+
+
+```{r}
+prod <- merge(prod, seg, by.x="global", by.y="cod_global")
+prod$des_global <- factor(prod$des_global,
+                           levels = prod$des_global[order(prod$global)], ordered=TRUE)
+
+prod.cli <- merge(prod.cli, seg, by.x="global", by.y="cod_global")
+prod.cli$des_global <- factor(prod.cli$des_global,
+                           levels = prod.cli$des_global[order(prod.cli$global)], ordered=TRUE)
+
+```
+
+In total, there are **`r sum(prod.cli$ncli)` customers** that have **`r sum(prod.cli$ncontr)` contracts**. From them, **`r sum(subset(prod.cli, global %in% c(35, 36))$ncli)`** are SMEs with `r sum(subset(prod.cli, global %in% c(35, 36))$ncontr)` contracts.
+
+
+```{r totalProd}
+# by producto
+data.table(prod)[,list(ncontr=sum(ncontr), ncli=sum(ncli)), by=c("prod_gestion")][order(prod_gestion)]
+# pymes by producto
+data.table(prod)[global%in%c(35,36),list(ncontr=sum(ncontr), ncli=sum(ncli)), by=c("prod_gestion")][order(prod_gestion)]
+# by global segment
+data.table(prod.cli)[,list(ncontr=sum(ncontr), ncli=sum(ncli)), by=c("global", "des_global")][order(global)]
+# by person type
+data.table(prod.cli)[,list(ncontr=sum(ncontr), ncli=sum(ncli)), by=c("tipo_persona")]
+```
+
+We split the total contracts by Type of Person (natural or legal) and the Global Segment inside the bank.
+
+```{r, fig.height=8, fig.width=10}
+prod.tipo <- data.table(prod)[,list(ncontr=sum(ncontr), ncli=sum(ncli)), by=c("tipo_persona", "prod_gestion")]
+
+ggplot(melt(prod.tipo, id=c("tipo_persona", "prod_gestion")), 
+       aes(x=prod_gestion, y=value, fill=tipo_persona, order=tipo_persona)) + 
+  geom_bar(stat="identity", position="stack") + 
+#  scale_y_log10()+
+  facet_wrap(~variable) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+ggplot(melt(prod, id=c("global", "des_global", "tipo_persona", "prod_gestion")),
+       aes(x=prod_gestion, y=value, fill=tipo_persona, order=tipo_persona)) + 
+  geom_bar(stat="identity", position="fill") + 
+  facet_wrap(~variable) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+ggplot(prod, aes(x=prod_gestion, y=ncontr, fill=des_global, order=desc(global))) + 
+  geom_bar(stat="identity", position="stack") + 
+  #scale_y_log10()+
+  facet_wrap(~tipo_persona, scales="free_y", ncol=1) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+```
+
+```{r onlyPymes, fig.height=8, fig.width=10}
+
+ggplot(subset(prod, global %in% c(35, 36)), aes(x=prod_gestion, y=ncontr, fill=des_global, order=desc(global))) + 
+  geom_bar(stat="identity", position="stack") + 
+  #scale_y_log10()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+```
+
+
+We can see that Cheques and Ordenes de pago are used by personal customers mostly, whereas Avales and Remesas by legal ones.
+
+
+## Let's merge previous approaches
+
+Now we merge together the contracts by *contrapartida* and *producto de gestión*.
+
+```{rpa totalComexClients}
+q <- paste0("select cli.*, xti_persona, cod_segmsubo
+    from (select cod_persctpn, des_contrapartida as descripcion, 'contrapartida' as type
+      from da_pymes.clientes_comex_contrapartidas
+      where cod_entalfa = '0182' union all
+      select cod_persctpn, descripcion as descripcion, 'producto' as type
+      from da_pymes.clientes_comex_prod_gest where cod_entalcli = '0182') cli
+  join da_pro.clientes_corp corp on cli.cod_persctpn = corp.cod_persctpn and corp.partition_id = '", month, "' and corp.cod_entalfa = '0182'
+  join da_pro.segmento_global sg on sg.cod_persctpn = cli.cod_persctpn and sg.partition_id = '", month, "' and sg.cod_entalfa = '0182'
+  ")
+
+cli <- qimpala(q)
+```
+
+Some statistics:
+
+```{r}
+# Unique customers
+length(unique(cli$cod_persctpn))
+
+# SMEs, customers and contracts
+length(unique(subset(cli, cod_segmsubo %in% c(35, 36))$cod_persctpn))
+nrow(subset(cli, cod_segmsubo %in% c(35, 36)))
+
+
+cli.n <- data.table(cli)[, list(n=.N, ntype=length(unique(type))), by=c("cod_persctpn")]
+summary(data.frame(cli.n)[,c("n", "ntype")])
+```
+
+On average, they have `r mean(cli.n$n)` contracts by customer, and `r percent(nrow(subset(cli.n, ntype==2))/nrow(cli.n))` have products by *contrapartida* and *producto de gestión*. 
+```{r getComexAgg}
+
+comex.agg <- data.table(cli)[,list(ncontr=.N, npers=length(unique(cod_persctpn))), by=c("descripcion", "type")]
+comex.agg.pymes <- data.table(cli)[cod_segmsubo %in% c(35,36),list(ncontr=.N, npers=length(unique(cod_persctpn))), by=c("descripcion", "type")]
+
+comex.agg$descripcion <- factor(comex.agg$descripcion, levels=unique(comex.agg$descripcion)[order(as.character(unique(comex.agg$descripcion)))])
+comex.agg.pymes$descripcion <- factor(comex.agg.pymes$descripcion, levels=unique(comex.agg.pymes$descripcion)[order(as.character(unique(comex.agg.pymes$descripcion)))])
+  
+
+comex.agg.melt <- melt(comex.agg, id=c("descripcion", "type"))
+```
+
+```{r plotMerge, fig.width=12, fig.height=7, echo=FALSE}
+ggplot(comex.agg.melt, aes(x=descripcion, y=value, fill=type)) + 
+  geom_bar(stat="identity") +  
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #scale_y_log10() +
+  facet_wrap(~variable)
+
+ggplot(comex.agg.pymes, aes(x=descripcion, y=ncontr, fill=type)) + 
+  geom_bar(stat="identity") +
+  geom_text(aes(y=ncontr, label=ncontr), size=4, vjust=-1) +  
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+ggplot(comex.agg.pymes, aes(x=descripcion, y=ncli, fill=type)) + 
+  geom_bar(stat="identity") +
+  geom_text(aes(y=ncli, label=ncli), size=4, vjust=-1) +  
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size=12)) 
+
+ggplot(comex.agg, aes(x=descripcion, y=ncontr/npers, fill=type)) + 
+  geom_bar(stat="identity") +  
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size=12)) 
+
+```
+
+
+## Conclusion
+
+We have seen that there are around `r length(unique(subset(cli, cod_segmsubo %in% c('35','36'))$cod_persctpn))` SMEs that have International Trade related activity and that not every type is equally owned. 
+
+We have created an attribute, `comercio_exterior` which denotes whether a BBVA customer has Comex activity or not, avoiding whether it is a SME. The attribute can be seen here: http://20.1.71.9:8787/basics/table/comercio_exterior
+

@@ -1,0 +1,2205 @@
+---
+output:
+  html_document:
+    self_contained: no
+---
+
+Digital On-Boarding 
+-------------------
+
+
+_**2nd report iteration**_
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- "[Digital On-boarding] : Differences in channel usage, economic status and engagement with BBVA. Mobile app and Wallet usage."
+
+# Keywords. Text separated by commas. E.g. keywords <- 'customer health, recibos' 
+# Keywords can classify the attribute in categories such as 'valor, vinculación, digitalidad', describe used tables such as 'recibos, 
+# transacciones tarjetas, segmento plan uno' or include other relevant info. Search keywords in the portal to find commonly used terms
+# and create new keywords only if justified.
+
+keywords  <- 'digitalidad, contratacion tarjetas, contratacion cuenta corriente, bbva.es, nuevo cliente, alta cliente, adquisición cliente, oficina, sociodemo, margen neta'
+
+```
+
+
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(grid))
+suppressMessages(library(hexbin))
+suppressMessages(library(lattice))
+`%ni%` <- Negate(`%in%`)
+options(warn=-1, scipen=3, width=450)
+source('~/bda_clarity/tools/warehouse_basics.R')
+
+```
+
+``` {r echo=FALSE}
+
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  require(grid)
+  
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+  
+  numPlots = length(plots)
+  
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                     ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+  
+  if (numPlots==1) {
+    print(plots[[1]])
+    
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+      
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+} 
+
+
+chname <- function(df)
+{
+  rex <- '^[[:alnum:]_]+\\.([[:alnum:]_]+)$'
+  nam <- colnames(df)
+  ix  <- which(grepl(rex, nam))
+  
+  nam[ix] <- gsub(rex, '\\1', nam[ix])
+  
+  colnames(df) <- nam
+  
+  df
+};
+
+
+```
+
+ _MAIN EVENT TYPES_
+ 
+| cod_geve_trn |        Descripción tipo evento        |
+|:------------:| :------------------------------------:|
+|     0001     |                 QUERIES               |
+|     0002     |                OPERATIONS             |
+|     0003     |               CONTRACTING             |
+|     0004     |            SALES - ACTIONS*           |
+
+* - openings and follow-up payments to investment funds and pension plans, also other operations with investment portfolios.
+
+The SALES - ACTIONS event group comprises following event types:
+
+``` {r echo=FALSE, cache=TRUE}
+
+qhive(" select cod_eve_trn_mod, CASE WHEN trim(cod_eve_trn_mod) LIKE '%2571%' THEN 'ALTAS / APORTACIONES FI y PP'
+                                     WHEN trim(cod_eve_trn_mod) LIKE '%2771%' THEN 'ALTA ORDEN COMPRA/VENTA DE VALORES'
+                                     ELSE bb.des_evento_trn END AS description
+      
+        from elmi.digital_onboard_tx_basicas_2 aa
+        left outer join da_catalogos.evento_trn bb ON CAST(trim(aa.cod_eve_trn_mod) as int) = CAST(trim(bb.cod_evento_trn) as int)
+      
+        where cast(cod_geve_trn_mod as int) = 4 AND CAST(cod_eve_trn_mod AS INT) not in (2, 75)
+        group by cod_eve_trn_mod, bb.des_evento_trn ")
+
+```
+
+ _MAIN CHANNELS_
+ 
+| cod_canal_dv |           Descripción CANAL           |
+|:------------:| :------------------------------------:|
+|     0001     |         BRANCH  / BBVA CONTIGO        |
+|     0002     |                   ATM                 |
+|     0004     |                BBVA.NET               |
+
+
+**TOP 10 operations performed by client in first 3 months after the registration in breakdown of 2 analyzed groups are:**
+
+``` {r echo=FALSE, cache=TRUE}
+
+bbvaes <- qhive(" SELECT * FROM 
+       
+            ( SELECT hh.*, ROW_NUMBER() OVER (ORDER BY trans_count DESC) as indeks
+             
+              from (SELECT alta_type as reg_type, channel, cod_eve_trn_mod as event_code, des_eventos as description, SUM(suma_tx) trans_count
+             
+                     FROM elmi.digit_onboard_top10_3meses
+            
+                     WHERE alta_type = 'bbva.es' AND channel != 'otros' 
+            
+                           AND (channel = 'BBVA Net'   AND CAST(trim(cod_eve_trn_mod) AS INT) in  (1 ,3 ,5 ,6 ,8 ,10 , 11 ,12 ,13 ,14 ,19 ,21 ,23 ,24 ,25 ,26 ,27 ,29 ,30 ,31 ,32 ,34 ,35 ,36
+           ,37 ,38 ,39 ,40 ,42 ,43 ,44 ,47 ,50 ,51 ,52 ,53 ,54 ,55 ,56 ,57 ,58 ,61 ,62 ,63 ,64 ,65 ,69 ,70 ,72 ,73 ,77 ,78 ,86 ,89 ,96 ,97 ,98
+           ,99 ,100 ,101 ,102 ,104 ,105 , 106 , 111 ,112 ,114 ,115 ,118 ,125 ,130 ,131 ,132 ,139 ,140 ,142 ,143 ,144 ,145 ,146 ,147 ,148 ,149
+           ,150 ,151 ,152 ,153 ,154 ,155 ,157 ,158 ,159 ,160 ,161 ,162 ,163 ,164 ,165 ,166 ,167 ,168 ,169 ,170 ,171 ,173 ,174 ,175 ,176 ,177 ,178
+           ,179 ,180 ,181 ,182 ,183 ,184 ,185 ,186 ,188 ,189 ,190 ,191 ,192 ,193 ,194 ,195 ,196 ,197 ,198 ,199 ,200 ,201, 202, 203, 204, 205, 206,
+       207, 208, 209, 210, 211, 212, 214, 215, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 231, 232, 233, 234, 236, 237, 239, 
+		   244, 245, 246, 247, 248, 250, 251, 253, 254, 256, 257, 258, 259, 260, 261, 263, 264, 266, 268, 270, 271, 272, 273, 274, 275, 276, 277, 
+		   278, 280, 281, 282, 283, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 299, 300, 301, 2571, 6901, 6902, 2771)     
+            
+                          OR channel = 'Oficina'  AND CAST(trim(cod_eve_trn_mod) AS INT)  in  (1, 5, 6, 10, 11, 12, 14, 19, 21, 26, 30, 34, 36, 37, 38, 40, 50, 51, 52,
+       53, 54, 56, 57, 58, 61, 62, 63, 69, 72, 73, 78, 84, 96, 97, 98, 100, 101, 102, 104, 105, 111, 112, 114, 115, 130, 131,
+     139, 140, 142, 144, 148, 149, 150, 151, 154, 159, 160, 162, 163, 164, 166, 167, 170, 171, 175, 176, 178, 181, 182, 185, 
+	   186, 188, 189, 199, 200, 206, 207, 214, 215, 220, 224, 225, 227, 228, 229, 234, 235, 236, 239, 244, 245, 246, 247, 249, 
+	   250, 251, 253, 254, 257, 258, 259, 260, 261, 266, 268, 275, 276, 277, 278, 280, 281, 283, 290, 293, 299, 300, 301, 2571,
+	   5001, 5801, 6901, 6902, 2771)   
+       
+                         OR channel = 'ATM'  AND CAST(trim(cod_eve_trn_mod) AS INT) NOT IN (120, 121, 127, 141)   )
+            
+            
+            
+                     GROUP BY alta_type, channel, cod_eve_trn_mod, des_eventos) hh 
+       
+       ) gg
+      
+         WHERE gg.indeks < 11 
+               ") ;
+
+branch <- qhive(" SELECT * FROM 
+       
+            ( SELECT hh.*, ROW_NUMBER() OVER (ORDER BY trans_count DESC) as indeks
+             
+              from (SELECT alta_type as reg_type, channel, cod_eve_trn_mod as event_code, des_eventos as description, SUM(suma_tx) trans_count
+             
+                     FROM elmi.digit_onboard_top10_3meses
+            
+                     WHERE alta_type = 'oficina'  AND channel != 'otros' 
+            
+                           AND (channel = 'BBVA Net'   AND CAST(trim(cod_eve_trn_mod) AS INT) in  (1 ,3 ,5 ,6 ,8 ,10 , 11 ,12 ,13 ,14 ,19 ,21 ,23 ,24 ,25 ,26 ,27 ,29 ,30 ,31 ,32 ,34 ,35 ,36
+           ,37 ,38 ,39 ,40 ,42 ,43 ,44 ,47 ,50 ,51 ,52 ,53 ,54 ,55 ,56 ,57 ,58 ,61 ,62 ,63 ,64 ,65 ,69 ,70 ,72 ,73 ,77 ,78 ,86 ,89 ,96 ,97 ,98
+           ,99 ,100 ,101 ,102 ,104 ,105 , 106 , 111 ,112 ,114 ,115 ,118 ,125 ,130 ,131 ,132 ,139 ,140 ,142 ,143 ,144 ,145 ,146 ,147 ,148 ,149
+           ,150 ,151 ,152 ,153 ,154 ,155 ,157 ,158 ,159 ,160 ,161 ,162 ,163 ,164 ,165 ,166 ,167 ,168 ,169 ,170 ,171 ,173 ,174 ,175 ,176 ,177 ,178
+           ,179 ,180 ,181 ,182 ,183 ,184 ,185 ,186 ,188 ,189 ,190 ,191 ,192 ,193 ,194 ,195 ,196 ,197 ,198 ,199 ,200 ,201, 202, 203, 204, 205, 206,
+       207, 208, 209, 210, 211, 212, 214, 215, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 231, 232, 233, 234, 236, 237, 239, 
+		   244, 245, 246, 247, 248, 250, 251, 253, 254, 256, 257, 258, 259, 260, 261, 263, 264, 266, 268, 270, 271, 272, 273, 274, 275, 276, 277, 
+		   278, 280, 281, 282, 283, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 299, 300, 301, 2571, 6901, 6902, 2771)     
+            
+                          OR channel = 'Oficina'  AND CAST(trim(cod_eve_trn_mod) AS INT)  in  (1, 5, 6, 10, 11, 12, 14, 19, 21, 26, 30, 34, 36, 37, 38, 40, 50, 51, 52,
+       53, 54, 56, 57, 58, 61, 62, 63, 69, 72, 73, 78, 84, 96, 97, 98, 100, 101, 102, 104, 105, 111, 112, 114, 115, 130, 131,
+     139, 140, 142, 144, 148, 149, 150, 151, 154, 159, 160, 162, 163, 164, 166, 167, 170, 171, 175, 176, 178, 181, 182, 185, 
+	   186, 188, 189, 199, 200, 206, 207, 214, 215, 220, 224, 225, 227, 228, 229, 234, 235, 236, 239, 244, 245, 246, 247, 249, 
+	   250, 251, 253, 254, 257, 258, 259, 260, 261, 266, 268, 275, 276, 277, 278, 280, 281, 283, 290, 293, 299, 300, 301, 2571,
+	   5001, 5801, 6901, 6902, 2771)   
+       
+                         OR channel = 'ATM'  AND CAST(trim(cod_eve_trn_mod) AS INT) NOT IN (120, 121, 127, 141)   )
+            
+                     GROUP BY alta_type, channel, cod_eve_trn_mod, des_eventos) hh 
+       
+       ) gg
+      
+         WHERE gg.indeks < 11 
+               "); 
+
+branch[ , -6];
+
+bbvaes[ , -6];
+
+```
+
+More detailed picture separates the TOP charts in 4 main groups of events "QUERIES", "OPERATIONS", "CONTRACTING" AND "SALES-ACTIONS":
+
+**"CONTRACTING":**
+
+``` {r echo=FALSE, cache=TRUE}
+
+bbvaes <- qhive(" SELECT * FROM 
+       
+            ( SELECT hh.*, ROW_NUMBER() OVER (ORDER BY trans_count DESC) as indeks
+             
+              from (SELECT alta_type as reg_type, channel, cod_eve_trn_mod as event_code, des_eventos as description, SUM(suma_tx) trans_count
+             
+                     FROM elmi.digit_onboard_top10_3meses
+            
+                     WHERE alta_type = 'bbva.es' AND channel != 'otros' AND event_type = 'Contracting'
+            
+                           AND (channel = 'BBVA Net'   AND CAST(trim(cod_eve_trn_mod) AS INT) in  (1 ,3 ,5 ,6 ,8 ,10 , 11 ,12 ,13 ,14 ,19 ,21 ,23 ,24 ,25 ,26 ,27 ,29 ,30 ,31 ,32 ,34 ,35 ,36
+           ,37 ,38 ,39 ,40 ,42 ,43 ,44 ,47 ,50 ,51 ,52 ,53 ,54 ,55 ,56 ,57 ,58 ,61 ,62 ,63 ,64 ,65 ,69 ,70 ,72 ,73 ,77 ,78 ,86 ,89 ,96 ,97 ,98
+           ,99 ,100 ,101 ,102 ,104 ,105 , 106 , 111 ,112 ,114 ,115 ,118 ,125 ,130 ,131 ,132 ,139 ,140 ,142 ,143 ,144 ,145 ,146 ,147 ,148 ,149
+           ,150 ,151 ,152 ,153 ,154 ,155 ,157 ,158 ,159 ,160 ,161 ,162 ,163 ,164 ,165 ,166 ,167 ,168 ,169 ,170 ,171 ,173 ,174 ,175 ,176 ,177 ,178
+           ,179 ,180 ,181 ,182 ,183 ,184 ,185 ,186 ,188 ,189 ,190 ,191 ,192 ,193 ,194 ,195 ,196 ,197 ,198 ,199 ,200 ,201, 202, 203, 204, 205, 206,
+       207, 208, 209, 210, 211, 212, 214, 215, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 231, 232, 233, 234, 236, 237, 239, 
+		   244, 245, 246, 247, 248, 250, 251, 253, 254, 256, 257, 258, 259, 260, 261, 263, 264, 266, 268, 270, 271, 272, 273, 274, 275, 276, 277, 
+		   278, 280, 281, 282, 283, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 299, 300, 301, 2571, 6901, 6902, 2771)     
+            
+                          OR channel = 'Oficina'  AND CAST(trim(cod_eve_trn_mod) AS INT)  in  (1, 5, 6, 10, 11, 12, 14, 19, 21, 26, 30, 34, 36, 37, 38, 40, 50, 51, 52,
+       53, 54, 56, 57, 58, 61, 62, 63, 69, 72, 73, 78, 84, 96, 97, 98, 100, 101, 102, 104, 105, 111, 112, 114, 115, 130, 131,
+     139, 140, 142, 144, 148, 149, 150, 151, 154, 159, 160, 162, 163, 164, 166, 167, 170, 171, 175, 176, 178, 181, 182, 185, 
+	   186, 188, 189, 199, 200, 206, 207, 214, 215, 220, 224, 225, 227, 228, 229, 234, 235, 236, 239, 244, 245, 246, 247, 249, 
+	   250, 251, 253, 254, 257, 258, 259, 260, 261, 266, 268, 275, 276, 277, 278, 280, 281, 283, 290, 293, 299, 300, 301, 2571,
+	   5001, 5801, 6901, 6902, 2771)   
+       
+                         OR channel = 'ATM'  AND CAST(trim(cod_eve_trn_mod) AS INT) NOT IN (120, 121, 127, 141)   )         
+            
+            
+                     GROUP BY alta_type, channel, cod_eve_trn_mod, des_eventos) hh 
+       
+       ) gg
+      
+         WHERE gg.indeks < 11 
+               ") ;
+
+branch <- qhive(" SELECT * FROM 
+       
+            ( SELECT hh.*, ROW_NUMBER() OVER (ORDER BY trans_count DESC) as indeks
+             
+              from (SELECT alta_type as reg_type, channel, cod_eve_trn_mod as event_code, des_eventos as description, SUM(suma_tx) trans_count
+             
+                     FROM elmi.digit_onboard_top10_3meses
+            
+                     WHERE alta_type = 'oficina'  AND channel != 'otros' AND event_type = 'Contracting'
+            
+                           AND (channel = 'BBVA Net'   AND CAST(trim(cod_eve_trn_mod) AS INT) in  (1 ,3 ,5 ,6 ,8 ,10 , 11 ,12 ,13 ,14 ,19 ,21 ,23 ,24 ,25 ,26 ,27 ,29 ,30 ,31 ,32 ,34 ,35 ,36
+           ,37 ,38 ,39 ,40 ,42 ,43 ,44 ,47 ,50 ,51 ,52 ,53 ,54 ,55 ,56 ,57 ,58 ,61 ,62 ,63 ,64 ,65 ,69 ,70 ,72 ,73 ,77 ,78 ,86 ,89 ,96 ,97 ,98
+           ,99 ,100 ,101 ,102 ,104 ,105 , 106 , 111 ,112 ,114 ,115 ,118 ,125 ,130 ,131 ,132 ,139 ,140 ,142 ,143 ,144 ,145 ,146 ,147 ,148 ,149
+           ,150 ,151 ,152 ,153 ,154 ,155 ,157 ,158 ,159 ,160 ,161 ,162 ,163 ,164 ,165 ,166 ,167 ,168 ,169 ,170 ,171 ,173 ,174 ,175 ,176 ,177 ,178
+           ,179 ,180 ,181 ,182 ,183 ,184 ,185 ,186 ,188 ,189 ,190 ,191 ,192 ,193 ,194 ,195 ,196 ,197 ,198 ,199 ,200 ,201, 202, 203, 204, 205, 206,
+       207, 208, 209, 210, 211, 212, 214, 215, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 231, 232, 233, 234, 236, 237, 239, 
+		   244, 245, 246, 247, 248, 250, 251, 253, 254, 256, 257, 258, 259, 260, 261, 263, 264, 266, 268, 270, 271, 272, 273, 274, 275, 276, 277, 
+		   278, 280, 281, 282, 283, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 299, 300, 301, 2571, 6901, 6902, 2771)     
+            
+                          OR channel = 'Oficina'  AND CAST(trim(cod_eve_trn_mod) AS INT)  in  (1, 5, 6, 10, 11, 12, 14, 19, 21, 26, 30, 34, 36, 37, 38, 40, 50, 51, 52,
+       53, 54, 56, 57, 58, 61, 62, 63, 69, 72, 73, 78, 84, 96, 97, 98, 100, 101, 102, 104, 105, 111, 112, 114, 115, 130, 131,
+     139, 140, 142, 144, 148, 149, 150, 151, 154, 159, 160, 162, 163, 164, 166, 167, 170, 171, 175, 176, 178, 181, 182, 185, 
+	   186, 188, 189, 199, 200, 206, 207, 214, 215, 220, 224, 225, 227, 228, 229, 234, 235, 236, 239, 244, 245, 246, 247, 249, 
+	   250, 251, 253, 254, 257, 258, 259, 260, 261, 266, 268, 275, 276, 277, 278, 280, 281, 283, 290, 293, 299, 300, 301, 2571,
+	   5001, 5801, 6901, 6902, 2771)   
+       
+                         OR channel = 'ATM'  AND CAST(trim(cod_eve_trn_mod) AS INT) NOT IN (120, 121, 127, 141)   )
+            
+                     GROUP BY alta_type, channel, cod_eve_trn_mod, des_eventos) hh 
+       
+       ) gg
+      
+         WHERE gg.indeks < 11 
+               "); 
+
+branch[ , -6];
+
+bbvaes[ , -6];
+
+```
+
+The TOP charts of contracting transactions show that in case of both types of client registrations the first TOP3 transactions are ALWAYS PERFORMED IN Branch - contracting current account, a (debit) bank card and a service of BBVA.Net. 
+
+Differences begin to show from the 4th position in the list when digitally registered clients tend to open a second account and a bank card via BBVA.net while "traditionally registered" clients continue visiting Branch to perform such things like deposit openings or contracting various investment tools (such as investment funds and pension plans). Traditionally registered clients also contract loans in Branch, and only after that they turn to BBVA.Net to open an account or another bank card (however, in marginal volumes). 
+
+The type of operation which makes the majority of digitally registered clients return to the Branch are the 'OPENINGS OF DEPOSITS', 'INVESTMENT ACCOUNTS' and 'INVESTMENT FUNDS'. Still, some part of these operations is performed by them in remote too (this might be a second instance of the same product, or just a condition, that only an additional contract can be opened in remote channel).
+
+
+**"OPERATIONS":**
+
+
+``` {r echo=FALSE, cache=TRUE}
+
+bbvaes <- qhive(" SELECT * FROM 
+       
+            ( SELECT hh.*, ROW_NUMBER() OVER (ORDER BY trans_count DESC) as indeks
+             
+              from (SELECT alta_type as reg_type, channel, cod_eve_trn_mod as event_code, des_eventos as description, SUM(suma_tx) trans_count
+             
+                     FROM elmi.digit_onboard_top10_3meses
+            
+                     WHERE alta_type = 'bbva.es' AND channel != 'otros' AND event_type = 'Operation'
+            
+                           AND (channel = 'BBVA Net'   AND CAST(trim(cod_eve_trn_mod) AS INT) in  (1 ,3 ,5 ,6 ,8 ,10 , 11 ,12 ,13 ,14 ,19 ,21 ,23 ,24 ,25 ,26 ,27 ,29 ,30 ,31 ,32 ,34 ,35 ,36
+           ,37 ,38 ,39 ,40 ,42 ,43 ,44 ,47 ,50 ,51 ,52 ,53 ,54 ,55 ,56 ,57 ,58 ,61 ,62 ,63 ,64 ,65 ,69 ,70 ,72 ,73 ,77 ,78 ,86 ,89 ,96 ,97 ,98
+           ,99 ,100 ,101 ,102 ,104 ,105 , 106 , 111 ,112 ,114 ,115 ,118 ,125 ,130 ,131 ,132 ,139 ,140 ,142 ,143 ,144 ,145 ,146 ,147 ,148 ,149
+           ,150 ,151 ,152 ,153 ,154 ,155 ,157 ,158 ,159 ,160 ,161 ,162 ,163 ,164 ,165 ,166 ,167 ,168 ,169 ,170 ,171 ,173 ,174 ,175 ,176 ,177 ,178
+           ,179 ,180 ,181 ,182 ,183 ,184 ,185 ,186 ,188 ,189 ,190 ,191 ,192 ,193 ,194 ,195 ,196 ,197 ,198 ,199 ,200 ,201, 202, 203, 204, 205, 206,
+       207, 208, 209, 210, 211, 212, 214, 215, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 231, 232, 233, 234, 236, 237, 239, 
+  	   244, 245, 246, 247, 248, 250, 251, 253, 254, 256, 257, 258, 259, 260, 261, 263, 264, 266, 268, 270, 271, 272, 273, 274, 275, 276, 277, 
+		   278, 280, 281, 282, 283, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 299, 300, 301, 2571, 6901, 6902, 2771)     
+            
+                          OR channel = 'Oficina'  AND CAST(trim(cod_eve_trn_mod) AS INT)  in  (1, 5, 6, 10, 11, 12, 14, 19, 21, 26, 30, 34, 36, 37, 38, 40, 50, 51, 52,
+       53, 54, 56, 57, 58, 61, 62, 63, 69, 72, 73, 78, 84, 96, 97, 98, 100, 101, 102, 104, 105, 111, 112, 114, 115, 130, 131,
+     139, 140, 142, 144, 148, 149, 150, 151, 154, 159, 160, 162, 163, 164, 166, 167, 170, 171, 175, 176, 178, 181, 182, 185, 
+	   186, 188, 189, 199, 200, 206, 207, 214, 215, 220, 224, 225, 227, 228, 229, 234, 235, 236, 239, 244, 245, 246, 247, 249, 
+	   250, 251, 253, 254, 257, 258, 259, 260, 261, 266, 268, 275, 276, 277, 278, 280, 281, 283, 290, 293, 299, 300, 301, 2571,
+	   5001, 5801, 6901, 6902, 2771)   
+       
+                         OR channel = 'ATM'  AND CAST(trim(cod_eve_trn_mod) AS INT) NOT IN (120, 121, 127, 141)   )         
+            
+            
+                     GROUP BY alta_type, channel, cod_eve_trn_mod, des_eventos) hh 
+       
+       ) gg
+      
+         WHERE gg.indeks < 11 
+               ") ;
+
+branch <- qhive(" SELECT * FROM 
+       
+            ( SELECT hh.*, ROW_NUMBER() OVER (ORDER BY trans_count DESC) as indeks
+             
+              from (SELECT alta_type as reg_type, channel, cod_eve_trn_mod as event_code, des_eventos as description, SUM(suma_tx) trans_count
+             
+                     FROM elmi.digit_onboard_top10_3meses
+            
+                     WHERE alta_type = 'oficina'  AND channel != 'otros' AND event_type = 'Operation'
+            
+                           AND (channel = 'BBVA Net'   AND CAST(trim(cod_eve_trn_mod) AS INT) in  (1 ,3 ,5 ,6 ,8 ,10 , 11 ,12 ,13 ,14 ,19 ,21 ,23 ,24 ,25 ,26 ,27 ,29 ,30 ,31 ,32 ,34 ,35 ,36
+           ,37 ,38 ,39 ,40 ,42 ,43 ,44 ,47 ,50 ,51 ,52 ,53 ,54 ,55 ,56 ,57 ,58 ,61 ,62 ,63 ,64 ,65 ,69 ,70 ,72 ,73 ,77 ,78 ,86 ,89 ,96 ,97 ,98
+           ,99 ,100 ,101 ,102 ,104 ,105 , 106 , 111 ,112 ,114 ,115 ,118 ,125 ,130 ,131 ,132 ,139 ,140 ,142 ,143 ,144 ,145 ,146 ,147 ,148 ,149
+           ,150 ,151 ,152 ,153 ,154 ,155 ,157 ,158 ,159 ,160 ,161 ,162 ,163 ,164 ,165 ,166 ,167 ,168 ,169 ,170 ,171 ,173 ,174 ,175 ,176 ,177 ,178
+           ,179 ,180 ,181 ,182 ,183 ,184 ,185 ,186 ,188 ,189 ,190 ,191 ,192 ,193 ,194 ,195 ,196 ,197 ,198 ,199 ,200 ,201, 202, 203, 204, 205, 206,
+       207, 208, 209, 210, 211, 212, 214, 215, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 231, 232, 233, 234, 236, 237, 239, 
+		   244, 245, 246, 247, 248, 250, 251, 253, 254, 256, 257, 258, 259, 260, 261, 263, 264, 266, 268, 270, 271, 272, 273, 274, 275, 276, 277, 
+		   278, 280, 281, 282, 283, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 299, 300, 301, 2571, 6901, 6902, 2771)     
+            
+                          OR channel = 'Oficina'  AND CAST(trim(cod_eve_trn_mod) AS INT)  in  (1, 5, 6, 10, 11, 12, 14, 19, 21, 26, 30, 34, 36, 37, 38, 40, 50, 51, 52,
+       53, 54, 56, 57, 58, 61, 62, 63, 69, 72, 73, 78, 84, 96, 97, 98, 100, 101, 102, 104, 105, 111, 112, 114, 115, 130, 131,
+     139, 140, 142, 144, 148, 149, 150, 151, 154, 159, 160, 162, 163, 164, 166, 167, 170, 171, 175, 176, 178, 181, 182, 185, 
+	   186, 188, 189, 199, 200, 206, 207, 214, 215, 220, 224, 225, 227, 228, 229, 234, 235, 236, 239, 244, 245, 246, 247, 249, 
+	   250, 251, 253, 254, 257, 258, 259, 260, 261, 266, 268, 275, 276, 277, 278, 280, 281, 283, 290, 293, 299, 300, 301, 2571,
+	   5001, 5801, 6901, 6902, 2771)   
+       
+                         OR channel = 'ATM'  AND CAST(trim(cod_eve_trn_mod) AS INT) NOT IN (120, 121, 127, 141)   )
+            
+                     GROUP BY alta_type, channel, cod_eve_trn_mod, des_eventos) hh 
+       
+       ) gg
+      
+         WHERE gg.indeks < 11 
+               "); 
+
+branch[ , -6];
+
+bbvaes[ , -6];
+
+```
+
+The most important operation type which makes the digitally registered clients to turn back to Branch network is the 'MULTIPRODUCT CONTRACTING FLOW / FLUJO DE CONTRATACION MULTIPRODUCTO' followed by 'ADDING CASH TO ACCOUNT', 'MANAGING BANK CARDS' and 'PASSWORD SENDING'. All these operations but the second seem to be limited to the Branch as to the only possible execution channel according to bank procedures. 
+
+Nonetheless, thise are not the most frequent operations done by digitally registered clients, but are so 'CASH WITHDRAWALS FROM ACCOUNT' and 'CASH LOADINGS TO ACCOUNT' in ATM-s followed by 'PIN MANAGEMENT in ATM'  and 'PAYMENT TRANSFERS' in BBVA.Net. 
+
+Similarly to that, the most frequent operation type performed by clients registered in Branch is the 'CASH WITHDRAWALS FROM ACCOUNT' in ATM. However, the next place in chart take Branch transactions. 
+
+All in all, it is worth mentioning that digitally registered clients DO NOT have remote channel alternatives to perform multiproduct contracting, managing bank cards (plastic card related management) and order password changes. Some of them also perform cash loadings to account via Branch network (might be dependent of the amounts dealt with due to the migrability restrictions).  
+
+
+**"QUERIES":**
+
+
+``` {r echo=FALSE, cache=TRUE}
+
+bbvaes <- qhive(" SELECT * FROM 
+       
+            ( SELECT hh.*, ROW_NUMBER() OVER (ORDER BY trans_count DESC) as indeks
+             
+              from (SELECT alta_type as reg_type, channel, cod_eve_trn_mod as event_code, des_eventos as description, SUM(suma_tx) trans_count
+             
+                     FROM elmi.digit_onboard_top10_3meses
+            
+                     WHERE alta_type = 'bbva.es' AND channel != 'otros' AND event_type = 'Query'
+            
+                           AND (channel = 'BBVA Net'   AND CAST(trim(cod_eve_trn_mod) AS INT) in  (1 ,3 ,5 ,6 ,8 ,10 , 11 ,12 ,13 ,14 ,19 ,21 ,23 ,24 ,25 ,26 ,27 ,29 ,30 ,31 ,32 ,34 ,35 ,36
+           ,37 ,38 ,39 ,40 ,42 ,43 ,44 ,47 ,50 ,51 ,52 ,53 ,54 ,55 ,56 ,57 ,58 ,61 ,62 ,63 ,64 ,65 ,69 ,70 ,72 ,73 ,77 ,78 ,86 ,89 ,96 ,97 ,98
+           ,99 ,100 ,101 ,102 ,104 ,105 , 106 , 111 ,112 ,114 ,115 ,118 ,125 ,130 ,131 ,132 ,139 ,140 ,142 ,143 ,144 ,145 ,146 ,147 ,148 ,149
+           ,150 ,151 ,152 ,153 ,154 ,155 ,157 ,158 ,159 ,160 ,161 ,162 ,163 ,164 ,165 ,166 ,167 ,168 ,169 ,170 ,171 ,173 ,174 ,175 ,176 ,177 ,178
+           ,179 ,180 ,181 ,182 ,183 ,184 ,185 ,186 ,188 ,189 ,190 ,191 ,192 ,193 ,194 ,195 ,196 ,197 ,198 ,199 ,200 ,201, 202, 203, 204, 205, 206,
+       207, 208, 209, 210, 211, 212, 214, 215, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 231, 232, 233, 234, 236, 237, 239, 
+       244, 245, 246, 247, 248, 250, 251, 253, 254, 256, 257, 258, 259, 260, 261, 263, 264, 266, 268, 270, 271, 272, 273, 274, 275, 276, 277, 
+		   278, 280, 281, 282, 283, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 299, 300, 301, 2571, 6901, 6902, 2771)     
+            
+                          OR channel = 'Oficina'  AND CAST(trim(cod_eve_trn_mod) AS INT)  in  (1, 5, 6, 10, 11, 12, 14, 19, 21, 26, 30, 34, 36, 37, 38, 40, 50, 51, 52,
+       53, 54, 56, 57, 58, 61, 62, 63, 69, 72, 73, 78, 84, 96, 97, 98, 100, 101, 102, 104, 105, 111, 112, 114, 115, 130, 131,
+     139, 140, 142, 144, 148, 149, 150, 151, 154, 159, 160, 162, 163, 164, 166, 167, 170, 171, 175, 176, 178, 181, 182, 185, 
+	   186, 188, 189, 199, 200, 206, 207, 214, 215, 220, 224, 225, 227, 228, 229, 234, 235, 236, 239, 244, 245, 246, 247, 249, 
+	   250, 251, 253, 254, 257, 258, 259, 260, 261, 266, 268, 275, 276, 277, 278, 280, 281, 283, 290, 293, 299, 300, 301, 2571,
+	   5001, 5801, 6901, 6902, 2771)   
+       
+                         OR channel = 'ATM'  AND CAST(trim(cod_eve_trn_mod) AS INT) NOT IN (120, 121, 127, 141)   )       
+
+                     GROUP BY alta_type, channel, cod_eve_trn_mod, des_eventos) hh        
+       ) gg      
+         WHERE gg.indeks < 11 
+     
+               ") ;
+
+
+branch <- qhive(" SELECT * FROM 
+       
+            ( SELECT hh.*, ROW_NUMBER() OVER (ORDER BY trans_count DESC) as indeks
+             
+              from (SELECT alta_type as reg_type, channel, cod_eve_trn_mod as event_code, des_eventos as description, SUM(suma_tx) trans_count
+             
+                     FROM elmi.digit_onboard_top10_3meses
+            
+                     WHERE alta_type = 'oficina'  AND channel != 'otros' AND event_type = 'Query'
+            
+                           AND (channel = 'BBVA Net'   AND CAST(trim(cod_eve_trn_mod) AS INT) in  (1 ,3 ,5 ,6 ,8 ,10 , 11 ,12 ,13 ,14 ,19 ,21 ,23 ,24 ,25 ,26 ,27 ,29 ,30 ,31 ,32 ,34 ,35 ,36
+           ,37 ,38 ,39 ,40 ,42 ,43 ,44 ,47 ,50 ,51 ,52 ,53 ,54 ,55 ,56 ,57 ,58 ,61 ,62 ,63 ,64 ,65 ,69 ,70 ,72 ,73 ,77 ,78 ,86 ,89 ,96 ,97 ,98
+           ,99 ,100 ,101 ,102 ,104 ,105 , 106 , 111 ,112 ,114 ,115 ,118 ,125 ,130 ,131 ,132 ,139 ,140 ,142 ,143 ,144 ,145 ,146 ,147 ,148 ,149
+           ,150 ,151 ,152 ,153 ,154 ,155 ,157 ,158 ,159 ,160 ,161 ,162 ,163 ,164 ,165 ,166 ,167 ,168 ,169 ,170 ,171 ,173 ,174 ,175 ,176 ,177 ,178
+           ,179 ,180 ,181 ,182 ,183 ,184 ,185 ,186 ,188 ,189 ,190 ,191 ,192 ,193 ,194 ,195 ,196 ,197 ,198 ,199 ,200 ,201, 202, 203, 204, 205, 206,
+       207, 208, 209, 210, 211, 212, 214, 215, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 231, 232, 233, 234, 236, 237, 239, 
+		   244, 245, 246, 247, 248, 250, 251, 253, 254, 256, 257, 258, 259, 260, 261, 263, 264, 266, 268, 270, 271, 272, 273, 274, 275, 276, 277, 
+		   278, 280, 281, 282, 283, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 299, 300, 301, 2571, 6901, 6902, 2771)     
+            
+                          OR channel = 'Oficina'  AND CAST(trim(cod_eve_trn_mod) AS INT)  in  (1, 5, 6, 10, 11, 12, 14, 19, 21, 26, 30, 34, 36, 37, 38, 40, 50, 51, 52,
+       53, 54, 56, 57, 58, 61, 62, 63, 69, 72, 73, 78, 84, 96, 97, 98, 100, 101, 102, 104, 105, 111, 112, 114, 115, 130, 131,
+     139, 140, 142, 144, 148, 149, 150, 151, 154, 159, 160, 162, 163, 164, 166, 167, 170, 171, 175, 176, 178, 181, 182, 185, 
+	   186, 188, 189, 199, 200, 206, 207, 214, 215, 220, 224, 225, 227, 228, 229, 234, 235, 236, 239, 244, 245, 246, 247, 249, 
+	   250, 251, 253, 254, 257, 258, 259, 260, 261, 266, 268, 275, 276, 277, 278, 280, 281, 283, 290, 293, 299, 300, 301, 2571,
+	   5001, 5801, 6901, 6902, 2771)   
+       
+                         OR channel = 'ATM'  AND CAST(trim(cod_eve_trn_mod) AS INT) NOT IN (120, 121, 127, 141)   )
+            
+                     GROUP BY alta_type, channel, cod_eve_trn_mod, des_eventos) hh 
+       
+       ) gg
+      
+         WHERE gg.indeks < 11 
+               "); 
+
+branch[ , -6];
+
+bbvaes[ , -6];
+
+```
+
+In the part of queries, it stands out that the digitally registered clients make queries mostly in BBVA.Net opposed to "traditional registrations", who still frequent ATM-s and Branch in much bigger part than the first group (even so that the top 1 query type for both groups is 'ACCOUNT BALANCE AND MOVEMENTS STATEMENT' in BBVA.Net). Very important to point out also that the traditional registrations are the type of people who are still keen on using much the BANKBOOK-s (spanish - LIBRETA) whereas the digital registrations use this service to much lesser extent (this operation type is not in their TOP 10). 
+
+The only type of query which forces digital clients to turn to the Branch is the 'BANK CARD RELATED QUERY'. 
+
+
+**"SALES-ACTIONS":**
+
+
+``` {r echo=FALSE, cache=TRUE}
+
+bbvaes <- qhive(" SELECT * FROM 
+       
+            ( SELECT hh.*, ROW_NUMBER() OVER (ORDER BY trans_count DESC) as indeks
+             
+              from (SELECT alta_type as reg_type, channel, cod_eve_trn_mod as event_code,
+            
+                           CASE WHEN trim(cod_eve_trn_mod) LIKE '%2571%' THEN 'ALTAS / APORTACIONES FI y PP'
+                                     WHEN trim(cod_eve_trn_mod) LIKE '%2771%' THEN 'ALTA ORDEN COMPRA/VENTA DE VALORES'
+                                     ELSE des_eventos END AS description, 
+            
+                           SUM(suma_tx) trans_count
+             
+                     FROM elmi.digit_onboard_top10_3meses 
+            
+                     WHERE alta_type = 'bbva.es' AND channel != 'otros'  AND TRIM(event_type) = 'Sales-action' AND CAST(cod_eve_trn_mod AS INT) not in (2, 75)            
+            
+                     GROUP BY alta_type, channel, cod_eve_trn_mod, des_eventos) hh 
+       
+       ) gg
+      
+         WHERE gg.indeks < 11 
+               ") ;
+
+branch <- qhive(" SELECT * FROM 
+       
+            ( SELECT hh.*, ROW_NUMBER() OVER (ORDER BY trans_count DESC) as indeks
+             
+              from (SELECT alta_type as reg_type, channel, cod_eve_trn_mod as event_code, 
+            
+                           CASE WHEN trim(cod_eve_trn_mod) LIKE '%2571%' THEN 'ALTAS / APORTACIONES FI y PP'
+                                     WHEN trim(cod_eve_trn_mod) LIKE '%2771%' THEN 'ALTA ORDEN COMPRA/VENTA DE VALORES'
+                                     ELSE des_eventos END AS description,
+            
+                           SUM(suma_tx) trans_count
+             
+                     FROM elmi.digit_onboard_top10_3meses 
+                     
+            
+                     WHERE alta_type = 'oficina' AND channel != 'otros' AND event_type = 'Sales-action' AND CAST(cod_eve_trn_mod AS INT) not in (2, 75)
+          
+                     GROUP BY alta_type, channel, cod_eve_trn_mod, des_eventos) hh 
+       
+       ) gg
+      
+         WHERE gg.indeks < 11 
+               "); 
+
+branch[ , -6];
+
+bbvaes[ , -6];
+
+```
+
+In the part of investment transactions related "SALES-ACTIONS" the usage pattern is following the same logics as before: in absolute terms digital registrations perform more sales-actions in BBVA.net than the "traditional" group, which prefer to be assisted by their Branch clerk in performing investment transactions.
+
+
+                    --------------------------------------------------------------------------------------------------------------
+                 
+                    ************************************* **WEALTH STATUS OF A CLIENT** ******************************************
+                 
+                    --------------------------------------------------------------------------------------------------------------
+
+In given part of the report we investigate the potential differences in wealth status between 2 groups. 
+
+Clients´ wealth level has been expressed through Global segmentation and Net Profit Margin (= Net Interest Margin - Operational Expenses). 
+
+First figure disclosed is the distribution of the clients by segmento Global (in absolute and relative terms respectively) as of 3 months after the registration. 
+
+
+``` {r echo=FALSE, eval=FALSE}
+
+   do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboarding_wealth_1 AS  
+         
+                    SELECT cod_persona   ,
+                    fecha_alta    ,
+                    alta_type     ,
+                    fec_altapers  ,
+                    qnu_empledos  ,
+                    cod_formcli   ,
+                    cod_paisores  ,
+                    cod_paisonac  ,
+                    cod_tip_ocup  ,
+                    cod_tiporol   ,
+                    xti_persona   ,
+                    cod_estcivil  ,
+                    xti_csexof    ,
+                    xti_robinson  ,
+                    cod_clienvip  ,
+                    qnu_ninoscar  ,
+                    qnu_adultcar  ,
+                    xti_moragrup  ,
+                    des_provnacm  ,
+                    edad          ,  
+                    re.partition_id,
+                    SUM(CASE WHEN CAST(re.cod_prtda AS INT) = 99003 THEN re.imp_anual ELSE 0.0 END) as gross_margin, 
+                    SUM(CASE WHEN CAST(re.cod_prtda AS INT) = 99005 THEN re.imp_anual ELSE 0.0 END) as net_margin                 
+         
+            FROM elmi.digital_onboarding_sociodemo_1 abi            
+            JOIN da_pro.rentabilidad_clientes re ON abi.cod_persona = CAST(re.cod_persctpn AS INT)  
+         
+            WHERE cod_paisoalf like 'ES' AND CAST(cod_entalfa AS INT) = 182         
+                      AND MONTH(re.fec_cierre) >= MONTH(abi.fecha_alta)
+                      AND YEAR(re.fec_cierre) = 2014
+         
+            GROUP BY cod_persona  ,
+                    fecha_alta    ,
+                    alta_type     ,
+                    fec_altapers  ,
+                    qnu_empledos  ,
+                    cod_formcli   ,
+                    cod_paisores  ,
+                    cod_paisonac  ,
+                    cod_tip_ocup  ,
+                    cod_tiporol   ,
+                    xti_persona   ,
+                    cod_estcivil  ,
+                    xti_csexof    ,
+                    xti_robinson  ,
+                    cod_clienvip  ,
+                    qnu_ninoscar  ,
+                    qnu_adultcar  ,
+                    xti_moragrup  ,
+                    des_provnacm  ,
+                    edad   ,
+                    re.partition_id"); 
+
+
+   do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboarding_wealth_2 AS            
+             SELECT cod_persona  ,
+                    fecha_alta   ,
+                    alta_type    ,
+                    fec_altapers ,
+                    qnu_empledos ,
+                    cod_formcli  ,
+                    cod_paisores ,
+                    cod_paisonac ,
+                    cod_tip_ocup ,
+                    xti_persona  ,
+                    cod_estcivil ,
+                    xti_csexof   ,
+                    xti_robinson ,
+                    cod_clienvip ,
+                    qnu_ninoscar ,
+                    qnu_adultcar ,
+                    xti_moragrup ,
+                    des_provnacm ,
+                    edad         , 
+           
+                    AVG(gross_margin)  as avr_gross_margin,
+                    AVG(net_margin)  as avr_net_margin 
+           
+             FROM elmi.digital_onboarding_wealth_1 
+           
+             GROUP BY cod_persona  ,
+                      fecha_alta   ,
+                      alta_type    ,
+                      fec_altapers ,
+                      qnu_empledos ,
+                      cod_formcli  ,
+                      cod_paisores ,
+                      cod_paisonac ,
+                      cod_tip_ocup ,
+                      xti_persona  ,
+                      cod_estcivil ,
+                      xti_csexof   ,
+                      xti_robinson ,
+                      cod_clienvip ,
+                      qnu_ninoscar ,
+                      qnu_adultcar ,
+                      xti_moragrup ,
+                      des_provnacm ,
+                      edad           "); 
+
+
+  do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboarding_wealth_3  AS 
+          
+             SELECT cod_persona      ,
+                    fecha_alta       ,
+                    alta_type        ,
+                    fec_altapers     ,
+                    qnu_empledos     ,
+                    cod_formcli      ,
+                    cod_paisores     ,
+                    cod_paisonac     ,
+                    cod_tip_ocup     ,
+                    xti_persona      ,
+                    cod_estcivil     ,
+                    xti_csexof       ,
+                    xti_robinson     ,
+                    cod_clienvip     ,
+                    qnu_ninoscar     ,
+                    qnu_adultcar     ,
+                    xti_moragrup     ,
+                    des_provnacm     ,
+                    edad             ,
+                    avr_gross_margin ,
+                    avr_net_margin   ,
+                    sglob.fec_cierre,
+                    sglob.cod_segmsubo, 
+                    sgc.des_segmentacion_global
+          
+            FROM elmi.digital_onboarding_wealth_2 main
+            LEFT OUTER JOIN  da_pro.segmento_global sglob ON  main.cod_persona = cast(sglob.cod_persctpn as int)
+                       JOIN  da_catalogos.segmentacion_global sgc ON trim(sglob.cod_segmsubo) = cast(trim(sgc.cod_segmentacion_global) as int)
+          
+            WHERE CAST(sglob.cod_entalfa AS INT) = 182
+                  AND ( MONTH(sglob.fec_cierre) > MONTH(main.fecha_alta)  AND ( MONTH(sglob.fec_cierre) <= MONTH(main.fecha_alta) + 3) )
+          
+                  AND YEAR(sglob.fec_cierre) = 2014
+                  AND sgc.partition_id = 'last'
+          
+             GROUP BY cod_persona    ,
+                    fecha_alta       ,
+                    alta_type        ,
+                    fec_altapers     ,
+                    qnu_empledos     ,
+                    cod_formcli      ,
+                    cod_paisores     ,
+                    cod_paisonac     ,
+                    cod_tip_ocup     ,
+                    xti_persona      ,
+                    cod_estcivil     ,
+                    xti_csexof       ,
+                    xti_robinson     ,
+                    cod_clienvip     ,
+                    qnu_ninoscar     ,
+                    qnu_adultcar     ,
+                    xti_moragrup     ,
+                    des_provnacm     ,
+                    edad             ,
+                    avr_gross_margin ,
+                    avr_net_margin   ,
+                    sglob.fec_cierre,
+                    sglob.cod_segmsubo, 
+                    sgc.des_segmentacion_global 
+          ");
+
+
+  do.hive(" CREATE TABLE elmi.digital_onboarding_wealth_4 AS
+          
+            SELECT     main.cod_persona         ,           
+                        fecha_alta          ,           
+                        alta_type           ,           
+                        fec_altapers        ,           
+                        qnu_empledos        ,           
+                        cod_formcli         ,           
+                        cod_paisores        ,           
+                        cod_paisonac        ,           
+                        cod_tip_ocup        ,           
+                        xti_persona         ,           
+                        cod_estcivil        ,           
+                        xti_csexof          ,           
+                        xti_robinson        ,           
+                        cod_clienvip        ,           
+                        qnu_ninoscar        ,           
+                        qnu_adultcar        ,           
+                        xti_moragrup        ,           
+                        des_provnacm        ,           
+                        edad                ,           
+                        avr_gross_margin    ,           
+                        avr_net_margin      ,           
+                        fec_cierre          ,           
+                        cod_segmsubo        ,           
+                     des_segmentacion_global
+          
+            FROM elmi.digital_onboarding_wealth_3 main
+            
+            JOIN (SELECT  cod_persona, MAX(fec_cierre) max_fec_cierre 
+                  FROM elmi.digital_onboarding_wealth_3 
+                  GROUP BY cod_persona) maxf ON main.cod_persona = maxf.cod_persona AND main.fec_cierre = maxf.max_fec_cierre
+           
+            WHERE trim(des_segmentacion_global) NOT LIKE '%AUTONÓMOS Y PROFESIONALES%' 
+          
+          GROUP BY     main.cod_persona         ,           
+                          fecha_alta          ,           
+                          alta_type           ,           
+                          fec_altapers        ,           
+                          qnu_empledos        ,           
+                          cod_formcli         ,           
+                          cod_paisores        ,           
+                          cod_paisonac        ,           
+                          cod_tip_ocup        ,           
+                          xti_persona         ,           
+                          cod_estcivil        ,           
+                          xti_csexof          ,           
+                          xti_robinson        ,           
+                          cod_clienvip        ,           
+                          qnu_ninoscar        ,           
+                          qnu_adultcar        ,           
+                          xti_moragrup        ,           
+                          des_provnacm        ,           
+                          edad                ,           
+                          avr_gross_margin    ,           
+                          avr_net_margin      ,           
+                          fec_cierre          ,           
+                          cod_segmsubo        ,           
+                       des_segmentacion_global  ") ;
+
+```
+
+
+``` {r echo=FALSE, fig.width=12, fig.height=6}
+
+wealth <- qhive(" select * from elmi.digital_onboarding_wealth_4 ");
+
+ re <- aggregate(wealth$cod_persona, by=list(wealth$alta_type, wealth$des_segmentacion_global), FUN=length)  
+ colnames(re) <- c("reg_type", "global_segment", "num_clients");
+
+ re <- re[which(re$global_segment %ni% c('ECONOMÍAS AGRARIAS', 'RESTO PFS CON ACTIVIDAD EMPRESARIAL', 'INSTITUCIONES PRIVADAS', 'AUTONÓMOS Y PROFESIONALES')), ];
+
+gg1 <- ggplot(re, aes(x=reg_type, y=num_clients, fill=global_segment)) + geom_bar(width= 0.6, stat="identity") ;
+
+
+ 
+library(plyr)
+ce <- ddply(re, "reg_type", transform, percent_num_clients = num_clients / sum(num_clients) * 100);
+
+
+ff2 <- ggplot(ce, aes(x=reg_type, y=percent_num_clients, fill=global_segment)) + geom_bar(width= 0.6, stat="identity") ;
+        
+multiplot(gg1, ff2, cols=2);
+ 
+```
+
+
+As it is seen from presented figures, a population of "traditional" (Branch) registrations contains more individuals with higher wealth segments (segment 'VALOR' and 'ALTO VALOR') than the digital ones and also notably more elder people of a Standard wealth level (segment '+59'). 
+
+The representation of the segment 'JOVENES' on the graphs seems to contradict to some extent to the conclusions drawn in the 1st iteration of the report (which were based on the analysis of age, marital status and professional occupation) - the Branch registrations have slightly higher share of this segment than the digital ones and the conclusions previously made said that digital registrations represent in general more younger population. And, indeed, they remain correct.
+
+To explain this phenomena, first of all, it is important to note that the Global segment 'JOVENES' aside from the age itself (by criteria, 18-29 years of age) reflects the wealth level of a client. It denotes the population between 18 and 29 years of age in a **Standard** wealth level. After analyzing age and Global segment in an cross-table for digital registrations it has been discovered that the segments 'AUTÓNOMOS Y PROFESIONALES' and 'COMERCIOS' of digital registrations also contain individuals younger than 29 years.  
+
+But the most compelling fact is that the segment 'ESTÁNDAR' of digitally registered clients contains on average twice more individuals in the 29 - 41 years age span than the same segment of Branch registrations. This age span was also held as a young population on prior analysis stages.
+
+
+Next visualization shows the differences in Net Profit Margin (averaged over the whole period after becoming a client) between 2 analyzed groups. First image represents the whole range of values (including outliers) and the second - zoomed in to show median, the 1st and 3rd quartiles in greater detail. 
+
+``` {r echo=FALSE, two_plots_same_size_side_by_side, fig.width=4, fig.height=4}
+
+boxplot(wealth$avr_net_margin  ~ as.factor(wealth$alta_type), col="light yellow", xlab="registration type", ylab="net margin", ylim= c(-500,3000), varwidth=TRUE) 
+
+boxplot(wealth$avr_net_margin  ~ as.factor(wealth$alta_type), col="light yellow", xlab="registration type", ylab="net margin", ylim= c(-50, 100), varwidth=TRUE) 
+
+``` 
+
+As it is seen from the 2 boxplots presented, the profitability median of the traditional registrations is slightly higher than the one of digital registrations as well as the distribution is obviously more wide comprising much higher values on a level of the 3rd quartile. 
+
+```{r }
+
+summary(wealth$avr_net_margin[which(wealth$alta_type == 'oficina')]) ;
+
+summary(wealth$avr_net_margin[which(wealth$alta_type == 'bbva.es')]) ; 
+
+```
+
+In this manner one can confirm that the traditional registrations comprise much more individuals with higher profitability, and one of the primary goals in this problematics could be re-directing this type of individuals into the digital process flow of new client registration. 
+
+
+As a next step of a given report we address the level of the commitment (i.e. engagement) of the clients of 2 analyzed groups with BBVA. 
+
+                    --------------------------------------------------------------------------------------------------------------
+                 
+                    ******************************* **ENGAGEMENT OF A CLIENT WITH BBVA** *****************************************
+                 
+                    --------------------------------------------------------------------------------------------------------------
+
+When studying phenomena of an engagement of a client with a bank one deals with such information as tenancy of a standard engagement segmentation (in this case, Plan Uno), global account balance of a client, number of active contracts held by a client as of _x_ first months, the intensity of bank channel usage (in particular, via contracted bank card(s)) and some other indicators. 
+
+Tenancy of segment Plan Uno is a good first approximation to what is a level of a commitment of a client with a bank, but as this segmentation type is quite generic, discrete and non-granular, in order to be able to draw robust conclusions one can enrich the analysis with more granular data such as a number of products contracted by client or transactionality of a client in BBVA channels. Unfortunately, at the moment of performing given analysis the available data sources do not facilitate data of global account balance of a client, so this part is to be omitted until the respective data will be provided. 
+
+
+Distribution of clients of 2 analyzed registration groups by tenancy of Plan Uno as of the 3rd month after the registration in both absolute and relative terms is represented on the graphs below:
+
+``` {r echo=FALSE, cache=TRUE}
+
+ do.hive (" CREATE TABLE IF NOT EXISTS elmi.digital_onboarding_planuno_11 AS           
+            SELECT cod_persona      ,
+                    fecha_alta       ,
+                    alta_type        ,
+                    fec_altapers     ,
+                    qnu_empledos     ,
+                    cod_formcli      ,
+                    cod_paisores     ,
+                    cod_paisonac     ,
+                    cod_tip_ocup     ,
+                    xti_persona      ,
+                    cod_estcivil     ,
+                    xti_csexof       ,
+                    xti_robinson     ,
+                    cod_clienvip     ,
+                    qnu_ninoscar     ,
+                    qnu_adultcar     ,
+                    xti_moragrup     ,
+                    des_provnacm     ,
+                    edad             ,
+                    avr_gross_margin ,
+                    avr_net_margin   ,
+                    main.cod_segmsubo, 
+                    des_segmentacion_global,
+                    plu.fec_cierre,
+                    plu.cod_segpref                   
+          
+            FROM elmi.digital_onboarding_wealth_4 main
+            LEFT OUTER JOIN  da_pro.segmento_plan_uno plu ON  main.cod_persona = cast(plu.cod_persctpn as int)
+          
+            WHERE CAST(plu.cod_entalfa AS INT) = 182
+         
+                  AND ( MONTH(plu.fec_cierre) > MONTH(main.fecha_alta)  AND ( MONTH(plu.fec_cierre) <= MONTH(main.fecha_alta) + 3) )
+  			          AND YEAR(plu.fec_cierre) = 2014
+				  
+             GROUP BY cod_persona      ,
+                    fecha_alta       ,
+                    alta_type        ,
+                    fec_altapers     ,
+                    qnu_empledos     ,
+                    cod_formcli      ,
+                    cod_paisores     ,
+                    cod_paisonac     ,
+                    cod_tip_ocup     ,
+                    xti_persona      ,
+                    cod_estcivil     ,
+                    xti_csexof       ,
+                    xti_robinson     ,
+                    cod_clienvip     ,
+                    qnu_ninoscar     ,
+                    qnu_adultcar     ,
+                    xti_moragrup     ,
+                    des_provnacm     ,
+                    edad             ,
+                    avr_gross_margin ,
+                    avr_net_margin   ,
+                    main.cod_segmsubo, 
+                    des_segmentacion_global,
+                    plu.fec_cierre,
+                    plu.cod_segpref			
+          ") ;
+
+ 
+  do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboarding_planuno_22 AS
+          
+            SELECT     main.cod_persona         ,           
+                        fecha_alta          ,           
+                        alta_type           ,           
+                        fec_altapers        ,           
+                        qnu_empledos        ,           
+                        cod_formcli         ,           
+                        cod_paisores        ,           
+                        cod_paisonac        ,           
+                        cod_tip_ocup        ,           
+                        xti_persona         ,           
+                        cod_estcivil        ,           
+                        xti_csexof          ,           
+                        xti_robinson        ,           
+                        cod_clienvip        ,           
+                        qnu_ninoscar        ,           
+                        qnu_adultcar        ,           
+                        xti_moragrup        ,           
+                        des_provnacm        ,           
+                        edad                ,           
+                        avr_gross_margin    ,           
+                        avr_net_margin      ,           
+                        fec_cierre          ,           
+                        cod_segmsubo        ,           
+                        des_segmentacion_global,
+                        cod_segpref        
+                         
+            FROM elmi.digital_onboarding_planuno_11 main
+            
+            JOIN (SELECT  cod_persona, MAX(fec_cierre) max_fec_cierre 
+                  FROM elmi.digital_onboarding_planuno_11 
+                  GROUP BY cod_persona) maxf ON main.cod_persona = maxf.cod_persona AND main.fec_cierre = maxf.max_fec_cierre
+                   
+            GROUP BY main.cod_persona         ,           
+                          fecha_alta          ,           
+                          alta_type           ,           
+                          fec_altapers        ,           
+                          qnu_empledos        ,           
+                          cod_formcli         ,           
+                          cod_paisores        ,           
+                          cod_paisonac        ,           
+                          cod_tip_ocup        ,           
+                          xti_persona         ,           
+                          cod_estcivil        ,           
+                          xti_csexof          ,           
+                          xti_robinson        ,           
+                          cod_clienvip        ,           
+                          qnu_ninoscar        ,           
+                          qnu_adultcar        ,           
+                          xti_moragrup        ,           
+                          des_provnacm        ,           
+                          edad                ,           
+                          avr_gross_margin    ,           
+                          avr_net_margin      ,           
+                          fec_cierre          ,           
+                          cod_segmsubo        ,           
+                          des_segmentacion_global,
+                          cod_segpref          
+                          ") ;
+
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboarding_planuno as 
+         
+           SELECT aa.*, bb.descr_segmento
+         
+           FROM elmi.digital_onboarding_planuno_22 aa
+         
+           LEFT OUTER JOIN ( SELECT *, TRIM(SPLIT(des_segmentacion_plan_uno, '\u0096')[1])  descr_segmento
+                  from da_catalogos.segmentacion_plan_uno WHERE partition_id = 'last') bb ON TRIM(aa.cod_segpref) = TRIM(bb.cod_segmentacion_plan_uno) ")
+
+```
+
+``` {r echo=FALSE, fig.width=12, fig.height=6}
+
+engage <- qhive(" select * from elmi.digital_onboarding_planuno ");
+
+engage$descr_segmento[which(is.na(engage$descr_segmento))] <- 'Unknown'
+
+
+re <- aggregate(engage$cod_persona, by=list(engage$alta_type, engage$descr_segmento), FUN=length)  
+
+colnames(re) <- c("reg_type", "segment_plan_uno", "num_clients");
+
+
+gg1 <- ggplot(re, aes(x=reg_type, y=num_clients, fill=segment_plan_uno)) + geom_bar(width= 0.6, stat="identity") ;
+
+
+ 
+library(plyr)
+ce <- ddply(re, "reg_type", transform, percent_num_clients = num_clients / sum(num_clients) * 100);
+
+
+ff2 <- ggplot(ce, aes(x=reg_type, y=percent_num_clients, fill=segment_plan_uno)) + geom_bar(width= 0.6, stat="identity") ;
+
+multiplot(gg1, ff2, cols=2);
+
+```
+
+From what it can be concluded from the graphs, the digital registrations are more transactional than the traditional ones after the 3 months of becoming a client, and the latter are more engaged **(segments 'VINCULADO' + 'PRE-VINCULADO')** with the bank than digital ones. 
+
+By going over to more detailed analysis of client engagement between 2 groups first we take into consideration the number of active contracts a client had after her/his first 3 months in breakdown of general product groups (in category of Assets). 
+
+
+```{r echo=FALSE, eval=FALSE}
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboarding_contracts_alter AS
+         
+           SELECT aa.cod_persona ,   
+                  aa.fecha_alta ,   
+                  aa.alta_type ,   
+                  aa.fec_altapers ,   
+                  aa.qnu_empledos ,   
+                  aa.cod_formcli ,   
+                  aa.cod_paisores ,   
+                  aa.cod_paisonac ,   
+                  aa.cod_tip_ocup ,   
+                  aa.xti_persona ,   
+                  aa.cod_estcivil ,   
+                  aa.xti_csexof ,   
+                  aa.xti_robinson ,   
+                  aa.cod_clienvip ,   
+                  aa.qnu_ninoscar ,   
+                  aa.qnu_adultcar ,   
+                  aa.xti_moragrup ,   
+                  aa.des_provnacm ,   
+                  aa.edad ,   
+                  aa.avr_gross_margin ,   
+                  aa.avr_net_margin ,   
+                  aa.cod_segmsubo ,   
+                  aa.des_segmentacion_global ,   
+                  aa.cod_segpref ,   
+                  aa.descr_segmento ,
+         
+                  bb.fec_cierre,
+                  bb.cod_idcontra 
+         
+           FROM elmi.digital_onboarding_planuno aa 
+           LEFT OUTER JOIN da_pro.intervinientes_corp bb  ON  aa.cod_persona = CAST(bb.cod_persctpn AS INT)
+         
+           WHERE CAST(bb.cod_entalfa AS INT) = 182 AND trim(cod_ctippe) = 'TIT' AND CAST(cod_ordentit AS INT) = 1 
+                 
+             AND ( MONTH(bb.fec_cierre) > MONTH(aa.fecha_alta)  AND ( MONTH(bb.fec_cierre) <= MONTH(aa.fecha_alta) + 3) )
+      	          AND YEAR(bb.fec_cierre) = 2014     
+         
+           GROUP BY aa.cod_persona ,   
+                  aa.fecha_alta ,   
+                  aa.alta_type ,   
+                  aa.fec_altapers ,   
+                  aa.qnu_empledos ,   
+                  aa.cod_formcli ,   
+                  aa.cod_paisores ,   
+                  aa.cod_paisonac ,   
+                  aa.cod_tip_ocup ,   
+                  aa.xti_persona ,   
+                  aa.cod_estcivil ,   
+                  aa.xti_csexof ,   
+                  aa.xti_robinson ,   
+                  aa.cod_clienvip ,   
+                  aa.qnu_ninoscar ,   
+                  aa.qnu_adultcar ,   
+                  aa.xti_moragrup ,   
+                  aa.des_provnacm ,   
+                  aa.edad ,   
+                  aa.avr_gross_margin ,   
+                  aa.avr_net_margin ,      
+                  aa.cod_segmsubo ,   
+                  aa.des_segmentacion_global ,   
+                  aa.cod_segpref ,   
+                  aa.descr_segmento ,
+         
+                  bb.fec_cierre, 
+                  bb.cod_idcontra       "); 
+
+
+   do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboarding_contracts_alter_2 AS         
+            SELECT aa.cod_persona ,   
+                  aa.fecha_alta ,   
+                  aa.alta_type ,   
+                  aa.fec_altapers ,   
+                  aa.qnu_empledos ,   
+                  aa.cod_formcli ,   
+                  aa.cod_paisores ,   
+                  aa.cod_paisonac ,   
+                  aa.cod_tip_ocup ,   
+                  aa.xti_persona ,   
+                  aa.cod_estcivil ,   
+                  aa.xti_csexof ,   
+                  aa.xti_robinson ,   
+                  aa.cod_clienvip ,   
+                  aa.qnu_ninoscar ,   
+                  aa.qnu_adultcar ,   
+                  aa.xti_moragrup ,   
+                  aa.des_provnacm ,   
+                  aa.edad ,   
+                  aa.avr_gross_margin ,   
+                  aa.avr_net_margin ,   
+                  aa.cod_segmsubo ,   
+                  aa.des_segmentacion_global ,   
+                  aa.cod_segpref ,   
+                  aa.descr_segmento ,
+                  aa.fec_cierre,
+                  aa.cod_idcontra   
+           
+                FROM elmi.digital_onboarding_contracts_alter aa
+           
+                JOIN (SELECT  cod_persona, MAX(fec_cierre) max_fec_cierre         
+                      FROM elmi.digital_onboarding_contracts_alter         
+                      GROUP BY cod_persona)  maxf   ON   aa.cod_persona  =  maxf.cod_persona   AND   aa.fec_cierre = maxf.max_fec_cierre   "); 
+
+
+  do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboarding_contracts_alter_saldos AS 
+         
+           SELECT  aa.cod_persona ,        
+ aa.fecha_alta ,        
+ aa.alta_type ,        
+ aa.fec_altapers ,        
+ aa.qnu_empledos ,        
+ aa.cod_formcli ,        
+ aa.cod_paisores ,        
+ aa.cod_paisonac ,        
+ aa.cod_tip_ocup ,        
+ aa.xti_persona ,        
+ aa.cod_estcivil ,        
+ aa.xti_csexof ,        
+ aa.xti_robinson ,        
+ aa.cod_clienvip ,        
+ aa.qnu_ninoscar ,        
+ aa.qnu_adultcar ,        
+ aa.xti_moragrup ,        
+ aa.des_provnacm ,        
+ aa.edad ,        
+ aa.avr_gross_margin ,        
+ aa.avr_net_margin ,        
+ aa.cod_segmsubo ,        
+ aa.des_segmentacion_global ,        
+ aa.cod_segpref ,        
+ aa.descr_segmento ,        
+ aa.fec_cierre ,        
+ aa.cod_idcontra , bb.cod_prodgest,
+ 
+           bb.cod_situdw, 
+           bb.imp_salpupo  saldo_cierre_mes,
+           bb.imp_salmmcpo  saldo_medio_ultim_mes,
+           bb.imp_saltmcpo  saldo_medio_ult_3_mes,
+           bb.xti_prod, 
+ 
+           CASE WHEN bb.xti_prod = 'A' THEN 'CUENTAS A VISTA'
+                WHEN bb.xti_prod = 'B' THEN 'DEPOSITOS A PLAZO'
+                WHEN bb.xti_prod in ('C', 'D') THEN 'FONDOS DE INVERSION'
+                WHEN bb.xti_prod = 'E' THEN 'CARTERA FONDOS'
+                WHEN bb.xti_prod = 'H' THEN 'PLANES DE PENSIONES'
+                 WHEN bb.xti_prod = 'I' THEN 'PRESTAMOS EMPRESAS' 
+                WHEN bb.xti_prod = 'P' THEN 'CUENTA CREDITO'
+                WHEN bb.xti_prod = 'Q' THEN 'TARJETA DE CREDITO'
+                WHEN bb.xti_prod = 'R' THEN 'PRESTAMOS'
+                WHEN bb.xti_prod = 'S' THEN 'CARTERA'
+                WHEN TRIM(bb.cod_prodgest) in ( '001300015', 
+                                           '001300020', 
+                                           '001300035', 
+                                                    '001300040', 
+                                                    '001300055', 
+                                                    '001300060', 
+                                                    '001300075', 
+                                                    '001300080', 
+                                                    '001300095', 
+                                                    '001300105', 
+                                                    '001300110', 
+                                                    '001300125', 
+                                                    '001300130', 
+                                                    '001300145', 
+                                                    '001300150', 
+                                                    '001300165', 
+                                                    '001300170', 
+                                                    '001300185', 
+                                                    '001300190', 
+                                                    '001300200', 
+                                                    '001300215', 
+                                                    '001300220', 
+                                                    '001300235', 
+                                                    '001300240', 
+                                                    '001300255', 
+                                                    '001300260', 
+                                                    '001300275', 
+                                                    '001300280', 
+                                                    '001300295', 
+                                                    '001300305', 
+                                                    '001300310', 
+                                                    '001300325', 
+                                                    '001300330', 
+                                                    '001300345', 
+                                                    '001300350', 
+                                                    '001300365', 
+                                                    '001300370', 
+                                                    '001300385', 
+                                                    '001300390', 
+                                                    '001300400', 
+                                                    '001300415', 
+                                                    '001300420', 
+                                                    '001300435', 
+                                                    '001300440', 
+                                                    '001300455', 
+                                                    '001300460', 
+                                                    '001300475', 
+                                                    '001300480', 
+                                                    '001300495', 
+                                                    '001300505', 
+                                                    '001300510', 
+                                                    '001300525', 
+                                                    '001300530', 
+                                                    '001300545', 
+                                                    '001300550', 
+                                                    '001300565', 
+                                                    '001300570', 
+                                                    '001400005', 
+                                                    '001400010', 
+                                                    '001499599', 
+                                                    '001500015', 
+                                                    '001500020', 
+                                                    '001500035', 
+                                                    '001500040', 
+                                                    '001500055', 
+                                                    '001500060', 
+                                                    '001500075', 
+                                                    '001500080', 
+                                                    '001600005', 
+                                                    '001600010', 
+                                                    '001600025', 
+                                                    '001600030', 
+                                                    '001600045', 
+                                                    '011100005', 
+                                                    '011100010', 
+                                                    '011100025', 
+                                                    '011100030', 
+                                                    '011100045', 
+                                                    '011100050', 
+                                                    '011100065', 
+                                                    '011100070', 
+                                                    '011100090', 
+                                                    '011100100', 
+                                                    '011100115', 
+                                                    '011100120', 
+                                                    '011100135', 
+                                                    '011100140', 
+                                                    '011100155', 
+                                                    '011100160', 
+                                                    '999000014', 
+                                                    '999000016', 
+                                                    '999000111', 
+                                                    '001300005', 
+                                                    '001300010', 
+                                                    '001300025', 
+                                                    '001300030', 
+                                                    '001300045', 
+                                                    '001300050', 
+                                                    '001300065', 
+                                                    '001300070', 
+                                                    '001300085', 
+                                                    '001300090', 
+                                                    '001300100', 
+                                                    '001300115', 
+                                                    '001300120', 
+                                                    '001300135', 
+                                                    '001300140', 
+                                                    '001300155', 
+                                                    '001300160', 
+                                                    '001300175', 
+                                                    '001300180', 
+                                                    '001300195', 
+                                                    '001300205', 
+                                                    '001300210', 
+                                                    '001300225', 
+                                                    '001300230', 
+                                                    '001300245', 
+                                                    '001300250', 
+                                                    '001300265', 
+                                                    '001300270', 
+                                                    '001300285', 
+                                                    '001300290', 
+                                                    '001300300', 
+                                                    '001300315', 
+                                                    '001300320', 
+                                                    '001300335', 
+                                                    '001300340', 
+                                                    '001300355', 
+                                                    '001300360', 
+                                                    '001300375', 
+                                                    '001300380', 
+                                                    '001300395', 
+                                                    '001300405', 
+                                                    '001300410', 
+                                                    '001300425', 
+                                                    '001300430', 
+                                                    '001300445', 
+                                                    '001300450', 
+                                                    '001300465', 
+                                                    '001300470', 
+                                                    '001300485', 
+                                                    '001300490', 
+                                                    '001300500', 
+                                                    '001300515', 
+                                                    '001300520', 
+                                                    '001300535', 
+                                                    '001300540', 
+                                                    '001300555', 
+                                                    '001300560', 
+                                                    '001399599', 
+                                                    '001400015', 
+                                                    '001400020', 
+                                                    '001500005', 
+                                                    '001500010', 
+                                                    '001500025', 
+                                                    '001500030', 
+                                                    '001500045', 
+                                                    '001500050', 
+                                                    '001500065', 
+                                                    '001500070', 
+                                                    '001500085', 
+                                                    '001500090', 
+                                                    '001600015', 
+                                                    '001600020', 
+                                                    '001600035', 
+                                                    '001600040', 
+                                                    '011100015', 
+                                                    '011100020', 
+                                                    '011100035', 
+                                                    '011100040', 
+                                                    '011100055', 
+                                                    '011100060', 
+                                                    '011100075', 
+                                                    '011100080', 
+                                                    '011100095', 
+                                                    '011100105', 
+                                                    '011100110', 
+                                                    '011100125', 
+                                                    '011100130', 
+                                                    '011100145', 
+                                                    '011100150', 
+                                                    '999000013', 
+                                                    '999000015') THEN 'SEGUROS' ELSE 'OTROS' END AS product_family, 
+           bb.xti_tpprod, 
+           bb.xti_producto
+         
+           FROM  elmi.digital_onboarding_contracts_alter_2 aa
+           JOIN  da_pro.saldos_cuenta_persona_fisica bb ON aa.cod_idcontra = bb.cod_idcontra          
+           WHERE TRIM(cod_situdw) = 'A'  AND CAST(cod_entalfa AS INT) = 182 AND TO_DATE(aa.fec_cierre) = TO_DATE(bb.fec_cierre)
+          
+        GROUP BY aa.cod_persona ,        
+ aa.fecha_alta ,        
+ aa.alta_type ,        
+ aa.fec_altapers ,        
+ aa.qnu_empledos ,        
+ aa.cod_formcli ,        
+ aa.cod_paisores ,        
+ aa.cod_paisonac ,        
+ aa.cod_tip_ocup ,        
+ aa.xti_persona ,        
+ aa.cod_estcivil ,        
+ aa.xti_csexof ,        
+ aa.xti_robinson ,        
+ aa.cod_clienvip ,        
+ aa.qnu_ninoscar ,        
+ aa.qnu_adultcar ,        
+ aa.xti_moragrup ,        
+ aa.des_provnacm ,        
+ aa.edad ,        
+ aa.avr_gross_margin ,        
+ aa.avr_net_margin ,        
+ aa.cod_segmsubo ,        
+ aa.des_segmentacion_global ,        
+ aa.cod_segpref ,        
+ aa.descr_segmento ,        
+ aa.fec_cierre ,        
+ aa.cod_idcontra , bb.cod_prodgest, 
+ 
+           bb.cod_situdw, 
+           bb.imp_salpupo ,
+           bb.imp_salmmcpo ,
+           bb.imp_saltmcpo ,
+           bb.xti_prod, 
+ 
+           CASE WHEN bb.xti_prod = 'A' THEN 'CUENTAS A VISTA'
+                WHEN bb.xti_prod = 'B' THEN 'DEPOSITOS A PLAZO'
+                WHEN bb.xti_prod in ('C, D') THEN 'FONDOS DE INVERSION'
+                WHEN bb.xti_prod = 'E' THEN 'CARTERA FONDOS'
+                WHEN bb.xti_prod = 'H' THEN 'PLANES DE PENSIONES'
+                 WHEN bb.xti_prod = 'I' THEN 'PRESTAMOS EMPRESAS' 
+                WHEN bb.xti_prod = 'P' THEN 'CUENTA CREDITO'
+                WHEN bb.xti_prod = 'Q' THEN 'TARJETA DE CREDITO'
+                WHEN bb.xti_prod = 'R' THEN 'PRESTAMOS'
+                WHEN bb.xti_prod = 'S' THEN 'CARTERA'
+                WHEN TRIM(bb.cod_prodgest) in ( '001300015', 
+                                           '001300020', 
+                                           '001300035', 
+                                                    '001300040', 
+                                                    '001300055', 
+                                                    '001300060', 
+                                                    '001300075', 
+                                                    '001300080', 
+                                                    '001300095', 
+                                                    '001300105', 
+                                                    '001300110', 
+                                                    '001300125', 
+                                                    '001300130', 
+                                                    '001300145', 
+                                                    '001300150', 
+                                                    '001300165', 
+                                                    '001300170', 
+                                                    '001300185', 
+                                                    '001300190', 
+                                                    '001300200', 
+                                                    '001300215', 
+                                                    '001300220', 
+                                                    '001300235', 
+                                                    '001300240', 
+                                                    '001300255', 
+                                                    '001300260', 
+                                                    '001300275', 
+                                                    '001300280', 
+                                                    '001300295', 
+                                                    '001300305', 
+                                                    '001300310', 
+                                                    '001300325', 
+                                                    '001300330', 
+                                                    '001300345', 
+                                                    '001300350', 
+                                                    '001300365', 
+                                                    '001300370', 
+                                                    '001300385', 
+                                                    '001300390', 
+                                                    '001300400', 
+                                                    '001300415', 
+                                                    '001300420', 
+                                                    '001300435', 
+                                                    '001300440', 
+                                                    '001300455', 
+                                                    '001300460', 
+                                                    '001300475', 
+                                                    '001300480', 
+                                                    '001300495', 
+                                                    '001300505', 
+                                                    '001300510', 
+                                                    '001300525', 
+                                                    '001300530', 
+                                                    '001300545', 
+                                                    '001300550', 
+                                                    '001300565', 
+                                                    '001300570', 
+                                                    '001400005', 
+                                                    '001400010', 
+                                                    '001499599', 
+                                                    '001500015', 
+                                                    '001500020', 
+                                                    '001500035', 
+                                                    '001500040', 
+                                                    '001500055', 
+                                                    '001500060', 
+                                                    '001500075', 
+                                                    '001500080', 
+                                                    '001600005', 
+                                                    '001600010', 
+                                                    '001600025', 
+                                                    '001600030', 
+                                                    '001600045', 
+                                                    '011100005', 
+                                                    '011100010', 
+                                                    '011100025', 
+                                                    '011100030', 
+                                                    '011100045', 
+                                                    '011100050', 
+                                                    '011100065', 
+                                                    '011100070', 
+                                                    '011100090', 
+                                                    '011100100', 
+                                                    '011100115', 
+                                                    '011100120', 
+                                                    '011100135', 
+                                                    '011100140', 
+                                                    '011100155', 
+                                                    '011100160', 
+                                                    '999000014', 
+                                                    '999000016', 
+                                                    '999000111', 
+                                                    '001300005', 
+                                                    '001300010', 
+                                                    '001300025', 
+                                                    '001300030', 
+                                                    '001300045', 
+                                                    '001300050', 
+                                                    '001300065', 
+                                                    '001300070', 
+                                                    '001300085', 
+                                                    '001300090', 
+                                                    '001300100', 
+                                                    '001300115', 
+                                                    '001300120', 
+                                                    '001300135', 
+                                                    '001300140', 
+                                                    '001300155', 
+                                                    '001300160', 
+                                                    '001300175', 
+                                                    '001300180', 
+                                                    '001300195', 
+                                                    '001300205', 
+                                                    '001300210', 
+                                                    '001300225', 
+                                                    '001300230', 
+                                                    '001300245', 
+                                                    '001300250', 
+                                                    '001300265', 
+                                                    '001300270', 
+                                                    '001300285', 
+                                                    '001300290', 
+                                                    '001300300', 
+                                                    '001300315', 
+                                                    '001300320', 
+                                                    '001300335', 
+                                                    '001300340', 
+                                                    '001300355', 
+                                                    '001300360', 
+                                                    '001300375', 
+                                                    '001300380', 
+                                                    '001300395', 
+                                                    '001300405', 
+                                                    '001300410', 
+                                                    '001300425', 
+                                                    '001300430', 
+                                                    '001300445', 
+                                                    '001300450', 
+                                                    '001300465', 
+                                                    '001300470', 
+                                                    '001300485', 
+                                                    '001300490', 
+                                                    '001300500', 
+                                                    '001300515', 
+                                                    '001300520', 
+                                                    '001300535', 
+                                                    '001300540', 
+                                                    '001300555', 
+                                                    '001300560', 
+                                                    '001399599', 
+                                                    '001400015', 
+                                                    '001400020', 
+                                                    '001500005', 
+                                                    '001500010', 
+                                                    '001500025', 
+                                                    '001500030', 
+                                                    '001500045', 
+                                                    '001500050', 
+                                                    '001500065', 
+                                                    '001500070', 
+                                                    '001500085', 
+                                                    '001500090', 
+                                                    '001600015', 
+                                                    '001600020', 
+                                                    '001600035', 
+                                                    '001600040', 
+                                                    '011100015', 
+                                                    '011100020', 
+                                                    '011100035', 
+                                                    '011100040', 
+                                                    '011100055', 
+                                                    '011100060', 
+                                                    '011100075', 
+                                                    '011100080', 
+                                                    '011100095', 
+                                                    '011100105', 
+                                                    '011100110', 
+                                                    '011100125', 
+                                                    '011100130', 
+                                                    '011100145', 
+                                                    '011100150', 
+                                                    '999000013', 
+                                                    '999000015') THEN 'SEGUROS' ELSE 'OTROS' END,
+ 
+           bb.xti_tpprod, 
+           bb.xti_producto
+          ")
+
+
+```
+
+
+``` {r echo=FALSE, fig.width=12, fig.height=6} 
+
+product <- chname(qhive(" select * 
+                          from elmi.digital_onboarding_contracts_alter_saldos                            
+                          WHERE (saldo_cierre_mes + saldo_medio_ultim_mes + saldo_medio_ult_3_mes) != 0 
+                          "))
+
+ re <- aggregate(product$cod_idcontra, by=list(product$alta_type, product$product_family), FUN=length)  
+
+ colnames(re) <- c("reg_type", "product_group", "num_active_contracts");
+
+
+ gg1 <- ggplot(re, aes(x=reg_type, y=num_active_contracts, fill=product_group)) + geom_bar(width= 0.5, stat="identity") ;
+
+
+ 
+library(plyr)
+
+ce <- ddply(re, "reg_type", transform, percent_num_active_contracts = num_active_contracts / sum(num_active_contracts) * 100);
+
+ff2 <- ggplot(ce, aes(x=reg_type, y=percent_num_active_contracts, fill=product_group)) + geom_bar(width= 0.6, stat="identity") ;
+        
+multiplot(gg1, ff2, cols=2);
+
+```
+
+The comparative graph presented above (representing both absolute and relative measures) demonstrate that the digital registrations as of the end of the 3rd month have mostly current accounts contracted whereas traditional registrations by the end of 3rd month have already investment funds and term deposits in addition to current accounts in much bigger numbers than the digitally acquired clients. Pensions plans and stocks portfolios also are contracted in bigger numbers by traditional registrations. 
+
+Interesting to outline here, that by the end of 3rd month of client period no INSURANCE contracts (SEGUROS) have been noticed present in neither of regitration groups. 
+
+Next section is depicting the comparizon of monthly average balance in EUR as of the 3rd month of client period in breakdown of the product group.
+
+
+[//]: (.. Comparativa del LAS MEDIAS del saldo medio del ultimo mes cerrado por el grupo de producto) 
+
+```{r echo=FALSE, fig.width=12, fig.height=6}
+
+ fe <- aggregate(product$saldo_medio_ultim_mes, by=list(product$alta_type, product$product_family), FUN=sum)  
+
+ colnames(fe) <- c("reg_type", "product_group", "average_balance_EUR");
+
+
+ gg1 <- ggplot(fe, aes(x=reg_type, y=average_balance_EUR, fill=product_group)) + geom_bar(width= 0.6, stat="identity") ;
+
+ 
+library(plyr)
+
+ce <- ddply(fe, "reg_type", transform, percent_average_balance_EUR = average_balance_EUR / sum(average_balance_EUR) * 100);
+
+ce <- ddply(ce, c("reg_type"), transform, label_y = cumsum(percent_average_balance_EUR));
+
+ce <- ce[which(ce$percent_average_balance_EUR > .2), ]
+
+ff2 <- ggplot(ce, aes(x=reg_type, y=percent_average_balance_EUR, fill=product_group)) + geom_bar(width= 0.6, stat="identity") + geom_text(aes(y = label_y, label = floor(percent_average_balance_EUR)), vjust=2.0, size=4, colour="white" ) ;
+        
+
+multiplot(gg1, ff2, cols=2);
+
+```
+
+
+The distribution of balances by product group seems very logical except the one of 'TERM DEPOSITS' ('DEPOSITOS A PLAZO'), which EUR amounts are surprisingly  small in comparizon to all other product groups. For this reason this category has been eliminated from the relative comparizon chart (right side chart) to avoid the overlapping of stacked value labels.
+
+Important to note here the 10-fold (!) gap between the total amount brought in the BBVA by the traditional registrations versus digital ones **(20+ mln EUR versus 2+ mln EUR)**. 
+
+
+************************************************************************************************************************************************
+
+
+As a next step, we analyze the tenancy of salary, pensions or unemployment account movement events between 2 registration groups. 
+
+``` {r echo=FALSE, eval=FALSE}
+
+do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboard_nomin_pension_desempleo_10 AS 
+         
+          SELECT   aa.cod_persona,    
+                   aa.fecha_alta,    
+                   aa.alta_type,    
+                   aa.cod_idcontra, 
+                   bb.fec_movimien, 
+                   BB.imp_mvimient,
+        
+         CASE WHEN ( cast(cod_talon as int) in (17,517,817,717,772,917,317)                                 AND    imp_mvimient >= 600) THEN 'salary_payment' 
+              WHEN ( cast(cod_talon as int) in (165,482,265,944,80,418,682,465,180,280,58,144,364,65)       AND    imp_mvimient >= 400) THEN 'pension_payment'
+              WHEN ( cast(cod_talon as int) = 417                                                           AND    imp_mvimient >= 400)  THEN  'unempl_paym'
+         
+              ELSE 'other' END AS movim_type
+                   
+        
+          FROM elmi.digital_onboarding_contracts_alter_2 aa
+        
+          JOIN da_pro.movimientos_cuentas_corp bb ON CAST(TRIM(aa.cod_idcontra) AS BIGINT) = CAST(TRIM(bb.cod_idcontra) AS BIGINT)
+        
+        
+          WHERE  cod_paisoalf LIKE 'ES'   AND   cod_entalfa LIKE '0182' AND trim(xti_cnceptos) LIKE '%0%' AND cast(trim(cod_tip_movi) as int) = 2
+        
+                 AND cast(cod_talon as int) in (17,517,817,717,772,917,317, 165,482,265,944,80,418,682,465,180,280,58,144,364,65, 417)  
+                              
+        "); 
+
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboard_nomin_pension_desempleo_2 AS 
+         
+           SELECT  *         
+           FROM elmi.digital_onboard_nomin_pension_desempleo_10  
+         
+           WHERE ( MONTH(to_date(fec_movimien)) > MONTH(fecha_alta)  AND ( MONTH(to_date(fec_movimien)) <= MONTH(fecha_alta) + 3) )
+         
+      	          AND YEAR(to_date(fec_movimien)) = 2014           
+         "); 
+
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboard_nomin_pension_desempleo_3 AS 
+         
+           SELECT  aa.*         
+           FROM elmi.digital_onboard_nomin_pension_desempleo_2 aa 
+         
+               JOIN (SELECT  cod_persona, MAX(MONTH(fec_movimien)) max_mes_fec_movimien         
+                      FROM elmi.digital_onboard_nomin_pension_desempleo_2
+         
+                      GROUP BY cod_persona)  maxf   ON   aa.cod_persona  =  maxf.cod_persona   AND  MONTH(aa.fec_movimien) = maxf.max_mes_fec_movimien  
+         "); 
+
+
+```
+
+Charts are depicting the distribution of number of clients with at least 1 payment of pronounced type as of 3rd month after registration (so to say, shows the tenancy of mentioned event types). If client had 2 different salary payments within 1 month, for the sake of simplicity on a given step of the research it's being counted as one event. 
+
+``` {r echo=FALSE, cache=TRUE, fig.width=12, fig.height=6}
+
+nomin <- chname(qhive(" select aa.alta_type, aa.cod_persona, bb.movim_type 
+                      
+                        from  elmi.digital_onboarding_sociodemo_1    aa
+                        left  outer join elmi.digital_onboard_nomin_pension_desempleo_3   bb  ON aa.cod_persona = bb.cod_persona
+                      
+                        group by aa.alta_type, aa.cod_persona, bb.movim_type "))
+
+
+nomin$movim_type[is.na(nomin$movim_type)] <- 'None'
+
+
+nom_agr <- aggregate(nomin$cod_persona, by=list(nomin$alta_type, nomin$movim_type), FUN=length)
+
+colnames(nom_agr) <- c("reg_type", "payment_type", "num_clients");
+
+ob1 <- ggplot(nom_agr, aes(x=reg_type, y=num_clients, fill=payment_type)) + geom_bar(width= 0.5, stat="identity") ;
+
+
+
+library(plyr)
+
+ju <- ddply(nom_agr, "reg_type", transform, percent_num_clients = num_clients / sum(num_clients) * 100);
+
+ju <- ddply(ju, c("reg_type"), transform, label_y = cumsum(percent_num_clients));
+
+
+
+ob2 <- ggplot(ju, aes(x=reg_type, y=percent_num_clients, fill=payment_type)) + geom_bar(width= 0.6, stat="identity") + geom_text(aes(y = label_y, label = floor(percent_num_clients)), vjust=2.0, size=4, colour="white" ) ;
+        
+
+multiplot(ob1, ob2, cols=2);
+
+```
+
+
+``` {r echo=FALSE, eval=FALSE}
+
+do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboard_recibos_10 AS 
+         
+          SELECT   aa.cod_persona,    
+                   aa.fecha_alta,    
+                   aa.alta_type,    
+                   aa.cod_idcontra,
+        
+                   bb.fec_movimien, 
+                   bb.imp_mvimient,
+        
+                   CASE WHEN bb.cod_idcontra IS NOT NULL THEN  'direct_debit' ELSE 'Missing' END AS movim_type
+                   
+        
+          FROM elmi.digital_onboarding_contracts_alter_2 aa
+        
+          LEFT OUTER JOIN da_pro.movimientos_cuentas_corp bb ON CAST(TRIM(aa.cod_idcontra) AS BIGINT) = CAST(TRIM(bb.cod_idcontra) AS BIGINT)
+        
+        
+          WHERE  cod_paisoalf LIKE 'ES'   AND   cod_entalfa LIKE '0182' AND trim(xti_cnceptos) LIKE '%0%' AND cast(trim(cod_tip_movi) as int) = 1
+        
+                 AND cast(cod_talon as int) in (135,481,326,729,430,521,229,625,235,86,631,10,528,134,22,931,336,454,831,887,728,133,6,530,126,435,821,129,266,16,804,805,332,
+  		                                  844,827,34,469,735,474,529,231,1,533,236,818,497,828,635,329,132,230,183,933,901,328,734,531,29,413,432,928,436,932,91,803,730,
+											  632,815,738,28,629,829,162,434,7,335,732,816,0,131,836,429,634,136,120,331,125,854,186,856,233,412,534,825,848,525,226,754,633,
+											  834,3,880,12,936,35,330,535,32,234,130,532,761,334,853,569,123,810,11,998,630,36,492,777,41,536,925,228,428,812,232,46,128,321,
+											  837,999,431,139,119,333,501,316,628,832,453,270,433,636,830,137,833,547,725,204,733) 
+                              
+        "); 
+
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboard_recibos_2 AS 
+         
+           SELECT  *         
+           FROM elmi.digital_onboard_recibos_10 
+         
+           WHERE ( MONTH(to_date(fec_movimien)) > MONTH(fecha_alta)  AND ( MONTH(to_date(fec_movimien)) <= MONTH(fecha_alta) + 3) )
+         
+                  AND YEAR(to_date(fec_movimien)) = 2014           
+         "); 
+
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboard_recibos_3 AS 
+         
+           SELECT  aa.*         
+           FROM elmi.digital_onboard_recibos_2 aa 
+         
+               JOIN (SELECT  cod_persona, MAX(MONTH(fec_movimien)) max_mes_fec_movimien         
+                      FROM elmi.digital_onboard_recibos_2
+         
+                      GROUP BY cod_persona)  maxf   ON   aa.cod_persona  =  maxf.cod_persona   AND  MONTH(aa.fec_movimien) = maxf.max_mes_fec_movimien  
+         "); 
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboard_num_tx_tarjetas_10 AS 
+         
+          SELECT   aa.cod_persona,    
+                   aa.fecha_alta,    
+                   aa.alta_type,    
+                   aa.cod_idcontra,
+        
+                   bb.fec_movimien, 
+                   bb.imp_mvimient,
+        
+                   CASE WHEN bb.cod_idcontra IS NOT NULL THEN  'card_payment' ELSE 'Missing' END AS movim_type
+                   
+        
+          FROM elmi.digital_onboarding_contracts_alter_2 aa
+        
+          LEFT OUTER JOIN   clarity_intermediate.detalle_transacciones_tarjetas   bb ON CAST(TRIM(aa.cod_idcontra) AS BIGINT) = CAST(TRIM(bb.cod_idcontra) AS BIGINT)         
+        
+          WHERE  bb.cod_paisoalf LIKE 'ES'   AND   bb.cod_entalfa LIKE '0182'                               
+        "); 
+
+
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboard_num_tx_tarjetas_2 AS 
+         
+           SELECT  *         
+           FROM elmi.digital_onboard_num_tx_tarjetas_10 
+         
+           WHERE ( MONTH(to_date(fec_movimien)) > MONTH(fecha_alta)  AND ( MONTH(to_date(fec_movimien)) <= MONTH(fecha_alta) + 3) )
+         
+                  AND YEAR(to_date(fec_movimien)) = 2014           
+         "); 
+
+
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboard_num_tx_tarjetas_3 AS 
+         
+           SELECT  aa.*         
+           FROM elmi.digital_onboard_num_tx_tarjetas_2  aa 
+         
+               JOIN (SELECT  cod_persona, MAX(MONTH(fec_movimien)) max_mes_fec_movimien         
+                      FROM elmi.digital_onboard_num_tx_tarjetas_2
+         
+                      GROUP BY cod_persona)  maxf   ON   aa.cod_persona  =  maxf.cod_persona   AND  MONTH(aa.fec_movimien) = maxf.max_mes_fec_movimien  
+         "); 
+
+```
+
+************************************************************************************************************************************************
+
+The tenancy of DIRECT DEBIT payments in split of registration channel is presented on the bar charts below. It is obvious that the number of Branch clients who contracted direct debits exceed by 10% the correspondent number of bbva.es clients. This fact supports the previously noted evidence of the higher engagement level of Branch registrations in terms of segmentation Plan Uno.   
+
+
+``` {r echo=FALSE, cache=TRUE, fig.width=12, fig.height=6}
+
+recib_tarj_ext <- chname(qhive(" select ht.alta_type, ht.cod_persona, ht.recib_type, ht.recib_count, ta.movim_type as card_paym_type, count(*) as card_paym_count
+                             
+                             from  (select aa.alta_type, aa.cod_persona, bb.movim_type as recib_type, count(*) as recib_count 
+                            
+                                   from  elmi.digital_onboarding_sociodemo_1    aa
+                                   left  outer join elmi.digital_onboard_recibos_3   bb  ON aa.cod_persona = bb.cod_persona
+                            
+                                   group by aa.alta_type, aa.cod_persona, bb.movim_type) ht
+                           
+                             left outer join   elmi.digital_onboard_num_tx_tarjetas_3  ta  ON ht.cod_persona = ta.cod_persona
+                           
+                             group by ht.alta_type, ht.cod_persona, ht.recib_type, ht.recib_count, ta.movim_type")); 
+
+
+recib_tarj_ext$recib_type[is.na(recib_tarj_ext$recib_type)] <- 'None' ;
+
+recib_tarj_ext$card_paym_type[is.na(recib_tarj_ext$card_paym_type)] <- 'None' ;
+
+
+
+recibos_cl <- aggregate(recib_tarj_ext$cod_persona, by=list(recib_tarj_ext$alta_type, recib_tarj_ext$recib_type), FUN=length)
+
+colnames(recibos_cl) <- c("reg_type", "recib_type", "num_clients");
+
+ob1 <- ggplot(recibos_cl, aes(x=reg_type, y=num_clients, fill=recib_type)) + geom_bar(position="dodge", width= 0.5, stat="identity") ;
+
+
+
+library(plyr)
+
+ju <- ddply(recibos_cl, "reg_type", transform, percent_num_clients = num_clients / sum(num_clients) * 100);
+
+ju <- ddply(ju, c("reg_type"), transform, label_y = cumsum(percent_num_clients));
+
+ob2 <- ggplot(ju, aes(x=reg_type, y=percent_num_clients, fill=recib_type)) + geom_bar(width= 0.6, stat="identity") + geom_text(aes(y = label_y, label = floor(percent_num_clients)), vjust=2.0, size=4, colour="white" ) ;
+        
+
+multiplot(ob1, ob2, cols=2);
+
+```
+
+The average number of different DIRECT DEBIT contracts (i.e. water, gas, ADSL, kids college bills) per client in either registration group is presented in the table below.
+
+**CONCLUSION:** The Branch registrations have on average 3 direct debits opposed to roughly 2 in case of bbva.es registrations, which is also in line with the conclusions made above. 
+
+
+```{r echo=FALSE}
+
+recibos <- aggregate(recib_tarj_ext$recib_count, by=list(recib_tarj_ext$alta_type, recib_tarj_ext$recib_type), FUN=sum)
+
+colnames(recibos) <- c("reg_type", "recib_type", "num_recibos");
+
+result <- merge(recibos, recibos_cl)
+
+result$avr_num_recibos <- round((result$num_recibos / result$num_clients), 1)
+
+result$avr_num_recibos[which(result$recib_type == 'None')]  <- NA
+  
+print(result)
+
+```
+
+***************************************************************************************************************************************************
+
+For the sake of getting the quick summary in the differences of bank cards' usage between 2 groups in the 3rd month of the client period can be expressed through the average number of card payments in POS (Point Of Sale terminals). 
+
+As a first step, we counted how many clients from either group have made any card payments in POS during their 3rd month. 
+
+``` {r echo=FALSE, fig.width=12, fig.height=6}
+
+tarjetas_cl <- aggregate(recib_tarj_ext$cod_persona, by=list(recib_tarj_ext$alta_type, recib_tarj_ext$card_paym_type), FUN=length)
+
+colnames(tarjetas_cl) <- c("reg_type", "card_paym_type", "num_clients");
+
+ob1 <- ggplot(tarjetas_cl, aes(x=reg_type, y=num_clients, fill=card_paym_type)) + geom_bar(position="dodge", width= 0.5, stat="identity") ;
+
+
+
+library(plyr)
+
+ju <- ddply(tarjetas_cl, "reg_type", transform, percent_num_clients = num_clients / sum(num_clients) * 100);
+
+ju <- ddply(ju, c("reg_type"), transform, label_y = cumsum(percent_num_clients));
+
+ob2 <- ggplot(ju, aes(x=reg_type, y=percent_num_clients, fill=card_paym_type)) + geom_bar(width= 0.6, stat="identity") + geom_text(aes(y = label_y, label = floor(percent_num_clients)), vjust=2.0, size=4, colour="white" ) ;
+        
+multiplot(ob1, ob2, cols=2);
+
+```
+
+The gap between 2 client groups in a share of people paying with their bank cards in POS **(58 versus 54%)** is not so big as could be expected. 
+
+Important to bear in mind that as there is a higher total number of people in Branch registrations than in the digital ones, it's more practical to judge about the transactionality of 2 groups by the percentual comparizon graph (right side graph). 
+
+The average number of card payments in POS performed by clients of either groups is disclosed in the next table. The numbers shown in the table are on the first sight quite similar between the 2 groups (18 versus 20 payments a month). 
+
+```{r echo=FALSE}
+
+tarjetas <- aggregate(recib_tarj_ext$card_paym_count, by=list(recib_tarj_ext$alta_type, recib_tarj_ext$card_paym_type), FUN=sum)
+
+colnames(tarjetas) <- c("reg_type", "card_paym_type", "num_tx_cards");
+
+result <- merge(tarjetas, tarjetas_cl)
+
+result$avr_num_tx_cards <- round((result$num_tx_cards / result$num_clients), 1)
+
+result$avr_num_tx_cards[which(result$card_paym_type == 'None')]  <- NA
+  
+print(result)
+```
+
+The two-sided 2 independent sample T-test showed that **there IS a statistical difference** between the number of card payments in 2 groups _(p value < 0.05 on 95 percent confidence interval)_ and we can confirm that **the client registered in Branch pays per month with her/his bank card on average more than the digitally registered client**. 
+
+``` {r echo=FALSE}
+
+bbvaes_card_paym <- recib_tarj_ext$card_paym_count[recib_tarj_ext$alta_type == 'bbva.es' & recib_tarj_ext$card_paym_type == 'card_payment' ]
+
+branch_card_paym <- recib_tarj_ext$card_paym_count[recib_tarj_ext$alta_type == 'oficina' & recib_tarj_ext$card_paym_type == 'card_payment' ]
+
+t.test(bbvaes_card_paym, branch_card_paym)
+
+```
+
+Such conclusion seems to be somewhat contradicting with the situation we saw on the distribution by Plan Uno where the digital registrations showed higher share of transactional clients. As the card payment in POS is not the only bank transaction type, one shall proceed to investigate the differences in more digital type of transactions, such as i.e. usage of BBVA mobile application or  BBVA Wallet.
+
+                    --------------------------------------------------------------------------------------------------------------
+                 
+                    ******************************* **USE OF MOBILE APP versus BBVA WALLET** *************************************
+                 
+                    --------------------------------------------------------------------------------------------------------------
+                    
+In given section is it analyzed how different was the usage of BBVA mobile application and also the BBVA Wallet service between the 2 registration groups. 
+
+``` {r echo=FALSE, eval=FALSE}
+
+do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboard_bbva_wallet_1 AS 
+         
+          SELECT   aa.cod_persona,    
+                   aa.fecha_alta,    
+                   aa.alta_type,    
+                   CAST(bb.cod_geve_trn AS INT) cod_geve_trn,
+        
+                   bb.fec_soli_trn,      
+                   COUNT(*) as wallet_tx_count
+                   
+        
+          FROM elmi.digital_onboarding_contracts_alter_2 aa
+        
+          JOIN da_pro.transacciones_por_canal bb ON CAST(aa.cod_persona AS BIGINT) = CAST(TRIM(bb.cod_pers_trs) AS BIGINT)        
+        
+          WHERE CAST(cod_geve_trn AS INT) in (1,2,3) AND CAST(cod_serv_dv AS INT) in (101, 102) AND partition_id RLIKE '^(2014).*$' 
+                              
+          GROUP BY  aa.cod_persona,    
+                   aa.fecha_alta,    
+                   aa.alta_type,    
+                   cod_geve_trn,
+        
+                   bb.fec_soli_trn  "); 
+
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboard_bbva_wallet_2 AS 
+         
+           SELECT  *         
+           FROM elmi.digital_onboard_bbva_wallet_1 
+         
+           WHERE ( MONTH(to_date(fec_soli_trn)) > MONTH(fecha_alta)  AND ( MONTH(to_date(fec_soli_trn)) <= MONTH(fecha_alta) + 3) )
+         
+                  AND YEAR(to_date(fec_soli_trn)) = 2014           
+         "); 
+
+
+------------------------------------------------------------------------------------------------------------------------------------------------------
+
+  
+  do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboard_bbva_mobile_app_1 AS 
+         
+          SELECT   aa.cod_persona,    
+                   aa.fecha_alta,    
+                   aa.alta_type,   
+                   CAST(bb.cod_geve_trn AS INT) cod_geve_trn,        
+                   bb.fec_soli_trn,      
+                   COUNT(*) as mobile_app_tx_count                   
+        
+          FROM elmi.digital_onboarding_contracts_alter_2 aa        
+          JOIN da_pro.transacciones_por_canal bb ON CAST(aa.cod_persona AS BIGINT) = CAST(TRIM(bb.cod_pers_trs) AS BIGINT)      
+        
+          WHERE  CAST(cod_geve_trn AS INT) in (1,2,3) AND CAST(cod_serv_dv AS INT) in (17,
+                                                                                        18,
+                                                                                        44,
+                                                                                        55,          
+                                                                                        56,          
+                                                                                        66,
+                                                                                        73,
+                                                                                        80,          
+                                                                                        82,
+                                                                                        83,
+                                                                                        84,                                                                                        
+                                                                                        101,
+                                                                                        102,                                                                                        
+                                                                                        106,
+                                                                                        107,                                                                                        
+                                                                                        111,
+                                                                                        112,
+                                                                                        113,
+                                                                                        114)          
+         AND partition_id RLIKE '^(2014).*$' 
+                              
+          GROUP BY  aa.cod_persona,    
+                   aa.fecha_alta,    
+                   aa.alta_type, 
+                   bb.cod_geve_trn,        
+                   bb.fec_soli_trn  "); 
+
+
+ do.hive(" CREATE TABLE IF NOT EXISTS elmi.digital_onboard_bbva_mobile_app_2 AS 
+         
+           SELECT  *         
+           FROM elmi.digital_onboard_bbva_mobile_app_1 
+         
+           WHERE ( MONTH(to_date(fec_soli_trn)) > MONTH(fecha_alta)  AND ( MONTH(to_date(fec_soli_trn)) <= MONTH(fecha_alta) + 3) )
+         
+                  AND YEAR(to_date(fec_soli_trn)) = 2014           
+         "); 
+
+```
+
+As we can see from the comparative table of the usage of **BBVA Mobile application**, the digitally registered clients use the mobile application TO THE SAME EXTENT LIKE the clients registered in Branch, and the difference of means is NOT statistically significant (according to 2 independent samples test , see below).
+
+
+```{r echo=FALSE}
+
+mobile_app <- chname(qhive(" select * from elmi.digital_onboard_bbva_mobile_app_2 ")) ;
+
+
+mobiapp_tx_sum <- aggregate(mobile_app$mobile_app_tx_count, by=list(mobile_app$alta_type, mobile_app$cod_geve_trn), FUN=sum)
+
+colnames(mobiapp_tx_sum) <- c("alta_type", "grupo_evento", "sum_mobile_app_tx")
+
+
+daily_mobiapp_tx_mean <- aggregate(mobile_app$mobile_app_tx_count, by=list(mobile_app$alta_type, mobile_app$cod_geve_trn), FUN=mean)
+
+colnames(daily_mobiapp_tx_mean) <- c("alta_type", "grupo_evento", "daily_trans_mean")
+
+summary1 <- merge(mobiapp_tx_sum, daily_mobiapp_tx_mean);
+
+summary1$grupo_evento[summary1$grupo_evento == 1] <- 'CONSULTAS'
+summary1$grupo_evento[summary1$grupo_evento == 2] <- 'OPERACIONES'
+summary1$grupo_evento[summary1$grupo_evento == 3] <- 'CONTRATACIONES'
+
+summary1$daily_trans_mean <- round(summary1$daily_trans_mean, 0); 
+
+summary1;
+
+invisible <- ggplot(summary1, aes(x=alta_type, y=daily_mobile_app_tx_mean, fill=grupo_evento)) + geom_bar(width=.5, position="dodge", stat="identity") + ggtitle("Mobile app usage by 2 groups in breakdown of\n main event groups\n") + theme(plot.title = element_text(lineheight=.8, face="bold"));
+
+
+ggplot(summary1, aes(x=grupo_evento, y=daily_trans_mean)) + geom_point(size=5, aes(colour=alta_type)) + scale_colour_brewer(palette="Set1", limits=c("bbva.es", "oficina")) + ylim(12, 23) + ggtitle("Mobile app usage by 2 groups in breakdown of\n main event groups\n") + theme(plot.title = element_text(lineheight=.8, face="bold"));
+
+         
+a <- length(unique(mobile_app$cod_persona[mobile_app$alta_type == 'bbva.es']))
+b <- length(unique(mobile_app$cod_persona[mobile_app$alta_type == 'oficina']))
+
+mobiapp_clients <- as.matrix(c(a, b), drop=FALSE)
+
+
+bbvaes_tx_count <- mobile_app$mobile_app_tx_count[mobile_app$alta_type=='bbva.es']
+oficina_tx_count <- mobile_app$mobile_app_tx_count[mobile_app$alta_type=='oficina']
+  
+t.test(bbvaes_tx_count, oficina_tx_count)
+
+```
+
+
+
+The DAILY usage of the service **"BBVA Wallet"** shows following pattern: 
+
+```{r echo=FALSE}
+
+wallet <- chname(qhive(" select * from elmi.digital_onboard_bbva_wallet_2 ")) ;
+
+wallet_tx_sum <- aggregate(wallet$wallet_tx_count, by=list(wallet$alta_type, wallet$cod_geve_trn), FUN=sum)
+
+colnames(wallet_tx_sum) <- c("alta_type", "grupo_evento", "sum_wallet_tx")
+
+
+wallet_tx_daily_mean <- aggregate(wallet$wallet_tx_count, by=list(wallet$alta_type, wallet$cod_geve_trn), FUN=mean)
+
+colnames(wallet_tx_daily_mean) <- c("alta_type", "grupo_evento", "daily_wallet_tx_mean")
+
+
+summary2 <- merge(wallet_tx_sum, wallet_tx_daily_mean)
+
+summary2$grupo_evento[summary2$grupo_evento == 1] <- 'CONSULTAS'
+summary2$grupo_evento[summary2$grupo_evento == 2] <- 'OPERACIONES'
+summary2$grupo_evento[summary2$grupo_evento == 3] <- 'CONTRATACIONES'
+
+
+u <- length(unique(wallet$cod_persona[wallet$alta_type == 'bbva.es']))
+t <- length(unique(wallet$cod_persona[wallet$alta_type == 'oficina']))
+
+
+wallet_clients <- as.matrix(c(u, t), drop=FALSE)
+
+summary2$daily_wallet_tx_mean <- round(summary2$daily_wallet_tx_mean, 0); 
+
+summary2;
+
+invisible2 <- ggplot(summary2, aes(x=alta_type, y=daily_wallet_tx_mean, fill=grupo_evento)) + geom_bar(width=.5, position="dodge", stat="identity") + ggtitle("WALLET app usage by 2 groups in breakdown of\n main event groups\n") + theme(plot.title = element_text(lineheight=.8, face="bold"));
+
+
+ggplot(summary2, aes(x=grupo_evento, y=daily_wallet_tx_mean)) + geom_point(size=5, aes(colour=alta_type)) + scale_colour_brewer(palette="Set1", limits=c("bbva.es", "oficina")) + ylim(12, 48) + ggtitle("WALLET app usage by 2 groups in breakdown of\n main event groups\n") + theme(plot.title = element_text(lineheight=.8, face="bold"));
+
+
+bbvaes_tx_count <- wallet$wallet_tx_count[wallet$alta_type=='bbva.es']
+oficina_tx_count <- wallet$wallet_tx_count[wallet$alta_type=='oficina']
+  
+t.test(bbvaes_tx_count, oficina_tx_count)
+
+```
+
+And in this case we observe the statistically significant difference in means between 2 groups mainly due to the intensive usage of QUERIES functionality by traditional registrations. 

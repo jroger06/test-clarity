@@ -1,0 +1,128 @@
+---
+output:
+  html_document:
+    self_contained: no
+    theme: cerulean
+---
+
+---
+title: ""
+author: "BBVA D&A - Captación"
+date: "5/10/2015"
+output: html_document
+---
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- '[Digital Sales]: Análisis del funnel del proceso de alta.'
+keywords  <- 'funnel, bbva.es, nuevo cliente, alta cliente, adquisición cliente'  
+```
+
+```{r , echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))    # This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+suppressMessages(library(ggplot2))
+suppressMessages(library(grid))
+suppressMessages(library(hexbin))
+suppressMessages(library(lattice))
+suppressPackageStartupMessages(library('googleVis'))
+suppressPackageStartupMessages(library('ggplot2'))
+op <- options(gvis.plot.tag="chart")
+#op <- options(gvis.plot.tag=NULL)
+
+options(warn=-1, scipen=3, width=120)
+source('~/bda_clarity/tools/warehouse_basics.R') ;
+source('~/bda_clarity/tools/write.hive.R') ;
+
+percent  = function(a, b){
+  a*100/b
+};
+
+```
+
+
+```{r MF_dependencies, echo = FALSE}
+  
+omniture_bbvamice_master <- clarity.use_table(DEPENDENCY_OTHER_TABLES,    
+                                              'da_omniture.omniture_bbvamice_master',    
+                                              '*', sqname = 'omniture_bbvamice_master')
+
+```
+
+
+```{r MF_consultas, cache=TRUE, echo=FALSE, eval = TRUE}
+
+resolutions_views = qhive("SELECT 
+                          COUNT(*) AS total,
+                          SUM ( 
+                           CASE WHEN cod_mobile_size is not NULL and cod_mobile_size <> ''
+                           THEN
+                             CASE WHEN cast(regexp_extract(cod_mobile_size, '([0-9]+)(.*?)([0-9]+)', 3) as int) > 1014 THEN 1 ELSE 0 END
+                           ELSE 
+                             CASE WHEN cast(regexp_extract(cod_monitor_resol, '([0-9]+)(.*?)([0-9]+)', 3) as int) > 1014 THEN 1 ELSE 0 END
+                            END) AS ven,
+                            partition_id AS mes
+                            FROM da_omniture.omniture_bbvamice_master 
+                            WHERE des_pages IN ( 'particulares:alta clientes:no es cliente:mostrarpaso_bienvenida', 
+                                                 'particulares:alta clientes:no es cliente:paso -1 mostrarpaso_bienvenida')
+                            GROUP BY partition_id")
+```
+
+## Análisis del funnel del proceso de alta
+
+### 1. Motivación de negocio
+
+Se pretende mejorar la visualización del formulario del proceso de alta ya que se cree que la pérdida de usuarios en el primer paso del mismo puede ser debida o bien a que hay ya clientes que acceden al formulario por error, lo que se relaciona con la posición de los botones "Acceso" y "Hazte cliente", o bien a que la usabilidad de la primera pantalla del formulario no es adecuada ya que no se visualiza el botón "Siguiente".
+
+### 2. Objetivo
+
+El objetivo de este análisis es determinar la veracidad de la hipótesis relacionada con la baja visualización del botón siguiente en scroll 0 en función de las resoluciones de pantalla de los usuarios que visitan el primer paso del formulario. 
+
+### 3. Fuentes de datos
+
+Se han empleado la tabla **da_omniture.omniture_bbvamice_master** en la que se almacenan registros de la navegación online de los usuarios de la Web. En particular, contiene los datos relativos a la resolución de pantalla y las páginas visitadas.
+
+El nombre de la página analizada ha variado a lo largo del año, en particular, se denominaba _"particulares:alta clientes:no es cliente:mostrarpaso_bienvenida"_ hasta junio de 2015 y "_particulares:alta clientes:no es cliente:paso -1 mostrarpaso_bienvenida_" desde julio de 2015. En importante no incluir _"general:altanif"_, ya que se obtendrían duplicados debido a que los accesos a dicha página generan ambas cookies.
+
+
+### 4. Análisis
+
+#### 4.1 Datos sobre la visualización
+
+A continuación se muestran los resultados obtenidos en los conteos de las visualizaciones del botón _siguiente_ de la pantalla previa al inicio de formulario de Alta de la web bbva.es.
+
+En el siguiente gráfico se presentan los datos obtenidos. El área verde muestra el total de visitas a dichas páginas y el área anaranjada indica la proporción de visitas que ven el botón siguiente.
+
+```{r MF_graficos visualizaciones, cache=FALSE, echo=FALSE, eval = TRUE}
+library(reshape)
+library(ggplot2)
+
+resolutions_views_melt <- melt(resolutions_views, id = "mes")
+resolutions_views_melt$label = sprintf("%.0f", resolutions_views_melt$value)
+resolutions_views_melt$label = sprintf(format(round(as.numeric(resolutions_views_melt$value), 1), nsmall=1, big.mark=","))
+
+p = suppressMessages( ggplot(data=resolutions_views_melt, aes(x=mes, y=value, group=variable, colour=variable, fill = variable, alpha = 12,ymax=max(value)*1.05)) )
+suppressMessages( p + geom_area(position = "dodge")+ geom_point(color = 'black')+ ylab("#Visualizaciones")+xlab("Mes") + ggtitle("Viualizaciones del botón siguiente")+theme(legend.title=element_blank())+geom_text(aes(y = value, label = label), position = "dodge", size = 3.5, color = 'black', vjust=-1))
+
+resolutions_views$percs = resolutions_views$ven * 100 / resolutions_views$total
+resolutions_views$label = paste0(sprintf("%.2f", resolutions_views$percs), "%")
+
+```
+
+#### 4.2 Resultados
+
+En la siguiente tabla aparecen los datos resultantes sobre el procentaje de visitas a la página que ven el botón siguiente.
+
+Mes | % Vistos
+------------- | -------------
+`r resolutions_views$mes[1] ` | `r resolutions_views$label[1] `
+`r resolutions_views$mes[2] ` | `r resolutions_views$label[2] `
+`r resolutions_views$mes[3] ` | `r resolutions_views$label[3] `
+`r resolutions_views$mes[4] ` | `r resolutions_views$label[4] `
+
+#### 4.3 Conclusiones
+
+Según los resultados se confirma la hipótesis de que una gran parte de los usuarios que visitan la web, siempre más del 50%, no visualizan el botón siguiente de inicio de formulario. 

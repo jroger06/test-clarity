@@ -1,0 +1,784 @@
+---
+output:
+  html_document:
+    self_contained: no
+  pdf_document: default
+---
+
+Digital Sales: Mortgages
+-------------------
+
+
+```{r, echo = FALSE}
+# This is the first mandatory section.
+
+title     <- "[Digital Sales] Mortgages: Analysis Research On-Line y Purchase Off-line (ROPO)"
+
+# Keywords. Text separated by commas. E.g. keywords <- 'customer health, recibos' 
+# Keywords can classify the attribute in categories such as 'valor, vinculación, digitalidad', describe used tables such as 'recibos, 
+# transacciones tarjetas, segmento plan uno' or include other relevant info. Search keywords in the portal to find commonly used terms
+# and create new keywords only if justified.
+
+keywords  <- 'hipoteca, CMC, bbva.es, sociodemo, ROPO'  
+```
+
+
+```{r, echo=FALSE}
+# This is the second mandatory section.
+
+suppressMessages(library(DBI))  	# This avoids loading messages and warnings showing up
+suppressMessages(library(rJava))
+options(warn=-1)
+source('~/bda_clarity/tools/warehouse_basics.R')
+
+suppressPackageStartupMessages(library('ggplot2'))
+suppressPackageStartupMessages(library('plyr'))
+suppressPackageStartupMessages(library('data.table'))
+suppressPackageStartupMessages(library('googleVis'))
+op <- options(gvis.plot.tag="chart")
+
+doit = FALSE
+```
+
+
+```{r echo=FALSE}
+labels_euro <- function(x) {# no rounding
+paste0(format(x, big.mark = ",", decimal.mark = ".", trim = TRUE,
+    scientific = FALSE), " €")
+} 
+
+```
+### Clientes que solicitan hipoteca a través de formulario en la NET vs oficina
+
+El objetivo de este estudio es analizar los datos de los clientes que contratan una hipoteca a través de la net y compararlo con la contratación por oficina. 
+
+Mediante la información del CMC tenemos los resultados de las propuestas de contratación de los clientes que completaron el formulario a través de la net. 
+Cargamos la tabla de CMC y filtramos por aquellos clientes con hipoteca en fase de **"puesta en vigor"** y fecha de inicio de propuesta anterior al 31/12/2014. 
+
+En el caso de los clientes que contratan por oficina no se dispone de los datos del CMC por lo que se hace uso de la tabla de transacciones por canal (TxC).
+En esta tabla se filtra por grupo de evento **contratacion** y evento **239** a través del canal **oficina**. 
+
+
+```{r echo=FALSE, eval=TRUE}
+# Dependencies
+fec_inicial <- "2014-10-01"
+da_rafa.clientes_hipotecas_perfil <- clarity.use_table(DEPENDENCY_OTHER_TABLES,
+                           'da_rafa.clientes_hipotecas_perfil',
+                           select = '*')
+da_rafa.omniture_hipotecario_contratados <- clarity.use_table(DEPENDENCY_OTHER_TABLES,
+                           'da_rafa.omniture_hipotecario_contratados',
+                           select = '*')
+
+da_rafa.clientes_contratacion_prestamo <-clarity.use_table(DEPENDENCY_OTHER_TABLES,
+                           'da_rafa.clientes_contratacion_prestamo',
+                           select = '*', sqname  = "clientes_contratacion_prestamo")
+  
+if (doit){
+  
+do.hive(" CREATE TABLE IF NOT EXISTS da_rafa.propuestas_formularios_CMC     
+            (cod_id_form string, 
+            cod_form string, 
+            des_form string,
+            cod_impulso string,
+            cod_persona string,
+            ind_cliente string, 
+            cod_nif string, 
+            fec_alta string,
+            fec_val string, 
+            cod_estado string,
+            fec_mifecha string, 
+            cod_idefisica string, 
+            cod_client_id string, 
+            cod_nif_cif string, 
+            cod_acontecimiento string, 
+            cod_sub_acontecimiento string, 
+            cod_agrup_comercial string, 
+            cod_comprod string, 
+            cod_banco_inver string, 
+            cod_ofi string, 
+            cod_idcontra string, 
+            cod_folio string, 
+            cod_dependiente string, 
+            cod_tarea string, 
+            cod_fase string, 
+            cod_accion string, 
+            fec_ini_tarea string, 
+            fec_fin_tarea string, 
+            fec_ini_propuesta string,
+            cod_gestor string, 
+            cod_cargo string,
+            cod_propuesta string, 
+            cod_ini_gestor string,
+            cod_cargo_proponente string, 
+            cod_index int, 
+            cod_propuesta2 string, 
+            cod_tarea2 int, 
+            mes_form int, 
+            mes_propuesta int, 
+            mes_ult_tarea int, 
+            dias_form_propuesta int, 
+            dias_form_tarea int)
+COMMENT 'Listado de propuestas asociadas a clientes y no clientes que completaron el formulario de solicitud de hipotecas por la net'
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
+STORED AS TEXTFILE 
+tblproperties ('skip.header.line.count'='2')") 
+
+
+do.hive(" LOAD DATA INPATH    '/tmp/load_hive/formularios_propuestas_cmc.csv' OVERWRITE INTO TABLE  da_rafa.propuestas_formularios_CMC "); 
+
+}
+```
+
+
+```{r echo=FALSE, eval=TRUE,cache=TRUE}
+# Loading and preprocessing propuestas CMC
+propuestas_CMC <- qhive("SELECT * FROM da_rafa.propuestas_formularios_CMC")
+propuestas_CMC$fec_ini_propuesta <- as.Date(propuestas_CMC$fec_ini_propuesta, format="%d/%m/%Y")
+propuestas_CMC <- data.table( propuestas_CMC[propuestas_CMC$fec_ini_propuesta < "2014-12-31" & propuestas_CMC$cod_fase=="Puesta en Vigor",] ) 
+# group by cod_persona to hold on best propoursal 
+clientes_CMC <- propuestas_CMC[ , list( cod_fase = max(cod_fase),
+                        cod_sub_acontecimiento = max(cod_sub_acontecimiento),
+                        fec_ini_tarea = max(as.Date(fec_ini_tarea, format="%d/%m/%Y")), 
+                        fec_fin_tarea = max(as.Date(fec_fin_tarea, format="%d/%m/%Y")),
+                        fec_ini_propuesta = max( fec_ini_propuesta), 
+                        ind_cliente = sample(ind_cliente,1), 
+                        cod_comprod = sample(cod_comprod,1), 
+                        dias_form_propuesta = max(dias_form_propuesta), 
+                        fec_mifecha = max(as.Date(fec_mifecha, format="%d/%m/%Y")), 
+                        cod_ofi = sample(cod_ofi,1)
+                        ), by = "cod_persona"]
+```
+
+**Propuestas de contratación de hipotecas de clientes que vienen del formulario en la net (CMC)**
+
+```{r PropuestasFase, results='asis', tidy=FALSE, echo=FALSE, fig.width=8, eval=TRUE}
+Vis_clientes_CMC <- gvisTable(clientes_CMC, 
+                              options=list(
+                              width=1000,
+                              height=500,
+                              title="Propuestas CMC"), chartid="PropuestasFase")
+#plot(Vis_clientes_CMC)
+print(Vis_clientes_CMC, tag="chart")
+```
+
+#### Clientes que contratan Online
+
+Tenemos un total de **`r dim(clientes_CMC)[1]`** personas que ha solicitado una hipoteca, donde hay tanto no clientes (que pasarían a ser nuevos clientes del banco) como ya clientes del banco. 
+
+* **Clientes: `r table(clientes_CMC$ind_cliente)[1]`**
+* **No clientes: `r table(clientes_CMC$ind_cliente)[2]`**
+
+Buscando en la BBDD estos clientes/ no clientes tratamos de averiguar más detalles de la contratación y el perfil de cada uno de ellos. 
+Además tratamos de comparar su perfil y el tipo de operación con aquellos que contratan en oficina.
+
+Del total de `r dim(clientes_CMC)[1]` personas que han solicitado una hipoteca no todos ellos solicitan la apertura de un préstamo hipotecario como tal. Hay algunos casos especiales donde se solicitan subrogaciones, refinanciación, etc. El desglose es la siguiente:  
+
+```{r PropuestasTipo, results='asis', tidy=FALSE, echo=FALSE, fig.width=8}
+df.clientes_CMC_sub <- data.frame(table(clientes_CMC$cod_sub_acontecimiento))
+names(df.clientes_CMC_sub) <- c("Tipo Contratación", "Clientes")
+
+Vis_tipo_propuesta_CMC <- gvisTable(df.clientes_CMC_sub, 
+                              options=list( title="Tipo de propuestas CMC"), chartid="PropuestasTipo")
+#plot(Vis_clientes_CMC)
+print(Vis_tipo_propuesta_CMC, 'chart')
+```
+
+
+```{r echo=FALSE,  cache=TRUE}
+##---------------------------------
+# Loading clients contracting in branches 
+#clientes_oficina            <- qhive(paste( "SELECT * FROM ", da_rafa.clientes_contratacion_prestamo))
+#filtro_clientes_off         <- paste0("('",paste(as.numeric(as.character(unique(clientes_oficina$cod_persona, na.rm=T))), collapse="','"), "')")
+#sql_clientes_hipotecas_off  <- paste("SELECT * FROM da_rafa.clientes_hipotecas_perfil where cast(cod_persctpn as int) IN ", filtro_clientes_off )
+sql_clientes_hipotecas_off <- paste("SELECT a.* FROM da_rafa.clientes_hipotecas_perfil a 
+                                   INNER JOIN ", da_rafa.clientes_contratacion_prestamo,
+                                  "ON( cast(clientes_contratacion_prestamo.cod_persona as int) = cast(a.cod_persctpn as int))")
+
+Off_clientes_hipotecas     <- qimpala(sql_clientes_hipotecas_off)
+#Off_clientes_hipotecas      <- qhive(sql_clientes_hipotecas_off)
+Off_clientes_hipotecas      <- data.table(Off_clientes_hipotecas)
+# transforming colnames
+names(Off_clientes_hipotecas) <- gsub("clientes_hipotecas_perfil.","", names(Off_clientes_hipotecas))
+setnames(Off_clientes_hipotecas, "cod_persctpn", "cod_persona")
+# filtering real loans and remove duplicates by maximum loan balance per client
+Off_clientes_hipotecas <- Off_clientes_hipotecas[grep( "PR�STAMOS", Off_clientes_hipotecas$des_ctgcom), ]
+Off_clientes_hipotecas <- Off_clientes_hipotecas[as.Date(Off_clientes_hipotecas$fec_ininter)>= fec_inicial, ]
+
+
+Off_clientes_hipotecas <- Off_clientes_hipotecas[order(Off_clientes_hipotecas$cod_persona, -abs(Off_clientes_hipotecas$saldo_cierre_mes) ), ] 
+Off_clientes_hipotecas <- Off_clientes_hipotecas[ !duplicated(Off_clientes_hipotecas$cod_persona), ]
+
+
+Off_clientes_hipotecas <- Off_clientes_hipotecas[, plazo := as.numeric(substr(fec_vencto ,1,4)) - as.numeric(substr(fec_ininter,1,4))  ]
+Off_clientes_hipotecas <- Off_clientes_hipotecas[, edad := as.numeric(substr(fec_ininter,1,4)) - as.numeric(substr(fec_nacimi,1,4))  ]
+Off_clientes_hipotecas <- Off_clientes_hipotecas[, edad_cat := cut(edad, c(0,29, 35, 45, 65, 75))]
+Off_clientes_hipotecas <- Off_clientes_hipotecas[, tipo := "oficina"]
+# filtering by fec_vencto asumming certain mortgage loan criteria. 
+Off_clientes_hipotecas <- Off_clientes_hipotecas[ (Off_clientes_hipotecas$plazo==10 & Off_clientes_hipotecas$saldo_cierre_mes>75000) | (Off_clientes_hipotecas$plazo>10 & Off_clientes_hipotecas$saldo_cierre_mes>0), ]
+
+##---------------------------------
+# Loading clientes contracting online
+filtro_clientes_on <- paste0("(",paste(as.numeric(as.character(clientes_CMC$cod_persona)), collapse=","), ")")
+sql_clientes_hipotecas_on <- paste("SELECT * FROM da_rafa.clientes_hipotecas_perfil where cast(cod_persctpn as int) IN ", filtro_clientes_on )
+clientes_hipotecas <- qimpala(sql_clientes_hipotecas_on)
+#clientes_hipotecas <- qhive(sql_clientes_hipotecas_on)
+
+names(clientes_hipotecas) <- gsub("clientes_hipotecas_perfil.","", names(clientes_hipotecas))
+setnames(clientes_hipotecas, "cod_persctpn", "cod_persona")
+setnames(clientes_hipotecas, "fec_ininter", "fec_ini_propuesta")
+
+clientes_hipotecas$fec_ini_propuesta <- as.Date(clientes_hipotecas$fec_ini_propuesta)
+clientes_hipotecas$cod_persona <- as.numeric(clientes_hipotecas$cod_persona)
+
+
+clientes_hipotecas_cmc <- suppressMessages( data.table(join(clientes_hipotecas, clientes_CMC, by= c("cod_persona", "fec_ini_propuesta") , type="inner")) ) 
+
+# filtering real loans
+clientes_hipotecas_cmc <- clientes_hipotecas_cmc[grep( "PR�STAMOS", clientes_hipotecas_cmc$des_ctgcom), ]
+clientes_hipotecas_cmc <- clientes_hipotecas_cmc[order(clientes_hipotecas_cmc$cod_persona, -abs(clientes_hipotecas_cmc$saldo_cierre_mes) ), ] 
+clientes_hipotecas_cmc <- clientes_hipotecas_cmc[ !duplicated(clientes_hipotecas_cmc$cod_persona), ]
+
+clientes_hipotecas_cmc <- clientes_hipotecas_cmc[, edad := as.numeric(substr(fec_ini_propuesta,1,4)) - as.numeric(substr(fec_nacimi,1,4))  ]
+clientes_hipotecas_cmc <- clientes_hipotecas_cmc[, plazo := as.numeric(substr(fec_vencto ,1,4)) - as.numeric(substr(fec_ini_propuesta,1,4))  ]
+clientes_hipotecas_cmc <- clientes_hipotecas_cmc[, edad_cat := cut(edad, c(0,29, 35, 45, 65, 75))]
+clientes_hipotecas_cmc <- clientes_hipotecas_cmc[, tipo := "bbva.es"]
+
+
+On_clientes_hipotecas  <- clientes_hipotecas_cmc[clientes_hipotecas_cmc$cod_sub_acontecimiento=="APERTURA" & clientes_hipotecas_cmc$plazo>0,]
+##---------------------------------
+# UNION
+# prepare to get same colnames
+setnames(Off_clientes_hipotecas, "fec_ininter", "fec_ini_propuesta")
+# binding branch and online clients
+Off_clientes_hipotecas$fec_ini_propuesta <- as.Date(Off_clientes_hipotecas$fec_ini_propuesta)
+clientes_hipoteca  <- rbind(On_clientes_hipotecas[ , names(Off_clientes_hipotecas), with = FALSE], Off_clientes_hipotecas)
+clientes_hipoteca <- clientes_hipoteca[ clientes_hipoteca$saldo_cierre_mes>=30000  , ]
+```
+
+
+#### Clientes que contratan en oficina
+
+Se han identificado **`r sum(clientes_hipoteca$tipo=="oficina")` clientes que han contratado hipoteca en oficina**. En la tabla de transacciones por canal podemos identificar las contrataciones de préstamos en general pero no somos capaces de distinguir entre hipotecas y otro tipo de préstamos de manera directa. 
+Por tanto, para afinar más, hemos filtrado tanto por importe como por plazo del préstamo. 
+
+Puesto que estamos tratando con clientes particulares suponemos que todos los préstamos con un plazo superior a 10 años se corresponden con hipotecas. 
+En el caso de préstamos de 10 años o menos habría una **posible confusión con los préstamos personales**. Por lo general estos préstamos están limitados en plazo a 10 años y por importe a menos de 75.000 €. Consideraremos también como hipotecas préstamos de 10 años de duración por importe superior a dicha cantidad, para un plazo superior a 10 años el importe mínimo fijado es de 30.000 €. 
+
+Si bien es cierto que podríamos cometer un algún error y contar algún préstamo particular que no se corresponda exactamente con hipotecas cuando se disponga de los datos del CMC se podrá corregir. 
+
+### Datos sociodemográficos
+
+El **`r paste0(round(prop.table(table(clientes_hipoteca[clientes_hipoteca$xti_csexof %in% c("V","M"),]$xti_csexof)),2)*100, '%')[2]`** del total de clientes que han contratado hipoteca son **hombres**. Este porcentaje es del **`r paste0(round(prop.table(table(clientes_hipoteca[clientes_hipoteca$xti_csexof!=' ' & clientes_hipoteca$tipo=="bbva.es",]$xti_csexof)),2)*100, '%')[2]` si nos quedamos solo con los clientes que contrataron por bbva.es**. El porcentaje de hombres es significativamente superior en este caso. 
+
+Si analizamos la edad de los clientes, a pesar de que no hay grandes diferencias en la distribución, la media de edad de los clientes que realizan la contratación en bbva.es es menor que en los clientes de oficina. Hay que tener en cuenta que por lo general la hipoteca es un producto cuyo público objetivo es relativamente joven ya de por sí. 
+
+* Edad media en **clientes bbva.es: `r round(mean(clientes_hipoteca[ clientes_hipoteca$tipo=="bbva.es", ]$edad, na.rm=T),1)`**
+* Edad media en **clientes oficina: `r round(mean(clientes_hipoteca[ clientes_hipoteca$tipo=="oficina", ]$edad, na.rm=T),1)`**
+
+```{r echo=FALSE}
+# ggplot(clientes_hipoteca_apertura, aes(x=plazo)) + 
+#     geom_histogram( binwidth=5,
+#                    colour="black", fill="white") +
+#    geom_vline(aes(xintercept=mean(plazo, na.rm=T)),   # Ignore NA values for mean
+#                color="red", linetype="dashed", size=1) + xlab('Plazo de la hipoteca') + ylab('Nº de clientes')
+
+suppressWarnings( ggplot(clientes_hipoteca[clientes_hipoteca$edad>=18 & clientes_hipoteca$edad<90, ], aes(x=edad, fill=tipo)) + 
+  geom_density(alpha=.3) + 
+  geom_vline(data =clientes_hipoteca[ clientes_hipoteca$tipo=="oficina", ], aes(xintercept=mean(edad, na.rm=T)), color="blue", linetype="dashed", size=1) + 
+  geom_vline(data =clientes_hipoteca[ clientes_hipoteca$tipo=="bbva.es", ], aes(xintercept=mean(edad, na.rm=T)), color="red", linetype="dashed", size=1) + 
+  xlab('Edad de los clientes') + ylab('Nº de clientes') + theme_bw(15) )
+```
+
+### Plazos e importe solicitado
+
+```{r echo=FALSE}
+suppressWarnings( ggplot(clientes_hipoteca[!is.na(clientes_hipoteca$edad_cat),], aes(x=plazo, fill= edad_cat)) + 
+    geom_histogram(binwidth=5, alpha=.7, aes(y = ..density..),  colour="black")  +
+    #geom_histogram( binwidth=5, colour="black") + 
+     geom_vline(data =clientes_hipoteca[ clientes_hipoteca$tipo=="oficina", ], aes(xintercept=mean(plazo, na.rm=T)), color="blue", linetype="dashed", size=1) + 
+  geom_vline(data =clientes_hipoteca[ clientes_hipoteca$tipo=="bbva.es", ],aes(xintercept=mean(plazo, na.rm=T)), color="red", linetype="dashed", size=1) + 
+   
+    xlab('Plazo de la hipoteca') + ylab('Nº de clientes') + theme_bw(15) ) + facet_grid(.~tipo)
+
+```
+
+Si segmentamos por grupos de edades vemos que los clientes más jóvenes suelen pedir hipotecas más a largo plazo y los más mayores hipotecas con plazos sensiblemente más cortos. Este comportamiento es totalmente lógico y ocurre tanto en los clientes de oficina como en los de bbva.es. 
+
+Además, el plazo medio por los clientes de **oficina** es de **`r round(mean(clientes_hipoteca[ clientes_hipoteca$tipo=="oficina", ]$plazo),1)` años**, mientras que en **bbva.es** es de **`r  round(mean(clientes_hipoteca[ clientes_hipoteca$tipo=="bbva.es", ]$plazo),1)`**. Podemos concluir que los clientes en bbva.es solicitan en promedio préstamos de mayor duración. 
+
+Asimismo, el mínimo plazo solicitado es de `r min(clientes_hipoteca$plazo)` años y el máximo es `r max(clientes_hipoteca$plazo)-1` años. 
+
+A la hora de mirar el importe por el que se solicita la hipoteca hay que comprobar la fecha de fin de tarea en la tabla de CMC. Es decir que aunque la propuesta haya sido generada el saldo de la hipoteca no aparece en tabla de saldos persona física hasta el mes siguiente a la fecha de fin de tarea (en este caso Puesta en Vigor).
+
+Para poder representar mejor la distribución del importe del préstamo quitamos los atípicos donde el importe es superior a 500.000 €. 
+Estos son `r sum(clientes_hipoteca$saldo_cierre_mes>500000)` clientes.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+dt.hipotecas_con_saldo <- clientes_hipoteca[clientes_hipoteca$saldo_cierre_mes>0 & clientes_hipoteca$saldo_cierre_mes<400000, ]
+
+suppressMessages( ggplot(dt.hipotecas_con_saldo, aes(x=saldo_cierre_mes, fill=tipo)) + 
+    #geom_histogram( binwidth = 10000, colour="black") +
+  geom_density(alpha=.3) + 
+  geom_vline(data =dt.hipotecas_con_saldo[ dt.hipotecas_con_saldo$tipo=="oficina", ], aes(xintercept=mean(saldo_cierre_mes, na.rm=T)), color="blue", linetype="dashed", size=1) + 
+  geom_vline(data =dt.hipotecas_con_saldo[ dt.hipotecas_con_saldo$tipo=="bbva.es", ],aes(xintercept=mean(saldo_cierre_mes, na.rm=T)), color="red", linetype="dashed", size=1) + 
+  xlab('Importe del préstamo hipotecario') + ylab('Nº de clientes') +
+  theme_bw(15) + scale_x_continuous(labels = labels_euro) )
+
+suppressMessages( ggplot(dt.hipotecas_con_saldo[dt.hipotecas_con_saldo$xti_csexof %in% c("V","M") & !is.na(dt.hipotecas_con_saldo$edad_cat), ], aes(y=saldo_cierre_mes, x = xti_csexof,  fill = tipo)) + 
+   geom_boxplot() + 
+   xlab('Sexo') + ylab('Importe del préstamo hipotecario') +
+   theme_bw(15) + scale_y_continuous(labels = labels_euro) ) 
+
+suppressMessages( ggplot(dt.hipotecas_con_saldo[!is.na(dt.hipotecas_con_saldo$edad_cat),], aes(y=saldo_cierre_mes, x = edad_cat,  fill = tipo)) + 
+   geom_boxplot() + 
+   xlab('Franja de edad') + ylab('Importe del préstamo hipotecario') +
+   theme_bw(15) + scale_y_continuous(labels = labels_euro) )
+
+```
+
+
+En el gráfico de importe del préstamo por franja de edad vemos que en el primer tramo de edad los importes que se solicitan son algo menores (a pesar de que son más a largo plazo), al igual que ocurre con el último tramo de edad. Entre 30 y 35 años es la franja de edad para la que se solicitan préstamos de mayor importe. Diferenciando por sexo la distribución del importe del préstamo entre hombres y mujeres es muy similar, en el caso de bbva.es el importe promedio es algo menor en las mujeres. 
+
+Los clientes en oficina solicitan en promedio préstamos de mayor importe en todas las franjas de edad excepto en la de 30 a 35 años (que además era la franja de edad con mayores importes en el préstamo). En cualquier caso las diferencias no son muy significativas. 
+
+A continuación vemos la localización de los clientes que han contratado hipoteca en el periodo de campaña:
+
+```{r mapaGeo, results='asis', tidy=FALSE, echo=FALSE, fig.width=8}
+
+dt.provincias <- clientes_hipoteca[ , list(clientes = .N) , by= c("tipo","des_provnacm")]
+
+dt.provincias.map <- copy(dt.provincias)
+dt.provincias.map$tipo <- as.factor(dt.provincias.map$tipo)
+dt.provincias.map$tipo <- as.numeric(as.factor(dt.provincias.map$tipo))
+
+dt.provincias.map$clientes <- dt.provincias.map$clientes*100
+GeoStates <- gvisGeoChart(dt.provincias.map, locationvar="des_provnacm", sizevar="clientes",colorvar="tipo",
+                          options=list(region="ES", 
+                                       colorAxis="{values:[1,2],
+                                                   colors:[\'red', \'blue']}",
+                                       displayMode = 'markers',
+                                       #displayMode="regions", 
+                                       resolution="provinces",
+                                       width=700, height=500))
+dt.provincias.map$clientes <- dt.provincias.map$clientes/100
+provincias <- gvisTable(data.frame(dt.provincias), 
+               options=list(width=300, height=300))
+
+GT <- gvisMerge(GeoStates,provincias, horizontal=TRUE) 
+plot(GT)
+```
+
+En la distribución por estado civil de los clientes vemos un porcentaje mayor de clientes solteros que contratan por bbva.es mientras que en oficina es mayor el porcentaje de casados y divorciados. 
+
+
+```{r estadoCivil, results='asis', tidy=FALSE, echo=FALSE, fig.width=8}
+
+estado_civil_off <- table(clientes_hipoteca$cod_estcivil[clientes_hipoteca$tipo=="oficina" & clientes_hipoteca$cod_estcivil %in% c("C","D","S","V")])
+EstadoCivil_off <- gvisPieChart(data.frame(estado_civil_off), 
+                      options=list(
+                        width=500,
+                        height=400,
+                        title="Estado civil - clientes oficina",
+                        legend="{position: 'top', textStyle: {color: 'blue', fontSize: 12}}",
+                        pieHole=0.5), chartid="EstadoCivilOff")
+#plot(EstadoCivil_off)
+
+estado_civil_on <- table(clientes_hipoteca$cod_estcivil[clientes_hipoteca$tipo=="bbva.es" & clientes_hipoteca$cod_estcivil %in% c("C","D","S","V")])
+EstadoCivil_on <- gvisPieChart(data.frame(estado_civil_on), 
+                      options=list(
+                        width=500,
+                        height=400,
+                        title="Estado civil - clientes bbva.es",
+                        legend="{position: 'top', textStyle: {color: 'blue', fontSize: 12}}",
+                        pieHole=0.5), chartid="EstadoCivilOn")
+#plot(EstadoCivil_on)
+
+GT <- gvisMerge(EstadoCivil_on,EstadoCivil_off, horizontal=TRUE) 
+plot(GT)
+```
+
+
+```{r echo=FALSE}
+## Intento de comprobar la retirada de una importante cantidad de dinero en cuenta (posible entrada en la compra de vivienda)
+
+#clientes_cuentas_pers <- clientes_hipotecas[c(grep("CUENTAS PERSONALES",clientes_hipotecas$des_ctgcom),  grep("PENSIONES",clientes_hipotecas$des_ctgcom)) , ]
+# clientes_cuentas_pers <- clientes_hipotecas[ grep("CUENTAS PERSONALES",clientes_hipotecas$des_ctgcom) , ]
+# clientes_cuentas_pers <- data.table( clientes_cuentas_pers[ clientes_cuentas_pers$cod_persona %in% clientes_hipoteca_apertura$cod_persona, ] ) 
+# 
+# # Variacion del saldo en cuenta y planes de pensiones de los clientes
+# saldos_cuenta <-  clientes_cuentas_pers[ , list( saldo_medio_ult_3_mes = sum(saldo_medio_ult_3_mes) , 
+#                                         saldo_cierre_mes = sum(saldo_cierre_mes), 
+#                                         variacion_saldo = sum(saldo_cierre_mes) - sum(saldo_medio_ult_3_mes) ), by="cod_persona"] 
+# 
+
+```
+
+### Navegación por contenido relacionado con hipotecas en la web
+
+Cruzando la información de los clientes que han contratado hipoteca con la navegación que realizaron en la web de BBVA identificamos 4 aspectos importantes:
+
+* Las páginas con información sobre hipotecas (**INFO**). En este caso es la página etiquetada como **particulares:hipotecas y prestamos:index**
+* El **simulador**. **formulario:formulario calculadora hipotecas:**
+* La **calculadora**. **formulario:simulador hipoteca**
+* El **formulario**. **formulario:formulario crm    hipoteca bbva**
+
+### ROPO (Research On Purchase Off)
+
+En primer lugar es importante analizar el efecto del ROPO (Research On Purchase Off). En casos donde la contratación se hace en oficina pero el cliente ha mostrado interés por estas secciones en la web no se le está contabilizando de ninguna manera una atribución al canal digital. 
+
+```{r echo=FALSE, eval=TRUE,cache=TRUE}
+filtro_clientes_off         <- paste0("('",paste(as.numeric(as.character(unique(clientes_hipoteca[clientes_hipoteca$tipo=="oficina",]$cod_persona, na.rm=T))), collapse="','"), "')")
+
+drop_table('omniture.omniture_cookie_persona')
+do.hive(" CREATE TABLE omniture.omniture_cookie_persona AS 
+          SELECT
+            visitor_id, 
+            client_id 
+          FROM 
+          (
+            SELECT 
+              visitor_id,
+              client_id, 
+              rank() over (PARTITION BY visitor_id ORDER BY num_page_view DESC) as rank
+            FROM 
+            ( SELECT
+                visitor_id, 
+                client_id, 
+                sum(num_page_views) as num_page_view
+              FROM omniture.contenido_hipotecario_t4_2014
+              where client_id!='' AND client_id is not null
+              GROUP BY 
+              visitor_id, 
+              client_id 
+            ) V
+          ) R
+          WHERE rank=1" )
+
+sql_omniture_hipotecario <- paste(" SELECT a.*,
+                                     if(a.client_id='' or a.client_id is null ,b.client_id,   a.client_id ) as  global_id, 
+                                     if(cast(trim(a.client_id) as int) in ",gsub("'","",filtro_clientes_on)," or cast(trim(b.client_id) as int) in ",gsub("'","",filtro_clientes_on), " ,'bbva.es' , 'oficina') as tipo_cliente
+                                     FROM omniture.contenido_hipotecario_t4_2014 a
+                                     LEFT OUTER JOIN 
+                                     omniture.omniture_cookie_persona b
+                                     ON (a.visitor_id = b.visitor_id) 
+                                     WHERE ( cast(trim(b.client_id) as int) in ", gsub("'","",filtro_clientes_on) , "or cast(trim(a.client_id) as int) in ", gsub("'","",filtro_clientes_on), ") 
+                                     or ( cast(trim(b.client_id) as int) in ", gsub("'","",filtro_clientes_off) , "or cast(trim(a.client_id) as int) in ", gsub("'","",filtro_clientes_off) ,")")
+
+drop_table("da_rafa.omniture_hipotecario_contratados")
+nav_hipotecas <- do.hive(paste("CREATE TABLE da_rafa.omniture_hipotecario_contratados AS ",sql_omniture_hipotecario))
+
+```
+
+```{r echo=FALSE, cache=TRUE}
+# Loading table with client omniture information
+nav_hipotecas <- qhive("SELECT * FROM da_rafa.omniture_hipotecario_contratados")
+
+names(nav_hipotecas) <- gsub("^a.","",names(nav_hipotecas )) 
+nav_hipotecas$str_date <- as.Date( nav_hipotecas$str_date , "%B %e %Y") 
+nav_hipotecas <- data.table(nav_hipotecas)
+# adding contracting info and remove other clients info
+setnames(nav_hipotecas,"global_id","cod_persona")
+nav_hipotecas <- suppressMessages( join(nav_hipotecas,clientes_hipoteca) )
+nav_hipotecas <- nav_hipotecas[!is.na(nav_hipotecas$tipo),]
+# new variable with pages content info
+nav_hipotecas <- nav_hipotecas[ , contenido := ifelse(pages == "particulares:hipotecas y prestamos:index", "INFO",
+                                               ifelse(pages == "formulario:formulario calculadora hipotecas:1 datos hipoteca" |
+                                                      pages == "formulario:formulario calculadora hipotecas:2 resultado", "SIMULA",
+                                               ifelse(pages == "formulario:simulador hipoteca", "CALCULA", 
+                                               ifelse(pages == "formulario:formulario crm    hipoteca bbva" | 
+                                                      grepl("formulario:formulario crm    hipoteca bbva:1",pages)  , "INICIO", 
+                                               ifelse(pages == "formulario:formulario crm    hipoteca bbva:5 confirmacion" |
+                                                      pages ==  "formulario:formulario crm    hipoteca bbva:4 confirmacion", "CONFIRMA",        
+                                               "other")))))]
+
+nav_hipotecas <- nav_hipotecas[ , formulario := ifelse(pages == "formulario:formulario crm    hipoteca bbva" | 
+                                                       grepl("formulario:formulario crm    hipoteca bbva:1",pages),              "paso 1: Datos operacion",
+                                                ifelse(grepl("formulario:formulario crm    hipoteca bbva:2",pages),              "paso 2: Datos personales/economicos",      
+                                                ifelse(grepl("formulario:formulario crm    hipoteca bbva:3",pages),              "paso 3: SMS/Datos economicos", 
+                                                ifelse(grepl("formulario:formulario crm    hipoteca bbva:4 valida",pages),       "paso 4: validacion SMS",
+                                                ifelse(grepl("formulario:formulario crm    hipoteca bbva:4 confirma",pages) |
+                                                       grepl("formulario:formulario crm    hipoteca bbva:5 confirma",pages),     "paso 5: confirmacion",
+                                                       NA)))))]
+# Reorder factor
+nav_hipotecas$formulario <- as.factor(nav_hipotecas$formulario)
+nav_hipotecas$formulario <- factor(nav_hipotecas$formulario, levels=c("paso 1: Datos operacion","paso 2: Datos personales/economicos","paso 3: SMS/Datos economicos","paso 4: validacion SMS","paso 5: confirmacion"))
+                                                    
+# reorder nav_hipotecas table to get unique values sorted by date and hour
+nav_hipotecas <- nav_hipotecas[order(cod_persona, str_date, str_hour, decreasing=FALSE)]
+clientes_ropo <- length(unique(nav_hipotecas[nav_hipotecas$tipo_cliente=="oficina" & nav_hipotecas$contenido!="other",]$cod_persona))
+pct_ropo      <- paste0(round(clientes_ropo/sum(clientes_hipoteca$tipo=="oficina")*100,1),'%')
+
+clientes_ropo_ini <- length(unique(nav_hipotecas[nav_hipotecas$contenido=="INICIO" & nav_hipotecas$tipo_cliente=="oficina",]$cod_persona)) - length(unique(nav_hipotecas[nav_hipotecas$contenido=="CONFIRMA" & nav_hipotecas$tipo_cliente=="oficina",]$cod_persona))
+
+
+# Funnel mortgage form
+clientes_ropo_ini<- length(unique(nav_hipotecas[ !is.na(nav_hipotecas$formulario) & nav_hipotecas$tipo_cliente=="oficina", ]$cod_persona))
+
+clientes.formulario <- nav_hipotecas[ nav_hipotecas$tipo_cliente=="oficina" & (!is.na(nav_hipotecas$formulario) | nav_hipotecas$contenido!="other"), 
+                                   list( paso = max(as.numeric(formulario),na.rm=T), 
+                                         fecha_nav= min(str_date)), by = cod_persona]
+names(clientes.formulario) <- c("cod_persona","paso","fecha_nav")
+clientes.formulario <- clientes.formulario[!is.na(clientes.formulario$paso) & !is.infinite(clientes.formulario$paso),]
+
+clientes.formulario$paso <- as.factor( clientes.formulario$paso)
+levels(clientes.formulario$paso) <- c("paso 1: Datos operacion","paso 2: Datos personales/economicos","paso 3: SMS/Datos economicos","paso 4: validacion SMS","paso 5: confirmacion")
+
+Pasos.formulario <- data.frame(table(clientes.formulario$paso))
+Pasos.formulario[,3] <-as.character( paste( round(Pasos.formulario$Clientes/sum(Pasos.formulario$Clientes)*100,1),'%'))
+names(Pasos.formulario) <- c("Último paso al que llego el cliente antes de abandonar el proceso", "Clientes", "% Clientes que entran al formulario y no lo acaban")
+Pasos.formulario[,3] <-as.character( paste( round(Pasos.formulario$Clientes/sum(Pasos.formulario$Clientes)*100,1),'%'))
+
+clientes.formulario <- suppressMessages( join(clientes.formulario, clientes_hipoteca) )
+sclientes.formulario <- clientes.formulario[ , nuevo := clientes.formulario$fec_altapers>=(as.Date(fec_inicial)-30) ]
+```
+
+Utilizando los datos de la navegación por contenido hipotecario en el periodo de octubre a diciembre vemos que de los **`r sum(clientes_hipoteca$tipo=="oficina")` clientes** que han contratado su hipoteca en la oficina hay **`r clientes_ropo` habían navegado por la web** por la secciones mencionadas. Este dato representa el **`r pct_ropo`** de los clientes que contratan por oficina. 
+
+Lo que es más destacable todavía es que **`r clientes_ropo_ini`** de estos clientes incluso **habían comenzando el formulario pero lo abandonan** sin completarlo. 
+Por lo tanto, podemos decir que el **`r paste0(round(clientes_ropo_ini/sum(clientes_hipoteca$tipo=="oficina")*100,1),'%')`** de los clientes que contratan en oficina habían iniciado el formulario en la web pero no lo cumplimentan. Esto podría ser debido a una reticencia a dejar los datos personales en la web o a que el formulario es demasiado largo. 
+
+Cabe destacar también que de los **`r clientes_ropo_ini`** hay **`r sum(clientes.formulario$nuevo)`** que son **nuevos clientes**, es decir un **`r paste( round(sum(clientes.formulario$nuevo)/clientes_ropo_ini*100,1),'%')`** de los que contratan hipoteca en oficina y pasaron en algún momento por el formulario de la web son nuevos clientes del banco. Se entiende como nuevos clientes aquellos cuya fecha de alta como cliente se superior al 01/09/2014, por lo que damos un margen de un mes para quién no es cliente y contrata la hipoteca se dé de alta en el banco. 
+Esto representa un **`r paste( round(sum(clientes.formulario$nuevo)/sum(clientes_hipoteca$tipo=="oficina")*100,1),'%')`** del total de contrataciones en oficina. 
+
+Además **`r length(unique(nav_hipotecas[nav_hipotecas$contenido=="CONFIRMA" & nav_hipotecas$tipo_cliente=="oficina",]$cod_persona))` clientes** que están identificados como contratación en oficina completaron el formulario pero **NO** están dentro del proceso de contratación digital. 
+Es posible que rellenaran el formulario y además acudieran a una sucursal y sea esta última la que realice la contratación.
+
+### Conclusiones sobre el ROPO
+
+A modo de resumen para el peridodo de 01/10/2014 a 31/12/2014: 
+
+* **`r clientes_ropo` habían navegado por la web** por páginas relacionadas con hipoteca (simulador, calculadora, formulario) pero terminan contratando en oficina. Sobre el total de 
+ **`r sum(clientes_hipoteca$tipo=="oficina")` clientes** identificados esto representa el **`r pct_ropo`** de los clientes que contratan por oficina. 
+* **`r clientes_ropo_ini`** de estos clientes incluso **habían comenzando el formulario pero lo abandonan** sin completarlo. Por lo tanto podemos decir que el **`r paste0(round(clientes_ropo_ini/sum(clientes_hipoteca$tipo=="oficina")*100,1),'%')`** de los clientes que contratan en oficina habían iniciado el formulario en la web pero no lo cumplimentan.
+* En esta tabla vemos cuál es el paso más avanzando al que llega cada uno de estos clientes antes de abandonar. 
+
+ 
+```{r contenidoNav, results='asis', tidy=FALSE, echo=FALSE, fig.width=8}
+# Reorder factor
+# nav_hipotecas$contenido <- as.factor(nav_hipotecas$contenido)
+# 
+# nav_hipotecas$contenido <- factor(nav_hipotecas$contenido, levels=c("other","INFO","SIMULA","CALCULA","INICIO","CONFIRMA"))
+# 
+# 
+# Fases.cliente <- nav_hipotecas[ nav_hipotecas$tipo_cliente=="oficina", list( clientes = length(unique(cod_persona)) ), by = contenido][order(contenido)]
+# 
+Vis_fase_formulario<- gvisTable(Pasos.formulario, 
+                              options=list( title="Navegacion clientes formulario",
+                                            'align'="center"), chartid="FormularioFase")
+#plot(Vis_fase_formulario)
+print(Vis_fase_formulario, 'chart')
+# sum(clientes_hipoteca$tipo=="oficina")
+# sum(clientes_hipoteca$tipo=="bbva.es")
+# 
+# Vis_tipo_propuesta_CMC <- gvisTable(data.frame(Fases.cliente[-1,]), 
+#                               options=list( title="Navegacion clientes oficina"), chartid="NavegacionFase")
+# #plot(Vis_tipo_propuesta_CMC)
+# print(Vis_tipo_propuesta_CMC, 'chart')
+```
+
+
+* **`r sum(clientes.formulario$nuevo)`** son **nuevos clientes**, es decir un **`r paste( round(sum(clientes.formulario$nuevo)/clientes_ropo_ini*100,1),'%')`** de los que contratan hipoteca en oficina y pasaron en algún momento por el formulario de la web son nuevos clientes del banco. Esto representa **`r paste( round(sum(clientes.formulario$nuevo)/sum(clientes_hipoteca$tipo=="oficina")*100,1),'%')`** del total de contrataciones en oficina (`r sum(clientes_hipoteca$tipo=="oficina")`).
+
+* **Reparto total de nuevas contrataciones de hipotecas en el periodo 01/10/2014 a 31/12/2014**
+ 
+```{r procedenciaClientes, results='asis', tidy=FALSE, echo=FALSE, fig.align='center'}
+
+clientes_net <- length(clientes_CMC$cod_persona)
+clientes_ofi <- sum(clientes_hipoteca$tipo=="oficina") - clientes_ropo
+
+procedencia_clientes <- rbind(clientes_ofi,clientes_ropo - sum(Pasos.formulario$Clientes), data.frame(Pasos.formulario$Clientes), clientes_net )
+row.names(procedencia_clientes) <- c("OFICINA: ", "ROPO: oficina - solo navega web (hipotecario) sin formulario" , paste("ROPO form", as.character(Pasos.formulario[,1])),"NET: contrata por bbva.es")
+names(procedencia_clientes) <- "clientes"
+procedencia_clientes[,2] <- round(procedencia_clientes$clientes/sum(procedencia_clientes$clientes)*100,1)
+names(procedencia_clientes) <-c("clientes", "% clientes")
+
+procedencia_clientes <- cbind(row.names(procedencia_clientes), procedencia_clientes)
+Vis_procedencia_clientes <- gvisPieChart(data.frame(procedencia_clientes), 
+                      options=list(
+                        width=1000,
+                        height=500,
+                        title="ROPO clientes que contratan hipoteca",
+                        legend="{position: 'left', textStyle: {color: 'blue', fontSize: 12}}",
+                        pieResidueSliceLabel = "ROPO: Otros pasos del formulario",
+                        pieHole=0.5), chartid="procedencia_clientes")
+plot(Vis_procedencia_clientes)
+
+```
+
+Explicación de la legenda del gráfico previo:
+
+* **OFICINA**: Contrata por la oficina y no se ha detectado navegación por contenido hipotecario en la web por parte del cliente, por supuesto tampoco entra al formulario.
+* **ROPO: oficina - solo navega web (hipotecario) sin formulario**: Aquellos clientes que contratan por la oficina y han navegador por la web en las secciones relacionadas con hipoteca (simulador, calculador, etc.) pero **NO entran en el formulario**.
+* **ROPO form** clientes que contratan en la oficina pero que han entrado en el formlario y han llegado hasta el paso X indicado (también ha podido navegador por contenido hipotecario pero lo que prima es la entrada en el formulario para caer en este grupo),
+* **NET: contrata por bbva.es** terminan en el formulario en la web y terminan contratando siguiendo el proceso natural desde la web. 
+
+
+```{r echo=FALSE}
+# Update clientes_hipoteca to have all info in the same table
+
+clientes_hipoteca <- clientes_hipoteca[, navega   := ifelse( clientes_hipoteca$cod_persona %in% nav_hipotecas[nav_hipotecas$contenido!="other"
+                                                                                                               & nav_hipotecas$tipo_cliente=="oficina", ]$cod_persona, TRUE, FALSE)]
+clientes_hipoteca <- clientes_hipoteca[, calcula  := ifelse( clientes_hipoteca$cod_persona %in% nav_hipotecas[nav_hipotecas$contenido=="CALCULA"
+                                                                                                               & nav_hipotecas$tipo_cliente=="oficina", ]$cod_persona, TRUE, FALSE)]
+clientes_hipoteca <- clientes_hipoteca[, simula   := ifelse( clientes_hipoteca$cod_persona %in% nav_hipotecas[nav_hipotecas$contenido=="SIMULA"
+                                                                                                               & nav_hipotecas$tipo_cliente=="oficina", ]$cod_persona, TRUE, FALSE)]
+clientes_hipoteca <- clientes_hipoteca[, ini_form := ifelse( clientes_hipoteca$cod_persona %in% nav_hipotecas[nav_hipotecas$contenido=="INICIO"
+                                                                                                               & nav_hipotecas$tipo_cliente=="oficina", ]$cod_persona, TRUE, FALSE)]
+clientes_hipoteca <- clientes_hipoteca[, info     := ifelse( clientes_hipoteca$cod_persona %in% nav_hipotecas[nav_hipotecas$contenido=="INFO"
+                                                                                                               & nav_hipotecas$tipo_cliente=="oficina", ]$cod_persona, TRUE, FALSE)]
+clientes_hipoteca <- clientes_hipoteca[, fin_form := ifelse( clientes_hipoteca$cod_persona %in% nav_hipotecas[nav_hipotecas$contenido=="CONFIRMA"
+                                                                                                               & nav_hipotecas$tipo_cliente=="oficina", ]$cod_persona, TRUE, FALSE)]
+
+clientes_hipoteca <- suppressMessages( join(clientes_hipoteca, clientes.formulario) )
+```
+
+```{r campaigns, echo=FALSE, cache=TRUE, results=FALSE, eval=TRUE}
+
+campanas <- qimpala("select distinct cast(COM.cod_persona as int) as cod_persona from sinfo_master.oportunidad_comercial COM
+LEFT OUTER join sinfo_master.acciones_comerciales ACC
+on(COM.cod_acom=ACC.cod_acom)
+where  fap_acom > '2014-09-01' and  fvt_acom < '2015-01-31'
+and cast(COM.cod_agruprod as int) = 462")
+
+#1.434.760 de clientes impactados en campañas de hipotecario
+
+propuestasCMC_campanas <- merge(campanas, propuestas_CMC, by="cod_persona") 
+
+#length(unique(propuestas_CMC$cod_persona))
+#136 formularios confirmados en CMC
+
+
+
+``````
+
+### IMPACTO EN CAMPAÑAS
+
+Detectemos en número de clientes ROPO que ha sido impactado digitalmente del total de los que han completado el formulario online.
+
+De los **136 formularios confirmados online** según el CMC, **132 clientes habían sido impactados** por alguna campaña de Hipotecario entre Septiembre 2014 y Enero 2015.
+Conclusión: El **97% de los clientes que han completado el formulario online había sido impactado por alguna campaña de marketing de hipotecario**
+
+
+```{r bbvacontigo, echo=FALSE, cache=TRUE, results=FALSE, eval=TRUE}
+
+#1706 contrataciones de prestamos a traves de BBVAcontigo entre Octubre 2014 y Enero 2014
+
+bbvacontigo <- qimpala("select distinct cod_pers_trs  from da_pro.transacciones_por_canal TXC
+where cast(cod_geve_trn as int) = 3
+and cast(cod_serv_dv as int) = 74
+and cast(cod_eve_trn as int) in (239)
+and cast(TXC.partition_id as int) in (20141231, 20141130, 20141031, 20150131)
+and SUBSTR(CAST(fec_soli_trn AS STRING),1,10)  between DATE_SUB('2015-01-31', 123) AND '2015-01-31'")
+
+#length(unique(bbvacontigo$cod_pers_trs))
+bbvacontigo_t <- transform(bbvacontigo, cod_pers_trs= as.integer(cod_pers_trs))
+propuestas_CMC_t <- transform(propuestas_CMC, cod_pers_trs = as.integer(cod_persona))
+
+# merge(bbvacontigo_t, propuestas_CMC_t, by="cod_pers_trs")
+#De las puestas en vigor CMC ninguno ha llamado a través de la oficina.
+
+
+
+### De las contrataciones del BBVAcontigo, ¿hay clientes que han brujuleado por contenido hipotecario, simulado o calculado?
+nav_hipotecas_t <- transform(nav_hipotecas, cod_pers_trs = as.integer(client_id))
+
+#length(unique(nav_hipotecas$client_id))
+
+bbvacontigo_nav_hipotecas <- merge(bbvacontigo_t, nav_hipotecas_t, by="cod_pers_trs")
+
+#length(unique(bbvacontigo_nav_hipotecas$cod_pers_trs))
+#solo 6 de los 1706 clientes que han contratado el prestamo a través de BBVACONTIGO han brujuleado por la net
+#(un 0,3%)
+
+
+#unique(subset(bbvacontigo_nav_hipotecas, cod_pers_trs == 20680299, select=("contenido")))
+
+
+
+``````
+
+### GESTOR BBVA CONTIGO
+
+¿Cuántos clientes que han realizado la contratación de préstamos BBVA CONTIGO han brujuleado antes por la net bbva.es?
+
+Sólo **6** personas de las que han contratado a través de BBVA contigo han brujuleado antes por la NET (un **0,3%**).
+
+ 
+### journeys de navegación
+ 
+A continuación podemos ver una representación de los **"journeys"** de navegación que han hecho los clientes. 
+Hay que tener en cuenta que en esta representación no se están teniendo en cuenta caminos repetidos ni realmientaciones. Es decir, si un cliente Simula-Calcula-Simula de nuevo- Rellena el formulario estaría contando como Simula-Calcula-Formulario. De esta manera evitamos que los caminos sean excesivamente largos y prácticamente irrepresentables. 
+ 
+###### Clientes que contratan por la web
+<br>
+
+
+```{r omnitureHipotecarioWeb, results='asis', tidy=FALSE, echo=FALSE, fig.align='center',cache=TRUE, eval= TRUE}
+# 
+  
+# create client journeys by concatenating 'contenido' information. 
+journeys <- nav_hipotecas[ contenido!='CONFIRMA'  & contenido!='other' , list( nav = paste0(unique(contenido), collapse=" - "),
+                                                                               tipo = max(tipo_cliente)) , by = cod_persona]
+paths <- journeys[, list( clientes_ofi=sum(tipo=="oficina"), 
+                          clientes_web=sum(tipo=="bbva.es")) , by=nav]
+
+# Creating data.frame with content information path
+df.paths <- data.frame(data.frame(row.names=1:dim(paths)[1]))
+for (k in 1:(length(unique(nav_hipotecas$contenido))-2)) {
+  df.paths <- cbind(df.paths, data.frame( sapply( strsplit(paths$nav,split=" - ") , function (x) ifelse( is.na(x[k]), "FORMULARIO", paste(k, x[k]) ))))
+}
+
+df.paths <- cbind(df.paths, "FORMULARIO")
+df.paths <- cbind(df.paths , data.frame(paths$clientes_ofi ) )
+df.paths <- cbind(df.paths , data.frame(paths$clientes_web ) )
+
+names(df.paths) <- c("paso", "paso", "paso", "paso","paso","num_clientes_ofi","num_clientes_bbva.es")
+
+edgelist <- data.table( rbind( df.paths[ , c(1,2,6,7)] , df.paths[ , c(2,3,6,7)] , df.paths[ , c(3,4,6,7)], df.paths[ , c(4,5,6,7)] )  ) 
+
+edgelist <- edgelist[, list( num_clientes_ofi = sum(num_clientes_ofi), 
+                             num_clientes_bbva.es = sum(num_clientes_bbva.es)), by = c("paso", "paso.1")]
+edgelist <- edgelist[ edgelist$paso != "FORMULARIO",  ]
+
+
+Sankey_web <- gvisSankey(edgelist[,-3, with=FALSE], from="paso", to="paso.1", weight="num_clientes_web",
+                     options=list(
+                           width= 1000,
+                           height= 700, 
+                           sankey="{link: { color: {stroke: 'black', strokeWidth: 1 } },
+                                    node: { color: { fill: '#871b47'},
+                                            nodePadding: 80 ,
+                                            label: { fontName: 'Times-Roman',
+                                                     fontSize: 12,
+                                                     bold: true,
+                                                     italic: false } } }"))
+
+plot(Sankey_web)
+
+```
+
+<br>
+ 
+###### Clientes que contratan por oficina pero también se informan en la web
+ 
+<br>
+
+```{r omnitureHipotecarioOFi, results='asis', tidy=FALSE, echo=FALSE, fig.align='center',cache=TRUE, eval= TRUE}
+#
+
+edgelist[edgelist$paso.1=="FORMULARIO",]$paso.1<-"OFICINA"
+
+Sankey_ofi <- gvisSankey(edgelist[,-4, with=FALSE], from="paso", to="paso.1", weight="num_clientes_ofi",
+                     options=list(
+                           width= 1000,
+                           height= 700, 
+                           sankey="{link: { color: {stroke: 'black', strokeWidth: 1 } },
+                                    node: { color: { fill: '#871b47'},
+                                            nodePadding: 80 ,
+                                            label: { fontName: 'Times-Roman',
+                                                     fontSize: 12,
+                                                     bold: true,
+                                                     italic: false } } }"))
+
+plot(Sankey_ofi)
+```
