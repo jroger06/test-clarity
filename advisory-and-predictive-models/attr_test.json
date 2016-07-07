@@ -1,0 +1,18 @@
+{
+    "category": "c1",
+    "class": "cli0182",
+    "closing_date": "%monthly_closing_date%",
+    "description": "asdad",
+    "head": {
+        "auto_write": true,
+        "meta_version": "1.0",
+        "release": false,
+        "script_environment": "clarity",
+        "script_language": "Python"
+    },
+    "keywords": "",
+    "title": "asdasd",
+    "name": "attr_test",
+    "transaction_end_date": "%monthly_closing_date%->last",
+    "transaction_start_date": "%monthly_closing_date%-P5M->first"
+}
