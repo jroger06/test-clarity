@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-"""pwnzu_t_oogvf_wjsjtxwhqs generator."""
+"""hvqsg_os_eympusdaab_yqrtdpehmg generator."""
 
 # Import all the modules you need here:
 import clarity
